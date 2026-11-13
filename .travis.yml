@@ -81,3 +81,23 @@ deploy:
     branches: 
       only:
       - active-devel 
+
+jobs:
+  include:
+    - name: "Configuration storage upgrade check"
+      # the firmware builds above are the default job, this one only checks the configuration
+      # storage, and it must not deploy, so it is kept out of tag builds
+      if: tag IS blank
+      install: skip
+      script:
+        - cd mchf-eclipse
+        - |
+          # run the check only when one of the sources it reads has changed, if the range of
+          # commits is unknown (shallow clone, first push) it runs anyway
+          if git diff --name-only "$TRAVIS_COMMIT_RANGE" > /tmp/changed_files 2>/dev/null; then
+            if ! grep -qE '^mchf-eclipse/(drivers/ui/ui_configuration\.(c|h)|drivers/ui/radio_management\.h|drivers/audio/audio_driver\.h|Makefile)$|^mchf-eclipse/support/config_upgrade/' /tmp/changed_files; then
+              echo "configuration sources unchanged, skipping the check"
+              travis_terminate 0
+            fi
+          fi
+          make config-upgrade-check
