@@ -395,6 +395,18 @@ gcc-version:
 	# the build will be done using
 	$(CC) --version | grep gcc
 
+# host tools of the checks which run on the build machine, not on the transceiver
+HOSTCC ?= gcc
+HOSTPYTHON ?= python3
+
+.PHONY: config-upgrade-check
+config-upgrade-check:  
+	# check which values a configuration stored by an older build receives as defaults, see support/config_upgrade
+	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/gen_config_upgrade.py
+	@$(HOSTCC) -O2 -Wall -o $(ROOTLOC)/support/config_upgrade/config_upgrade $(ROOTLOC)/support/config_upgrade/config_upgrade.c
+	@$(ROOTLOC)/support/config_upgrade/config_upgrade
+	@$(RM) $(ROOTLOC)/support/config_upgrade/config_upgrade
+
 handbook-test:  
 	# extract UI Menu Descriptor data from source code and generate graph + table for handbook in different directory for test purposes
 	@$(ROOTLOC)/support/ui/menu/mk-menu-handbook test
