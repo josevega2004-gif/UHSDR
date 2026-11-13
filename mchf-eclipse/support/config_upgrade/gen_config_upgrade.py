@@ -27,6 +27,7 @@
 #
 
 import re
+import sys
 
 from pathlib import Path
 
@@ -69,6 +70,34 @@ for m in re.finditer(r'\{\s*ConfigEntry_UInt8\s*,\s*(EEPROM_AM_\w+)\s*,\s*&ts\.(
     entries.append((var, idname, vals[idname], num(d), num(lo), num(hi)))
 
 first_unused = vals['EEPROM_FIRST_UNUSED']
+
+# how many value slots the host image provides, must cover every id used below
+IMAGE_SLOTS = 1024
+
+# guard against a silently empty or wrong parse: a passing check with no entries means nothing
+if not entries:
+    sys.exit('no ConfigEntry_UInt8 / EEPROM_AM_ entries matched the table in ui_configuration.c, '
+             'the table layout may have changed, update the regex in gen_config_upgrade.py')
+for var, idname, eid, d, lo, hi in entries:
+    if eid >= first_unused:
+        sys.exit('%s has id %d but EEPROM_FIRST_UNUSED is only %d, fix ui_configuration.h' % (idname, eid, first_unused))
+    if eid >= IMAGE_SLOTS:
+        sys.exit('%s has id %d which does not fit the host image of %d slots' % (idname, eid, IMAGE_SLOTS))
+
+# a value the older firmware stored in the demo images, different from the default so that the
+# check can tell a loaded value apart from a defaulted one
+demo_values = { 'am_carrier_level': 80, 'am_tx_sideband': 2, 'am_carrier_pep_hold': 10,
+                'am_carrier_pep_dim': 0, 'am_carrier_pep_target': 8, 'am_carrier_pep_warn': 2 }
+for var, idname, eid, d, lo, hi in entries:
+    if var not in kinds:
+        sys.exit("add '%s' (%s) to the kinds table in gen_config_upgrade.py" % (var, idname))
+    if var not in demo_values:
+        sys.exit("add a demo value for '%s' (%s) to demo_values in gen_config_upgrade.py" % (var, idname))
+
+# the value ids the upstream build (without any of the AM additions) ended with, taken from its
+# ui_configuration.h EEPROM_FIRST_UNUSED, the fork adds its own ids above this
+upstream_first_unused = 375
+
 print('parsed from the repository:')
 for var, idname, eid, d, lo, hi in entries:
     print('  %-22s %-26s id %3d  default %3d  range %3d..%3d' % (var, idname, eid, d, lo, hi))
@@ -94,7 +123,7 @@ A('};')
 A('static const unsigned entry_count = sizeof(entries)/sizeof(entries[0]);')
 A('')
 A('typedef enum { STORE_I2C, STORE_FLASH } store_t;')
-A('typedef struct { uint16_t value[1024]; bool present[1024]; } image_t;')
+A('typedef struct { uint16_t value[%d]; bool present[%d]; } image_t;' % (IMAGE_SLOTS, IMAGE_SLOTS))
 A('')
 A('/* a value an older firmware never stored is simply erased in the image */')
 A('static void erase(image_t* img, uint16_t id)')
@@ -104,7 +133,10 @@ A('    img->present[id] = false;')
 A('}')
 A('')
 A('/* mirror of UiReadSettingEEPROM_UInt8(): a failed read, an out of range value or a requested')
-A('   default loads the default, everything else is used as stored */')
+A('   default loads the default, everything else is used as stored.')
+A('   Note: the firmware truncates the stored 16 bit value to uint8 BEFORE the range check, this')
+A('   mirror checks the 16 bit value. The two agree as long as the maximum stays below 255, the')
+A('   firmware default value is always in range and the erased value is 0xFFFF */')
 A('static uint8_t read_uint8(const image_t* img, const entry_t* e, bool load_default, store_t store)')
 A('{')
 A('    if (store == STORE_FLASH && !img->present[e->id])')
@@ -177,8 +209,7 @@ A('    {')
 A('        img.value[i] = 0xFFFF;          /* erased storage reads as 0xFFFF */')
 A('    }')
 for var, idname, eid, d, lo, hi in entries:
-    value = { 'am_carrier_level': 80, 'am_tx_sideband': 2, 'am_carrier_pep_hold': 10,
-              'am_carrier_pep_dim': 0, 'am_carrier_pep_target': 8, 'am_carrier_pep_warn': 2 }[var]
+    value = demo_values[var]
     A('    img.present[%d] = true; img.value[%d] = %d;   /* %s */' % (eid, eid, value, idname))
 A('')
 ids = {var: eid for var, idname, eid, d, lo, hi in entries}
@@ -191,13 +222,36 @@ A('    image_t upstream          = before_meter;  /* no AM additions at all */')
 for var in ('am_carrier_level', 'am_tx_sideband'):
     A('    erase(&upstream, %d);   /* %s */' % (ids[var], var))
 A('')
-A('    run("upstream configuration, none of the AM additions present", &upstream, 375, STORE_I2C, false);')
+A('    run("upstream configuration, none of the AM additions present", &upstream, %du, STORE_I2C, false);' % upstream_first_unused)
 A('    run("fork build before the meter settings", &before_meter, %d, STORE_I2C, false);' % ids['am_carrier_pep_hold'])
 A('    run("fork build before the warning delay", &before_warn, %d, STORE_I2C, false);' % ids['am_carrier_pep_warn'])
 A('    run("current build, everything stored", &img, FIRST_UNUSED, STORE_I2C, false);')
 A('    run("current build on flash, warning delay never written", &before_warn, FIRST_UNUSED, STORE_FLASH, false);')
 A('    run("factory reset of the current build", &img, FIRST_UNUSED, STORE_I2C, true);')
-A('    return 0;')
+A('')
+A('    /* the self checks which make this program fail, so that CI catches a broken configuration */')
+A('    int rc = 0;')
+A('    if (entry_count == 0)')
+A('    {')
+A('        printf("CHECK FAILED: no entries parsed, the generator matched nothing\\n");')
+A('        rc = 1;')
+A('    }')
+A('    for (unsigned i = 0; i < entry_count; i++)')
+A('    {')
+A('        const entry_t* e = &entries[i];')
+A('        if (e->def < e->min || e->def > e->max)')
+A('        {')
+A('            printf("CHECK FAILED: %s default %d is outside its range %d..%d\\n", e->idname, e->def, e->min, e->max);')
+A('            rc = 1;')
+A('        }')
+A('        if (e->id >= FIRST_UNUSED)')
+A('        {')
+A('            printf("CHECK FAILED: %s id %u is not below EEPROM_FIRST_UNUSED %u\\n", e->idname, e->id, FIRST_UNUSED);')
+A('            rc = 1;')
+A('        }')
+A('    }')
+A('    if (rc == 0) printf("all self checks passed\\n");')
+A('    return rc;')
 A('}')
 out_file = Path(__file__).resolve().parent / 'config_upgrade.c'
 open(out_file,'w').write('\n'.join(L)+'\n')

@@ -402,10 +402,13 @@ HOSTPYTHON ?= python3
 .PHONY: config-upgrade-check
 config-upgrade-check:  
 	# check which values a configuration stored by an older build receives as defaults, see support/config_upgrade
+	# run from the mchf-eclipse directory, the paths rely on the default ROOTLOC of this makefile
 	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/gen_config_upgrade.py
 	@$(HOSTCC) -O2 -Wall -o $(ROOTLOC)/support/config_upgrade/config_upgrade $(ROOTLOC)/support/config_upgrade/config_upgrade.c
-	@$(ROOTLOC)/support/config_upgrade/config_upgrade
-	@$(RM) $(ROOTLOC)/support/config_upgrade/config_upgrade
+	# remove the binary even when the check fails, but keep its exit code
+	@$(ROOTLOC)/support/config_upgrade/config_upgrade; rc=$$?; \
+	 $(RM) $(ROOTLOC)/support/config_upgrade/config_upgrade; \
+	 exit $$rc
 
 handbook-test:  
 	# extract UI Menu Descriptor data from source code and generate graph + table for handbook in different directory for test purposes

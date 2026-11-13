@@ -29,7 +29,10 @@ static void erase(image_t* img, uint16_t id)
 }
 
 /* mirror of UiReadSettingEEPROM_UInt8(): a failed read, an out of range value or a requested
-   default loads the default, everything else is used as stored */
+   default loads the default, everything else is used as stored.
+   Note: the firmware truncates the stored 16 bit value to uint8 BEFORE the range check, this
+   mirror checks the 16 bit value. The two agree as long as the maximum stays below 255, the
+   firmware default value is always in range and the erased value is 0xFFFF */
 static uint8_t read_uint8(const image_t* img, const entry_t* e, bool load_default, store_t store)
 {
     if (store == STORE_FLASH && !img->present[e->id])
@@ -119,11 +122,34 @@ int main(void)
     erase(&upstream, 377);   /* am_carrier_level */
     erase(&upstream, 378);   /* am_tx_sideband */
 
-    run("upstream configuration, none of the AM additions present", &upstream, 375, STORE_I2C, false);
+    run("upstream configuration, none of the AM additions present", &upstream, 375u, STORE_I2C, false);
     run("fork build before the meter settings", &before_meter, 379, STORE_I2C, false);
     run("fork build before the warning delay", &before_warn, 382, STORE_I2C, false);
     run("current build, everything stored", &img, FIRST_UNUSED, STORE_I2C, false);
     run("current build on flash, warning delay never written", &before_warn, FIRST_UNUSED, STORE_FLASH, false);
     run("factory reset of the current build", &img, FIRST_UNUSED, STORE_I2C, true);
-    return 0;
+
+    /* the self checks which make this program fail, so that CI catches a broken configuration */
+    int rc = 0;
+    if (entry_count == 0)
+    {
+        printf("CHECK FAILED: no entries parsed, the generator matched nothing\n");
+        rc = 1;
+    }
+    for (unsigned i = 0; i < entry_count; i++)
+    {
+        const entry_t* e = &entries[i];
+        if (e->def < e->min || e->def > e->max)
+        {
+            printf("CHECK FAILED: %s default %d is outside its range %d..%d\n", e->idname, e->def, e->min, e->max);
+            rc = 1;
+        }
+        if (e->id >= FIRST_UNUSED)
+        {
+            printf("CHECK FAILED: %s id %u is not below EEPROM_FIRST_UNUSED %u\n", e->idname, e->id, FIRST_UNUSED);
+            rc = 1;
+        }
+    }
+    if (rc == 0) printf("all self checks passed\n");
+    return rc;
 }
