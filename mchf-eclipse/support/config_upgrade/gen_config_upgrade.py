@@ -94,8 +94,10 @@ for var, idname, eid, d, lo, hi in entries:
     if var not in demo_values:
         sys.exit("add a demo value for '%s' (%s) to demo_values in gen_config_upgrade.py" % (var, idname))
 
-# the value ids the upstream build (without any of the AM additions) ended with, taken from its
-# ui_configuration.h EEPROM_FIRST_UNUSED, the fork adds its own ids above this
+# a hypothetical early build of the current (post renumbering) layout which stored 375 entries.
+# Real configurations from the previous layout hold 432 entries and are not identified through
+# the stored entry count at all, the firmware recognizes them by the missing layout marker and
+# reads them through the address translation of UiConfiguration_LayoutMigrationRequired.
 upstream_first_unused = 375
 
 print('parsed from the repository:')
@@ -222,7 +224,7 @@ A('    image_t upstream          = before_meter;  /* no AM additions at all */')
 for var in ('am_carrier_level', 'am_tx_sideband'):
     A('    erase(&upstream, %d);   /* %s */' % (ids[var], var))
 A('')
-A('    run("upstream configuration, none of the AM additions present", &upstream, %du, STORE_I2C, false);' % upstream_first_unused)
+A('    run("early build of the current layout, none of the AM additions present", &upstream, %du, STORE_I2C, false);' % upstream_first_unused)
 A('    run("fork build before the meter settings", &before_meter, %d, STORE_I2C, false);' % ids['am_carrier_pep_hold'])
 A('    run("fork build before the warning delay", &before_warn, %d, STORE_I2C, false);' % ids['am_carrier_pep_warn'])
 A('    run("current build, everything stored", &img, FIRST_UNUSED, STORE_I2C, false);')

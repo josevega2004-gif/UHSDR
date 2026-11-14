@@ -216,9 +216,11 @@ static bool UiConfiguration_LayoutMigrationRequired(void)
     }
     if (ConfigStorage_ReadVariable(EEPROM_CONFIG_LAYOUT_VERSION, &layout_version) != HAL_OK)
     {
-        // the marker may still be stored at the address used before the AM carrier level was added,
-        return true;                                        // no marker was ever stored
+        return true;                                        // flash storage without a stored marker: the previous firmware never wrote one
     }
+    // an I2C configuration written by the previous layout has some other value here (the address
+    // was EEPROM_AGC_WDSP_THRESH, which only ever holds values up to 120), a fresh EEPROM reads
+    // 0xFFFF, neither can be the magic, so only a marker written by the current layout stops this
     return layout_version != CONFIG_LAYOUT_VERSION_MAGIC;
 }
 

@@ -122,7 +122,7 @@ int main(void)
     erase(&upstream, 377);   /* am_carrier_level */
     erase(&upstream, 378);   /* am_tx_sideband */
 
-    run("upstream configuration, none of the AM additions present", &upstream, 375u, STORE_I2C, false);
+    run("early build of the current layout, none of the AM additions present", &upstream, 375u, STORE_I2C, false);
     run("fork build before the meter settings", &before_meter, 379, STORE_I2C, false);
     run("fork build before the warning delay", &before_warn, 382, STORE_I2C, false);
     run("current build, everything stored", &img, FIRST_UNUSED, STORE_I2C, false);
