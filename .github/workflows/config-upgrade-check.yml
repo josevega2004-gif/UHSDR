@@ -1,0 +1,39 @@
+name: Configuration storage upgrade check
+
+on:
+  push:
+    branches: [active-devel]
+    paths:
+      - "mchf-eclipse/drivers/ui/ui_configuration.c"
+      - "mchf-eclipse/drivers/ui/ui_configuration.h"
+      - "mchf-eclipse/drivers/ui/radio_management.h"
+      - "mchf-eclipse/drivers/audio/audio_driver.h"
+      - "mchf-eclipse/Makefile"
+      - "mchf-eclipse/support/config_upgrade/**"
+      - ".github/workflows/config-upgrade-check.yml"
+  pull_request:
+    paths:
+      - "mchf-eclipse/drivers/ui/ui_configuration.c"
+      - "mchf-eclipse/drivers/ui/ui_configuration.h"
+      - "mchf-eclipse/drivers/ui/radio_management.h"
+      - "mchf-eclipse/drivers/audio/audio_driver.h"
+      - "mchf-eclipse/Makefile"
+      - "mchf-eclipse/support/config_upgrade/**"
+      - ".github/workflows/config-upgrade-check.yml"
+
+jobs:
+  config-upgrade-check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the upgrade check
+        working-directory: mchf-eclipse
+        run: make config-upgrade-check
+
+      - name: Fail if the committed harness is stale
+        run: |
+          git diff --exit-code -- mchf-eclipse/support/config_upgrade/config_upgrade.c || {
+            echo "::error::config_upgrade.c does not match the firmware sources, run make config-upgrade-check and commit the regenerated file"
+            exit 1
+          }

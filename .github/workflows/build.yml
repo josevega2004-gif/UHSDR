@@ -1,0 +1,147 @@
+name: Build firmware
+
+on:
+  push:
+    branches: [active-devel]
+    tags: ["*"]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fw-h7
+            dir: fw-h7
+            target: all
+            buildfor: "H7"
+            trx_id: i40h7
+            trx_name: OVI40H7
+            configflags: "-DUI_BRD_OVI40 -DRF_BRD_MCHF -DRF_BRD_OVI40"
+          - name: bl-h7
+            dir: bl-h7
+            target: bootloader
+            buildfor: "H7"
+            trx_id: i40h7
+            trx_name: OVI40H7
+            configflags: "-DUI_BRD_OVI40"
+          - name: fw-f7
+            dir: fw-f7
+            target: all
+            buildfor: "F7"
+            trx_id: ovi40
+            trx_name: OVI40
+            configflags: "-DUI_BRD_OVI40 -DRF_BRD_MCHF -DRF_BRD_OVI40"
+          - name: bl-f7
+            dir: bl-f7
+            target: bootloader
+            buildfor: "F7"
+            trx_id: ovi40
+            trx_name: OVI40
+            configflags: "-DUI_BRD_OVI40"
+          - name: fw-f7-lapwing
+            dir: fw-f7-lapwing
+            target: all
+            buildfor: "F7"
+            trx_id: lapf7
+            trx_name: LAPWING
+            configflags: "-DUI_BRD_OVI40 -DRF_BRD_LAPWING"
+          - name: fw-f4
+            dir: fw-f4
+            target: all
+            buildfor: ""
+            trx_id: ""
+            trx_name: ""
+            configflags: "-DUI_BRD_MCHF -DRF_BRD_MCHF"
+          - name: bl-f4
+            dir: bl-f4
+            target: bootloader
+            buildfor: ""
+            trx_id: ""
+            trx_name: ""
+            configflags: "-DUI_BRD_MCHF"
+          - name: fw-f4-ili9486-480
+            dir: fw-f4-ili9486-480
+            target: all
+            buildfor: ""
+            trx_id: ""
+            trx_name: ""
+            configflags: "-DUI_BRD_MCHF -DRF_BRD_MCHF -DEXTERNAL_USE_GFX_CONFIG -DUSE_DISP_480_320 -DUSE_GFX_ILI9486"
+          - name: fw-f4-small
+            dir: fw-f4-small
+            target: all
+            buildfor: ""
+            trx_id: ""
+            trx_name: ""
+            configflags: "-DUI_BRD_MCHF -DRF_BRD_MCHF -DIS_SMALL_BUILD"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install 32 bit support libraries
+        run: sudo apt-get update && sudo apt-get install -y libc6-i386
+
+      - name: Cache the ARM toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/gcc-arm-none-eabi-10-2020-q4-major
+          key: gcc-arm-none-eabi-10-2020-q4-major-linux
+
+      - name: Download the ARM toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          curl -sL https://developer.arm.com/-/media/Files/downloads/gnu-rm/10-2020q4/gcc-arm-none-eabi-10-2020-q4-major-x86_64-linux.tar.bz2 \
+            | tar xj -C $HOME
+
+      - name: Build ${{ matrix.name }}
+        working-directory: mchf-eclipse
+        run: |
+          mkdir -p build/${{ matrix.dir }}
+          cd build/${{ matrix.dir }}
+          EXTRA=""
+          [ -n "${{ matrix.buildfor }}" ] && EXTRA="$EXTRA BUILDFOR=${{ matrix.buildfor }}"
+          [ -n "${{ matrix.trx_id }}" ] && EXTRA="$EXTRA TRX_ID=${{ matrix.trx_id }}"
+          [ -n "${{ matrix.trx_name }}" ] && EXTRA="$EXTRA TRX_NAME=${{ matrix.trx_name }}"
+          make -j2 -f ../../Makefile ROOTLOC=../.. \
+            OPT_GCC_ARM=$HOME/gcc-arm-none-eabi-10-2020-q4-major \
+            CONFIGFLAGS="${{ matrix.configflags }}" $EXTRA ${{ matrix.target }}
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            mchf-eclipse/build/${{ matrix.dir }}/*.bin
+            mchf-eclipse/build/${{ matrix.dir }}/*.dfu
+
+  release:
+    # tag builds only, mirrors the old Travis deploy stage
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+
+      - name: Build the documentation
+        run: |
+          sudo apt-get update && sudo apt-get install -y doxygen graphviz
+          make -C mchf-eclipse docs
+          tar -czf docs.tar.gz -C . docs
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-files/*.bin
+            release-files/*.dfu
+            docs.tar.gz
