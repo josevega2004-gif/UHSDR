@@ -10,6 +10,8 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -123,14 +125,43 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-22.04
+    permissions:
+      # the default workflow token is read only, creating a release needs write access
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
+      # keep one directory per artifact, several variants build a binary of the same name
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          path: release-files
-          merge-multiple: true
+          path: artifacts
+
+      - name: Collect the release files
+        run: |
+          mkdir -p release-files
+          for d in artifacts/*/; do
+            variant=$(basename "$d")
+            case "$variant" in
+              fw-f4|fw-f7|fw-h7|bl-f4|bl-f7|bl-h7)
+                suffix=""
+                ;;
+              *)  # the small, the ili9486 and the lapwing builds are named after the default
+                  # transceiver id as well, so they keep the variant in their name
+                  short=${variant#fw-}
+                  short=${short#f4-}
+                  short=${short#f7-}
+                  suffix="-$short"
+                  ;;
+            esac
+            for f in "$d"*.bin "$d"*.dfu; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f")
+              cp "$f" "release-files/${base%.*}$suffix.${base##*.}"
+            done
+          done
+          echo "release files:"
+          ls -l release-files
 
       - name: Build the documentation
         run: |
