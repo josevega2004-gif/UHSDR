@@ -52,6 +52,12 @@ typedef struct {
     float32_t q;
 } iq_float_t;
 
+// complex sample with named parts, used by the noise reduction buffers
+typedef struct {
+    float32_t real;
+    float32_t imag;
+} comp_float_t;
+
 typedef enum {
     IQ_TRANS_OFF = 0,
     IQ_TRANS_ON,

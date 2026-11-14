@@ -30,7 +30,6 @@
 #include "drivers/audio/audio_driver.h"
 #include "drivers/audio/audio_management.h"
 #include "drivers/audio/cw/cw_gen.h"
-#include "drivers/audio/freedv_uhsdr.h"
 #include "drivers/audio/audio_nr.h"
 
 //cat
@@ -259,7 +258,7 @@ void TransceiverStateInit(void)
     ts.waterfall.scheduler=0;
 
 //    ts.fft_window_type = FFT_WINDOW_DEFAULT;			// FFT Windowing type
-    ts.dvmode = false;							        // disable "DV" mode RX/TX functions by default
+    ts.dvmode = false;							        // no digital codec at startup, the analog audio path is active
 
     ts.txrx_switch_audio_muting_timing = 0;					// timing value used for muting TX audio when keying PTT to suppress "click" or "thump"
     ts.audio_dac_muting_timer = 0;					// timer used for muting TX audio when keying PTT to suppress "click" or "thump"
@@ -418,12 +417,6 @@ int mchfMain(void)
 
     ts.rx_gain[RX_AUDIO_SPKR].value_old = 0;		// Force update of volume control
 
-#ifdef USE_FREEDV
-    FreeDV_Init();
-    // we now try to place a marker after last dynamically
-    // allocated memory
-    Canary_Create();
-#endif
 
     UiDriver_StartUpScreenFinish();
 

@@ -378,5 +378,6 @@ basesw/mcHF/Drivers/CMSIS/DSP_Lib/Source/BasicMathFunctions/arm_sub_f32.c \
 basesw/mcHF/Drivers/CMSIS/DSP_Lib/Source/BasicMathFunctions/arm_sub_q15.c \
 basesw/mcHF/Drivers/CMSIS/DSP_Lib/Source/BasicMathFunctions/arm_sub_q31.c \
 basesw/mcHF/Drivers/CMSIS/DSP_Lib/Source/BasicMathFunctions/arm_sub_q7.c \
- 
 
+# Add the library to the linker flags instead
+# LIBS += /home/janice/STM32Cube/Repository/STM32Cube_FW_F4_V1.21.0/Middlewares/ST/STemWin/Lib/STemWin532_CM4_GCC.a

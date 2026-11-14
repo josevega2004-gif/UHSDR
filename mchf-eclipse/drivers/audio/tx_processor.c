@@ -19,7 +19,6 @@
 #include "audio_management.h" // only for AudioManagement_CalcALCDecay
 #include "rtty.h"
 #include "psk.h"
-#include "freedv_uhsdr.h"
 #include "freq_shift.h"
 #include "cw_gen.h"
 
@@ -587,126 +586,8 @@ static bool TxProcessor_FM(audio_block_t* a_blocks,  iq_buffer_t* iq_buf_p, uint
     return true;
 }
 
-#ifdef USE_FREEDV
-
-/**
- * Runs FreeDV modulation on audio input signal. This signal is correctly shifted away from center frequency by the receive frequency shift both by absolute value and direction
- *
- * @param a_block       audio input buffer (not changed)
- * @param iq_buf        iq output buffer
- * @param blockSize     size of iq / audio buffers
- * @return true unless buffer underrun from the FreeDV generation occurs
- */
-static bool TxProcessor_FreeDV (audio_block_t a_block, iq_buffer_t* iq_buf_p, int16_t blockSize)
-{
-    // Freedv DL2FW
-    static int16_t modulus_Decimate = 0;
-    static int16_t modulus_Interpolate = 0;
-
-    const int32_t factor_Decimate = IQ_SAMPLE_RATE/8000; // 6x @ 48ksps
-    const int32_t factor_Interpolate = AUDIO_SAMPLE_RATE/8000; // 6x @ 48ksps
-
-    static bool bufferFilled = false;
-    bool retval = false;
-
-    // depending on the side band setting we switch the iq buffers accordingly to achieve the right sideband
-    bool is_lsb = RadioManagement_LSBActive(ts.dmod_mode);
-    float32_t* i_buffer = is_lsb ? iq_buf_p->i_buffer : iq_buf_p->q_buffer;
-    float32_t* q_buffer = is_lsb ? iq_buf_p->q_buffer : iq_buf_p->i_buffer;
 
 
-    // we assume the 48khz voice signal in a_buffer has been preprocessed by a decimation filter
-    // BEFORE we decimate !
-    // for decimation-by-6 the stopband frequency is 48/6*2 = 4kHz
-
-    // DOWNSAMPLING
-    for (int k = 0; k < blockSize; k++)
-    {
-        if (modulus_Decimate == 0)  //every 6th sample has to be catched -> downsampling by 6
-        {
-            int16_t sample = ((int32_t)a_block[k])/4;
-            RingBuffer_PutSamples(&fdv_audio_rb,&sample,1);
-        }
-
-        // increment and wrap
-        modulus_Decimate++;
-        if (modulus_Decimate == factor_Decimate)
-        {
-            modulus_Decimate = 0;
-        }
-    }
-
-
-    // we wait for at least two frames being processed until we start transmitting
-    // we could switch to frame plus 1 block to minimize delay
-    if (bufferFilled == false && RingBuffer_GetData(&fdv_iq_rb) > FreeDV_Iq_Get_FrameLen())
-    {
-        bufferFilled = true;
-    }
-
-    if (bufferFilled == true && RingBuffer_GetData(&fdv_iq_rb) >= (modulus_Interpolate == 1?5:6))
-    {
-        // Best thing here would be to use the arm_fir_decimate function! Why?
-        // --> we need phase linear filters, because we have to filter I & Q and preserve their phase relationship
-        // IIR filters are power saving, but they do not care about phase, so useless at this point
-        // FIR filters are phase linear, but need processor power
-        // so we now use the decimation function that upsamples like the code below, BUT at the same time filters
-        // (and the routine knows that it does not have to multiply with 0 while filtering: if we do upsampling and subsequent
-        // filtering, the filter does not know that and multiplies with zero 5 out of six times --> very inefficient)
-        // BUT: we cannot use the ARM function, because decimation factor (6) has to be an integer divide of
-        // block size (which is 32 in our case --> 32 / 6 = non-integer!)
-
-        // UPSAMPLING [by hand]
-        for (int j = 0; j < blockSize; j++) //  now we are doing upsampling by 6
-        {
-            if (modulus_Interpolate == 0) // put in sample pair
-            {
-                fdv_iq_rb_item_t sample;
-                RingBuffer_GetSamples(&fdv_iq_rb, &sample, 1);
-                i_buffer[j] = sample.real;
-                q_buffer[j] = sample.imag;
-            }
-            else // in 5 of 6 cases just stuff in zeros = zero-padding / zero-stuffing
-            {
-                i_buffer[j] = 0;
-                q_buffer[j] = 0;
-            }
-
-            // increment and wrap
-            modulus_Interpolate++;
-            if (modulus_Interpolate == factor_Interpolate)
-            {
-                modulus_Interpolate = 0;
-            }
-        }
-
-        // Add interpolation filter here to suppress alias frequencies
-        // we are upsampling from 8kHz to 48kHz, so we have to suppress all frequencies below 4kHz
-        // our FreeDV signal is centred at 1500Hz ??? and is 1250Hz broad,
-        // so a lowpass filter with cutoff frequency 2400Hz should be fine!
-
-        // INTERPOLATION FILTER [after the interpolation has taken place]
-        // the samples are now in adb.iq.i_buffer and adb.iq.q_buffer, so lets filter them
-        if ( ads.tx_filter_adjusting == 0 )
-        {
-            // disable TX filtering during adjustment
-            arm_fir_f32(&Fir_TxFreeDV_Interpolate_I, i_buffer, i_buffer,blockSize);
-            arm_fir_f32(&Fir_TxFreeDV_Interpolate_Q, q_buffer, q_buffer, blockSize);
-            retval = true; // yes, we have a signal
-        }
-    }
-    else
-    {
-        profileEvent(FreeDVTXUnderrun);
-        bufferFilled = false;
-    }
-
-    return retval;
-}
-#endif
-
-
-#if defined(OBSOLETE_AM_SIDEBAND_CODE)
 /***
  * takes the I Q input buffers containing the I Q audio for a single AM sideband and returns the IQ sideband
  * in the i/q input buffers given as argument.
@@ -714,11 +595,11 @@ static bool TxProcessor_FreeDV (audio_block_t a_block, iq_buffer_t* iq_buf_p, in
 static void TxProcessor_AMSideband(float32_t* i_buffer, float32_t* q_buffer,  const int16_t blockSize) {
 
     // generate AM carrier by applying a "DC bias" to the audio
-    arm_offset_f32(i_buffer, AM_CARRIER_LEVEL, i_buffer, blockSize);
-    arm_offset_f32(q_buffer, (-1 * AM_CARRIER_LEVEL), q_buffer, blockSize);
+    const float32_t am_carrier_level = ((float32_t)AM_CARRIER_LEVEL * (float32_t)ts.am_carrier_level) / 100.0f;
+    arm_offset_f32(i_buffer, am_carrier_level, i_buffer, blockSize);
+    arm_offset_f32(q_buffer, (-1 * am_carrier_level), q_buffer, blockSize);
 
 }
-#endif
 
 /**
  * Generates AM signal. This signal is correctly shifted away from center frequency by the receive frequency shift both by absolute value and direction
@@ -756,38 +637,41 @@ static bool TxProcessor_AM(audio_block_t a_block, iq_buffer_t* iq_buf,  uint16_t
         arm_fir_f32(&Fir_Tx_Hilbert_Q, a_block, iq_buf->q_buffer, blockSize);
 
 
-#if defined(OBSOLETE_AM_SIDEBAND_CODE)
-        // COMMENT:  It would be trivial to add the option of generating AM with just a single (Upper or Lower) sideband since we are generating the two, separately anyway
-        // and putting them back together!  [KA7OEI]
+        // the carrier is derived from AM_CARRIER_LEVEL, the user setting scales it: a lower carrier
+        // leaves more headroom for the modulation peaks before they clip
+        const float32_t am_carrier_level = ((float32_t)AM_CARRIER_LEVEL * (float32_t)ts.am_carrier_level) / 100.0f;
 
-        // temporary buffers;
-        float32_t  i2_buffer[blockSize];
-        float32_t  q2_buffer[blockSize];
-
-
-        arm_negate_f32(iq_buf->i_buffer, q2_buffer, blockSize); // this becomes the q buffer for the upper  sideband
-        arm_negate_f32(iq_buf->q_buffer, i2_buffer, blockSize); // this becomes the i buffer for the upper  sideband
-
-
-        // now generate LSB AM sideband signal
-        AudioDriver_TxProcessorAMSideband(iq_buf->i_buffer, iq_buf->q_buffer, blockSize);
-        // i/q now contain the LSB AM signal
-
-        // now generate USB AM sideband signal
-        AudioDriver_TxProcessorAMSideband(i2_buffer, q2_buffer, blockSize);
-        arm_add_f32(i2_buffer, iq_buf->i_buffer, iq_buf->i_buffer,blockSize);
-        arm_add_f32(q2_buffer, iq_buf->q_buffer, iq_buf->q_buffer,blockSize);
-#else
-        // in place generation of both AM sidebands
-        for (size_t idx = 0; idx < blockSize; idx++)
+        // the pair delivered by the Hilbert transformers (i = 0 degrees, q = -90 degrees) is the upper
+        // sideband, the lower sideband is its swapped pair, exactly as TxProcessor_SSB creates it by
+        // swapping the two filters
+        if (ts.am_tx_sideband == AmSideband_LSB)
         {
-            float32_t i_am = (iq_buf->i_buffer[idx] - iq_buf->q_buffer[idx]) + (2 * AM_CARRIER_LEVEL);
-            float32_t q_am = (iq_buf->q_buffer[idx] - iq_buf->i_buffer[idx]) - (2 * AM_CARRIER_LEVEL);
+            for (size_t idx = 0; idx < blockSize; idx++)
+            {
+                const float32_t i = iq_buf->i_buffer[idx];
 
-            iq_buf->i_buffer[idx] = i_am;
-            iq_buf->q_buffer[idx] = q_am;
+                iq_buf->i_buffer[idx] = iq_buf->q_buffer[idx];
+                iq_buf->q_buffer[idx] = i;
+            }
         }
-#endif
+
+        if (ts.am_tx_sideband == AmSideband_Both)
+        {
+            // in place generation of both AM sidebands
+            for (size_t idx = 0; idx < blockSize; idx++)
+            {
+                float32_t i_am = (iq_buf->i_buffer[idx] - iq_buf->q_buffer[idx]) + (2 * am_carrier_level);
+                float32_t q_am = (iq_buf->q_buffer[idx] - iq_buf->i_buffer[idx]) - (2 * am_carrier_level);
+
+                iq_buf->i_buffer[idx] = i_am;
+                iq_buf->q_buffer[idx] = q_am;
+            }
+        }
+        else
+        {
+            // single sideband AM: the carrier is added to the one sideband, the other one is not generated
+            TxProcessor_AMSideband(iq_buf->i_buffer, iq_buf->q_buffer, blockSize);
+        }
 
         // apply correct translate mode
         FreqShift(iq_buf->i_buffer, iq_buf->q_buffer, blockSize, translate_freq);
@@ -962,13 +846,6 @@ void TxProcessor_Run(AudioSample_t * const srcCodec, IqSample_t * const dst, Aud
     {
         switch(ts.digital_mode)
         {
-#ifdef USE_FREEDV
-        case DigitalMode_FreeDV:
-            TxProcessor_PrepareVoice(adb.a_buffer[0], src, blockSize, SSB_ALC_GAIN_CORRECTION, true);
-            signal_active = TxProcessor_FreeDV(adb.a_buffer[0], &adb.iq_buf, blockSize);
-            iq_gain_comp = FREEDV_GAIN_COMP;
-            break;
-#endif
         case DigitalMode_RTTY:
             signal_active = TxProcessor_Rtty(adb.a_buffer[0], &adb.iq_buf, blockSize);
             TxProcessor_CwInputForDigitalModes(adb.a_buffer, blockSize);

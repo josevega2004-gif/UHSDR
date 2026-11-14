@@ -1098,15 +1098,6 @@ arm_fir_instance_f32    Fir_Tx_Hilbert_Q;
 static float   __MCHF_SPECIALMEM         Fir_Tx_Hilbert_State_I[FIR_TX_HILBERT_STATE_SIZE];
 static float   __MCHF_SPECIALMEM         Fir_Tx_Hilbert_State_Q[FIR_TX_HILBERT_STATE_SIZE];
 
-// TX FIR filter for use with FreeDV
-arm_fir_instance_f32    Fir_TxFreeDV_Interpolate_I;
-arm_fir_instance_f32    Fir_TxFreeDV_Interpolate_Q;
-
-// FIXME: Needs comment and check!
-#define FIR_FREEDV_INTERPOLATE_STATE_SIZE (FIR_TX_FREEDV_INTERPOLATE_NUM_TAPS + IQ_TX_BLOCK_SIZE)
-static float   __MCHF_SPECIALMEM Fir_TxFreeDV_Interpolate_State_I[FIR_FREEDV_INTERPOLATE_STATE_SIZE];
-static float   __MCHF_SPECIALMEM Fir_TxFreeDV_Interpolate_State_Q[FIR_FREEDV_INTERPOLATE_STATE_SIZE];
-
 // Audio RX - Decimator
 arm_fir_decimate_instance_f32   DECIMATE_RX_I;
 float32_t           __MCHF_SPECIALMEM decimState_I[FIR_RXAUDIO_BLOCK_SIZE + IQ_RX_NUM_TAPS];
@@ -1253,9 +1244,6 @@ void AudioFilter_SetTxHilbertFIR(void)
 
     arm_fir_init_f32(&Fir_Tx_Hilbert_I, tx_iq_num_taps, fc.fir_tx_hilbert_taps_i, Fir_Tx_Hilbert_State_I, IQ_TX_BLOCK_SIZE);
     arm_fir_init_f32(&Fir_Tx_Hilbert_Q, tx_iq_num_taps, fc.fir_tx_hilbert_taps_q, Fir_Tx_Hilbert_State_Q, IQ_TX_BLOCK_SIZE);
-
-    arm_fir_init_f32(&Fir_TxFreeDV_Interpolate_I, Fir_TxFreeDV_Interpolate.numTaps, Fir_TxFreeDV_Interpolate.pCoeffs, Fir_TxFreeDV_Interpolate_State_I, IQ_TX_BLOCK_SIZE);
-    arm_fir_init_f32(&Fir_TxFreeDV_Interpolate_Q, Fir_TxFreeDV_Interpolate.numTaps, Fir_TxFreeDV_Interpolate.pCoeffs, Fir_TxFreeDV_Interpolate_State_Q, IQ_TX_BLOCK_SIZE);
 
     ads.tx_filter_adjusting--;        // re-enable TX I/Q filter now that we are done
 }

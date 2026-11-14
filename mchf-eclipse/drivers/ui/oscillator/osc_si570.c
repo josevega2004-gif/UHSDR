@@ -641,6 +641,20 @@ static uint32_t Si570_getMaxFrequency()
 #endif
 }
 
+/**
+ * @brief highest dial frequency the Si570 is rated for
+ * This is below Si570_getMaxFrequency(): above the rated range the part still tunes but is out
+ * of its specification (Si570_PrepareNextFrequency() reports OSC_TUNE_LIMITED there).
+ */
+static uint32_t Si570_getRatedMaxFrequency()
+{
+#ifdef RF_BRD_LAPWING
+    return 1300000000L;
+#else
+    return SI570_MAX_FREQ/4;        // CMOS grade parts: 160 MHz LO -> 40 MHz dial
+#endif
+}
+
 static uint32_t Si570_translateExt2Osc(uint32_t freq)
 {
 #ifdef RF_BRD_LAPWING
@@ -663,6 +677,7 @@ const OscillatorInterface_t osc_si570 =
 		.type = OSC_SI570,
 		.getMinFrequency = Si570_getMinFrequency,
 		.getMaxFrequency = Si570_getMaxFrequency,
+		.getRatedMaxFrequency = Si570_getRatedMaxFrequency,
 };
 
 

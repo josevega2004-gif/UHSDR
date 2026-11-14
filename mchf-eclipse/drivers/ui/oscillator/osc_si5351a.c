@@ -30,6 +30,7 @@
 #define SI5351_XTAL_FREQ		27000000			// Crystal frequency
 #define SI5351_MIN_PLL			405000000			// Min PLL frequency, officially it is 600 Mhz, but 405 seems to work just fine.
 #define SI5351_MAX_PLL		    900000000			// Max PLL frequency, officially it is 900 Mhz, tested with ~1168 Mhz
+#define SI5351_MAX_RATED_FREQ   200000000           // Datasheet max output frequency, everything above is experimental
 
 #define SI5351_MAX_DIVIDER				900
 
@@ -431,6 +432,14 @@ static uint32_t Si5351a_getMaxFrequency()
     return 290000000 / 4;
 }
 
+/**
+ * @brief highest dial frequency the Si5351a is rated for (datasheet limit, 4x LO for the frontend)
+ */
+static uint32_t Si5351a_getRatedMaxFrequency()
+{
+    return SI5351_MAX_RATED_FREQ / 4;
+}
+
 const OscillatorInterface_t osc_si5351a =
 {
 		.init = Si5351a_Init,
@@ -444,6 +453,7 @@ const OscillatorInterface_t osc_si5351a =
         .type = OSC_SI5351A,
         .getMinFrequency = Si5351a_getMinFrequency,
         .getMaxFrequency = Si5351a_getMaxFrequency,
+        .getRatedMaxFrequency = Si5351a_getRatedMaxFrequency,
 };
 
 void Si5351a_Init()

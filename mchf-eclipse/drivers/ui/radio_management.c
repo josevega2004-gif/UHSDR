@@ -25,7 +25,6 @@
 
 #include "uhsdr_hw_i2c.h"
 
-#include "freedv_uhsdr.h"
 // SI570 control
 #include "osc_interface.h"
 #include "codec.h"
@@ -99,18 +98,15 @@ static const BandInfo bi_20m_all =     { .tune = 14000000,     .size = 350000,  
 static const BandInfo bi_17m_all =     { .tune = 18068000,     .size = 100000,     .name = "17m",   BAND_MODE_17};
 static const BandInfo bi_15m_all =     { .tune = 21000000,     .size = 450000,     .name = "15m",   BAND_MODE_15};
 static const BandInfo bi_12m_all =     { .tune = 24890000,     .size = 100000,     .name = "12m",   BAND_MODE_12};
+static const BandInfo bi_11m_all =     { .tune = 25000000,     .size = 2999990,    .name = "11m",   BAND_MODE_11};   // 25.000000 - 27.999990 MHz, includes CB (26.965 - 27.405 MHz)
 static const BandInfo bi_10m_all =     { .tune = 28000000,     .size = 1700000,    .name = "10m",   BAND_MODE_10};
 static const BandInfo bi_6m_r2_3 =     { .tune = 50000000,     .size = 4000000,    .name = "6m",    BAND_MODE_6};
-static const BandInfo bi_4m_gen =      { .tune = 70000000,     .size = 500000,     .name = "4m",    BAND_MODE_4};
-static const BandInfo bi_2m_r1 =       { .tune = 144000000,    .size = 2000000,    .name = "2m",    BAND_MODE_2};
-static const BandInfo bi_2m_r2_3 =     { .tune = 144000000,    .size = 4000000,    .name = "2m",    BAND_MODE_2};
-static const BandInfo bi_70cm_r1 =     { .tune = 430000000,    .size = 10000000,   .name = "70cm",  BAND_MODE_70};
-static const BandInfo bi_70cm_r2_3 =   { .tune = 430000000,    .size = 20000000,   .name = "70cm",  BAND_MODE_70};
-static const BandInfo bi_23cm_all =    { .tune = 1240000000,   .size = 60000000,   .name = "23cm",  BAND_MODE_23};
+// 8m experimenters band (ISM 40.660 - 40.700 MHz). RX only: the mcHF BPF/LPF end at 32 MHz
+// and the PA cannot transmit above mchf_pa.max_freq, so there is no TX on this band.
+static const BandInfo bi_8m_all =      { .tune = 40660000,     .size = 40000,      .name = "8m",    .band_mode = BAND_MODE_8, .rx_only = true };
 
 static const BandInfo bi_160m_r3_thai ={ .tune = 1800000,      .size = 200000,     .name = "160m",  BAND_MODE_160};
 static const BandInfo bi_80m_r3_thai = { .tune = 3500000,      .size = 100000,     .name = "80m",   BAND_MODE_80};
-static const BandInfo bi_2m_r3_thai =  { .tune = 144000000,    .size = 3000000,    .name = "2m",    BAND_MODE_2};
 static const BandInfo bi_60m_rx =     { .tune = 5250000,      .size = 200000,     .name = "60m",   .band_mode = BAND_MODE_60, .rx_only = true };
 static const BandInfo bi_gen_all =     { .tune = 0,            .size = 0,          .name = "Gen",   BAND_MODE_GEN};
 
@@ -129,15 +125,13 @@ static const BandInfo *bandInfo_combined[MAX_BAND_NUM] =
     &bi_17m_all,
     &bi_15m_all,
     &bi_12m_all,
+    &bi_11m_all,
     &bi_10m_all,
     &bi_6m_r2_3,
-    &bi_4m_gen,
-    &bi_2m_r2_3,
-    &bi_70cm_r2_3,
-    &bi_23cm_all,
     &bi_2200m_all,
     &bi_630m_all,
     &bi_160m_all,
+    &bi_8m_all,
     &bi_gen_all,
 };
 
@@ -151,15 +145,13 @@ static const BandInfo* bandInfo_region1[MAX_BAND_NUM] =
         &bi_17m_all,
         &bi_15m_all,
         &bi_12m_all,
+        &bi_11m_all,
         &bi_10m_all,
         &bi_6m_r2_3,
-        &bi_4m_gen,
-        &bi_2m_r1,
-        &bi_70cm_r1,
-        &bi_23cm_all,
         &bi_2200m_all,
         &bi_630m_all,
         &bi_160m_all,
+        &bi_8m_all,
         &bi_gen_all,
 };
 
@@ -173,15 +165,13 @@ static const BandInfo* bandInfo_region2[MAX_BAND_NUM] =
         &bi_17m_all,
         &bi_15m_all,
         &bi_12m_all,
+        &bi_11m_all,
         &bi_10m_all,
         &bi_6m_r2_3,
-        &bi_4m_gen,
-        &bi_2m_r2_3,
-        &bi_70cm_r2_3,
-        &bi_23cm_all,
         &bi_2200m_all,
         &bi_630m_all,
         &bi_160m_all,
+        &bi_8m_all,
         &bi_gen_all,
 };
 
@@ -195,15 +185,13 @@ static const BandInfo* bandInfo_region3[MAX_BAND_NUM] =
         &bi_17m_all,
         &bi_15m_all,
         &bi_12m_all,
+        &bi_11m_all,
         &bi_10m_all,
         &bi_6m_r2_3,
-        &bi_4m_gen,
-        &bi_2m_r2_3,
-        &bi_70cm_r2_3,
-        &bi_23cm_all,
         &bi_2200m_all,
         &bi_630m_all,
         &bi_160m_all,
+        &bi_8m_all,
         &bi_gen_all,
 };
 
@@ -217,15 +205,13 @@ static const BandInfo* bandInfo_region3_thai[MAX_BAND_NUM] =
         &bi_17m_all,
         &bi_15m_all,
         &bi_12m_all,
+        &bi_11m_all,
         &bi_10m_all,
         &bi_6m_r2_3,
-        &bi_4m_gen,
-        &bi_2m_r3_thai,
-        &bi_70cm_r2_3,
-        &bi_23cm_all,
         &bi_2200m_all,
         &bi_630m_all,
         &bi_160m_r3_thai,
+        &bi_8m_all,
         &bi_gen_all,
 };
 
@@ -292,7 +278,7 @@ const pa_info_t mchf_pa =
         .reference_power = 5000.0,
         .max_freq = 32000000,
         .min_freq =  1800000,
-        .max_am_power = 2000,
+        .max_am_power = 5000,
         .max_power = 10000,
 };
 #endif  // RF_BRD_MCHF
@@ -305,7 +291,7 @@ const pa_info_t mchf_pa =
         .reference_power = 5000.0,
         .max_freq = 1300 * 1000000,
         .min_freq = 1240 * 1000000,
-        .max_am_power = 2000,
+        .max_am_power = 10000,
         .max_power = 20000,
 };
 #endif // LAPWING
@@ -315,14 +301,11 @@ const pa_info_t mchf_pa =
 // The following descriptor table has to be in the order of the enum digital_modes_t in  radio_management.h
 // This table is stored in flash (due to const) and cannot be written to
 // for operational data per mode [r/w], use a different table with order of modes
-const digital_mode_desc_t digimodes[DigitalMode_Num_Modes] =
+const char* const digimodes[DigitalMode_Num_Modes] =
 {
-    { "DIGITAL" , true },
-#ifdef USE_FREEDV
-    { "FreeDV"  , true },
-#endif
-    { "RTTY"    , true },
-    { "BPSK"    , true },
+    [DigitalMode_None] = "NONE",
+    [DigitalMode_RTTY] = "RTTY",
+    [DigitalMode_BPSK] = "BPSK",
 };
 
 static void RadioManagement_SetCouplingForFrequency(uint32_t freq);
@@ -351,15 +334,10 @@ void RadioManagement_ChangeCodec(uint32_t codec, bool enableCodec)
 {
     // codec == 0 -> Analog Sound
     // all other codecs -> digital codec
-    if (codec == 0)
-    {
-        ts.dvmode = false;
-    }
-    else
-    {
-        ts.dvmode = enableCodec;
-    }
-    ts.digital_mode = codec;
+    // The selected digital mode is deliberately not changed here: it is the mode which is used
+    // when digital mode is entered (see RadioManagement_SetDemodMode), so leaving digital mode
+    // does not lose the RTTY/BPSK selection.
+    ts.dvmode = (codec != 0) && enableCodec;
 }
 
 
@@ -485,9 +463,15 @@ bool RadioManagement_SetPowerLevel(const BandInfo* band, power_level_t power_lev
 
         if(ts.dmod_mode == DEMOD_AM)                // in AM mode?
         {
-            if(power > mchf_pa.max_am_power || power == 0)     // yes, power over am limits?
+            // single sideband AM is limited to a higher power than double sideband AM,
+            // but never above what the PA of this board can do
+            const int32_t am_power_limit = (ts.am_tx_sideband != AmSideband_Both)
+                                        ? ((AM_SIDEBAND_MAX_POWER < mchf_pa.max_power) ? AM_SIDEBAND_MAX_POWER : mchf_pa.max_power)
+                                        : mchf_pa.max_am_power;
+
+            if(power > am_power_limit || power == 0)     // yes, power over am limits?
             {
-                power = mchf_pa.max_am_power;  // force to keep am limits
+                power = am_power_limit;  // force to keep am limits
                 power_modified = true;
             }
         }
@@ -590,11 +574,7 @@ bool RadioManagement_IsTxAtZeroIF(uint8_t dmod_mode, uint8_t digital_mode)
                 dmod_mode == DEMOD_CW ||
                 (dmod_mode == DEMOD_DIGI &&
                     (
-#ifdef USE_FREEDV
-                            digital_mode == DigitalMode_FreeDV
-#else
                             false
-#endif
                             || is_demod_psk()
 #ifdef USE_RTTY_PROCESSOR
                             || is_demod_rtty()
@@ -617,7 +597,7 @@ uint32_t RadioManagement_Dial2TuneFrequency(const uint32_t dial_freq, uint8_t tx
 
     // Offset dial frequency if the RX/TX frequency translation is active and we are not transmitting in mode which
     // does not use frequency translation, this permits to use the generated I or Q channel as audio sidetone
-    // that is right now RTTY, FreeDV, CW, BPSK
+    // that is right now RTTY, CW, BPSK
     if(txrx_mode != TRX_MODE_TX || RadioManagement_IsTxAtZeroIF(ts.dmod_mode, ts.digital_mode) == false)
     {
         tune_freq += AudioDriver_GetTranslateFreq();
@@ -1178,6 +1158,8 @@ static const CouplingDescriptor mchf_rf_coupling[] =
     { 4250000, COUPLING_80M},
     { 8000000, COUPLING_40M},
     { 16000000, COUPLING_20M},
+    { 25000000, COUPLING_15M},   // 12m still uses the 15m/10m calibration
+    { 28000000, COUPLING_11M},   // 11m band (25.000000 - 27.999990 MHz) has its own calibration
     { 32000000, COUPLING_15M},
     { 60000000, COUPLING_6M},
 };
@@ -1231,19 +1213,19 @@ void RadioManagement_SetDemodMode(uint8_t new_mode)
 
     if (new_mode == DEMOD_DIGI)
     {
-        if (ts.digital_mode == DigitalMode_None)
+        if ((ts.digital_mode < DigitalMode_RTTY) || (ts.digital_mode >= DigitalMode_Num_Modes))
         {
-            ts.digital_mode = 1;
-            // this maps to the first available digital mode (if any)
+            // no (or an invalid) digital mode selected, use the first one
+            ts.digital_mode = DigitalMode_RTTY;
         }
-        RadioManagement_ChangeCodec(ts.digital_mode,1);
+        RadioManagement_ChangeCodec(ts.digital_mode,true);
     }
     else if (ts.dmod_mode == DEMOD_DIGI)
     {
             RadioManagement_ChangeCodec(ts.digital_mode,0);
             // FIXME:  Maybe we should better handle the
             // mode switching centrally for all modes
-            AudioNr_Prepare(); // prepare AudioNr for use after FreeDV using the same buffer
+            AudioNr_Prepare(); // prepare AudioNr for use, it shares its buffers with the audio interrupt
     }
 
     if (new_mode == DEMOD_FM && ts.dmod_mode != DEMOD_FM)
@@ -1314,23 +1296,20 @@ bool RadioManagement_FreqIsInBand(const BandInfo* bandinfo, const uint32_t freq)
 bool band_enabled[MAX_BAND_NUM]; // we store which band is to be used (or ignored)
 
 /**
- * Is the given frequency in an enabled band?
+ * Is the given frequency inside one of the currently enabled bands?
  * @param freq the frequency to check
- * @returns true if in any of the currently enabled bands
+ * @returns true if the frequency lies within the limits of an enabled band
  */
 bool RadioManagement_FreqIsInEnabledBand ( uint32_t freq )
 {
-    bool retval = false;
     for ( int idx = 0; idx < MAX_BAND_NUM; idx++ )
     {
-        if ( band_enabled[idx] )
+        if ( band_enabled[idx] && RadioManagement_FreqIsInBand( bandInfo[idx], freq) )
         {
-            retval = true;
-            RadioManagement_FreqIsInBand( bandInfo[idx], freq);
-            break; // we found the first enabled band following the current one
+            return true;                                    // the frequency is within this enabled band
         }
     }
-    return retval;
+    return false;                                           // outside all enabled bands
 }
 
 /**
@@ -1502,7 +1481,6 @@ bool RadioManagement_IsApplicableDemodMode(uint32_t demod_mode)
         retval = (ts.demod_mode_disable & DEMOD_DIGI_DISABLE) == 0;      // is DIGI enabled?
         if((ts.lsb_usb_auto_select) && retval == true)       // is auto-select LSB/USB mode enabled AND mode-skip NOT enabled?
         {
-            // TODO: this is only true for FreeDV, but since we have only FreeDV...
             ts.digi_lsb = RadioManagement_SSB_AutoSideBand(df.tune_new) == DEMOD_LSB;
             // is this a voice mode, subject to "auto" LSB/USB select?
         }
@@ -1917,9 +1895,17 @@ void RadioManagement_ToggleVfoAB()
 
     df.tune_new = vfo[vfo_new].band[ts.band->band_mode].dial_value;
 
-    bool digitalModeDiffers = ts.digital_mode != vfo[vfo_new].band[ts.band->band_mode].digital_mode;
+    const uint8_t stored_digital_mode = vfo[vfo_new].band[ts.band->band_mode].digital_mode;
+    bool digitalModeDiffers = false;
     bool newIsDigitalMode = vfo[vfo_new].band[ts.band->band_mode].decod_mode == DEMOD_DIGI;
-    ts.digital_mode = vfo[vfo_new].band[ts.band->band_mode].digital_mode;
+
+    // the band memory keeps the digital mode which was used on that VFO, a memory which never
+    // used digital mode keeps the current selection (DigitalMode_None is only the idle state)
+    if ((stored_digital_mode >= DigitalMode_RTTY) && (stored_digital_mode < DigitalMode_Num_Modes))
+    {
+        digitalModeDiffers = stored_digital_mode != ts.digital_mode;
+        ts.digital_mode = stored_digital_mode;
+    }
 
     if(ts.dmod_mode != vfo[vfo_new].band[ts.band->band_mode].decod_mode || (newIsDigitalMode &&  digitalModeDiffers) )
     {

@@ -67,6 +67,11 @@ static uint32_t OscDummy_getMaxFrequency()
     return UINT32_MAX-1;
 }
 
+static uint32_t OscDummy_getRatedMaxFrequency()
+{
+    return UINT32_MAX-1;
+}
+
 
 const OscillatorInterface_t osc_dummy =
 {
@@ -79,8 +84,9 @@ const OscillatorInterface_t osc_dummy =
 		.readyForIrqCall = OscDummy_ReadyForIrqCall,
         .name = "Dummy",
         .type = OSC_DUMMY,
-        .getMinFrequency = OscDummy_getMinFrequency,
+        		.getMinFrequency = OscDummy_getMinFrequency,
 		.getMaxFrequency = OscDummy_getMaxFrequency,
+		.getRatedMaxFrequency = OscDummy_getRatedMaxFrequency,
 };
 
 static void OscDummy_Init()

@@ -110,7 +110,7 @@ typedef struct {
 
 	UiCoord_t CW_DECODER_WPM;
 
-	UiCoord_t TextMsgLine;			// coordinates for text line (CW decoder or freedv output)
+	UiCoord_t TextMsgLine;			// coordinates for text line (CW decoder output)
 	uint16_t TextMsg_buffer_max;	// Text message buffer size
 	uint8_t  TextMsg_font;
 
@@ -118,9 +118,6 @@ typedef struct {
 
 	UiCoord_t PWR_NUM_IND;	// Location of numerical FWD/REV power indicator
 
-	UiCoord_t FREEDV_SNR;	//freeDV coordinates for status display
-	UiCoord_t FREEDV_BER;
-	uint16_t FREEDV_FONT;
 
 	UiCoord_t DisplayDbm;
 

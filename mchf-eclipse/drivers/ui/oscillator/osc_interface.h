@@ -54,7 +54,10 @@ typedef struct
 	bool 			  (*isNextStepLarge)(void);
 	bool              (*readyForIrqCall)(void);
 	uint32_t    (*getMinFrequency)(void);
+	// highest frequency the device still tunes to, may be outside its specification
 	uint32_t    (*getMaxFrequency)(void);
+	// highest frequency the device is rated for, never above getMaxFrequency()
+	uint32_t    (*getRatedMaxFrequency)(void);
     const char*  name;
     const Oscillator_Type_t  type;
 

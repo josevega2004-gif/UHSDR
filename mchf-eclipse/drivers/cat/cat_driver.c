@@ -1114,6 +1114,11 @@ static void CatDriver_HandleCommands()
         case DEMOD_FM:
             resp[4] = 8;
             break;
+        case DEMOD_DIGI:
+            // RTTY and BPSK are data transmissions on one of the two sidebands, so the mode
+            // reported to the host has to follow the sideband selected for the digital mode
+            resp[4] = ts.digi_lsb ? 0 : 1;
+            break;
         default:
             resp[4] = 1;
         }

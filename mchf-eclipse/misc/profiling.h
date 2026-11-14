@@ -26,8 +26,9 @@ typedef enum {
     ProfileTP7,
     ProfileTP8,
     ProfileTP9,
-    ProfileFreeDV,
-    FreeDVTXUnderrun,
+    ProfileNoiseBlanker,
+    ProfileNoiseReductionFftForward,
+    ProfileNoiseReductionFftInverse,
     EventProfileMax
 } ProfiledEventNames;
 

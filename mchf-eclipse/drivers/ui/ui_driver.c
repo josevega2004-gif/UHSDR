@@ -35,7 +35,6 @@
 #include "ui_lcd_hy28.h"
 #include "ui_spectrum.h"
 
-#include "freedv_uhsdr.h"
 
 // Encoders
 #include "ui_rotary.h"
@@ -67,6 +66,10 @@
 #define SPLIT_ACTIVE_COLOUR         		Yellow      // colour of "SPLIT" indicator when active
 #define SPLIT_INACTIVE_COLOUR           	Grey        // colour of "SPLIT" indicator when NOT active
 #define COL_PWR_IND                 		White
+
+// width of the label shown next to the forward power meter, it holds the AM carrier level, the
+// carrier to PEP ratio and the hint which way to move the carrier level, e.g. "C100% -18.1dB^"
+#define AM_CARRIER_LEVEL_LABEL_W    		(SMALL_FONT_WIDTH * 14)
 
 
 
@@ -116,6 +119,7 @@ static void     UiDriver_DisplayTemperature(int temp);
 static void     UiDriver_DisplayVoltage();
 
 static void 	UiDriver_HandleSMeter();
+static void 	UiDriver_DisplayAmCarrierPep();
 static void 	UiDriver_HandleTXMeters();
 static bool     UiDriver_HandleVoltage();
 
@@ -712,36 +716,47 @@ void UiDriver_DisplayFilter()
 	UiDriver_LeftBoxDisplay(1,filter_names[0],filter_path_change,filter_ptr,font_clr, font_clr,false);
 }
 
-// TODO: most of this belongs to radio management, not UI
-static void UiDriver_ToggleDigitalMode()
+/**
+ * @brief selects the digital modulation and switches the radio to it
+ *
+ * This is the single entry point for the RTTY/BPSK selection: the mode box, the digital mode menu
+ * entry and the mode button all end up here, so they always agree on the selected mode.
+ *
+ * @param new_digital_mode digital mode to use, DigitalMode_None selects the first digital mode
+ */
+void UiDriver_SetDigitalMode(uint8_t new_digital_mode)
 {
-	if (ts.digital_mode != DigitalMode_None)
+	if ((ts.tune) || (ts.txrx_mode != TRX_MODE_RX))
 	{
-		// a valid digital mode is set but may not be active yet
-		if (ts.dmod_mode != DEMOD_DIGI)
-		{
-			if (RadioManagement_IsApplicableDemodMode(DEMOD_DIGI))
-			{
-				// this will switch to the corresponding sideband if we come from
-				// SSB, otherwise the automatically selected default (AUTO LSB/USB ON) or the previously used
-				// will be the selected one.
-				if (is_ssb(ts.dmod_mode))
-				{
-					ts.digi_lsb = RadioManagement_LSBActive(ts.dmod_mode);
-				}
-				RadioManagement_SetDemodMode(DEMOD_DIGI);
-			}
-		}
+		// no mode changes while tuning or transmitting, same rule as for the mode button
+		return;
 	}
-	else
+
+	if ((new_digital_mode < DigitalMode_RTTY) || (new_digital_mode >= DigitalMode_Num_Modes))
 	{
-		if (ts.dmod_mode == DEMOD_DIGI)
-		{
-			// we are in digital mode but the current digital mode is in fact
-			// None, i.e. we are going analog now
-			RadioManagement_SetDemodMode(ts.digi_lsb?DEMOD_LSB:DEMOD_USB);
-		}
+		// DigitalMode_None is the idle state, it never selects a modulation
+		new_digital_mode = DigitalMode_RTTY;
 	}
+
+	ts.digital_mode = new_digital_mode;
+
+	if (RadioManagement_IsApplicableDemodMode(DEMOD_DIGI) == false)
+	{
+		// digital mode is disabled, the selection is remembered for when it gets enabled again
+		return;
+	}
+
+	if ((ts.dmod_mode != DEMOD_DIGI) && is_ssb(ts.dmod_mode))
+	{
+		// coming from SSB its sideband is taken over, from any other mode the automatic sideband
+		// selection or the previously used one applies
+		ts.digi_lsb = RadioManagement_LSBActive(ts.dmod_mode);
+	}
+
+	// this also applies a change while already in digital mode, i.e. switching from RTTY to BPSK
+	// takes effect immediately
+	UiDriver_SetDemodMode(DEMOD_DIGI);
+
 	UiDriver_UpdateDisplayAfterParamChange();
 }
 
@@ -765,6 +780,35 @@ void UiDriver_FrequencyUpdateLOandDisplay(bool full_update)
 	}
 }
 
+// position of the DSP timing display on the debug line, between the debug marker and the load
+#define DSP_TIMING_X 100
+
+/**
+ * Average duration of a profiled event in microseconds and reset of its counter, so that the LCD
+ * shows the cost of the recent frames instead of an average since power on.
+ * @param pe event to read
+ * @return microseconds per run, 0 if the event did not run since the last call
+ */
+static uint32_t UiDriver_ProfileEventDisplayUs(const ProfiledEventNames pe)
+{
+	ProfilingTimedEvent* ev_ptr = profileTimedEventGet(pe);
+	uint32_t us = 0;
+
+	if (ev_ptr != NULL)
+	{
+		if (ev_ptr->count != 0)
+		{
+			// the DWT counter runs at HCLK, which is what SystemCoreClock holds since the clock
+			// configuration is done by HAL_RCC_ClockConfig() at startup
+			const uint32_t mhz = (SystemCoreClock / 1000000u) ? (SystemCoreClock / 1000000u) : 1;
+			us = (uint32_t)(ev_ptr->duration / (ev_ptr->count * mhz));
+		}
+		profileTimedEventReset(pe);
+	}
+
+	return us;
+}
+
 void UiDriver_DebugInfo_DisplayEnable(bool enable)
 {
 
@@ -773,6 +817,7 @@ void UiDriver_DebugInfo_DisplayEnable(bool enable)
 	if (enable == false)
 	{
 		UiLcdHy28_PrintText(ts.Layout->LOAD_X,ts.Layout->LOADANDDEBUG_Y,"     ",White,Black,0);
+		UiLcdHy28_PrintText(DSP_TIMING_X,ts.Layout->LOADANDDEBUG_Y,"              ",White,Black,0);
 	}
 
 	ts.show_debug_info = enable;
@@ -1314,11 +1359,6 @@ void UiDriver_ModeSpecificDisplayClear(uint8_t dmod_mode, uint8_t digital_mode)
 	{
 		switch(digital_mode)
 		{
-#ifdef USE_FREEDV
-		case DigitalMode_FreeDV:
-			FreeDv_DisplayClear();
-			break;
-#endif
 		case DigitalMode_RTTY:
 		case DigitalMode_BPSK:
 			UiDriver_TextMsgClear();
@@ -1360,11 +1400,6 @@ void UiDriver_ModeSpecificDisplayPrepare(uint8_t dmod_mode, uint8_t digital_mode
 	{
 		switch(digital_mode)
 		{
-#ifdef USE_FREEDV
-		case DigitalMode_FreeDV:
-			FreeDv_DisplayPrepare();
-			break;
-#endif
 		case DigitalMode_RTTY:
 		case DigitalMode_BPSK:
 			UiDriver_TextMsgClear();
@@ -2338,20 +2373,12 @@ void UiDriver_InitBandSet()
         // here you can enable or disable based on additional hardware capabilities
         // but this should only be used with care
         /*
-        band_enabled[BAND_MODE_23] = false;
-        band_enabled[BAND_MODE_70] = false;
-        band_enabled[BAND_MODE_2] = false;
-        band_enabled[BAND_MODE_4] = false;
         band_enabled[BAND_MODE_6] = false;
         band_enabled[BAND_MODE_630] = false;
         band_enabled[BAND_MODE_2200] = false;
         */
         break;
     case FOUND_RF_BOARD_OVI40:
-        /*
-        band_enabled[BAND_MODE_23] = false;
-        band_enabled[BAND_MODE_70] = false;
-        */
         break;
     }
 
@@ -2365,12 +2392,22 @@ void UiDriver_InitBandSet()
 			break;
 		}
 	}
-	if(res == 0x61)					// if it is an "a" ==> DF8OE version, enable all bands
+		if(res == 0x61)						// if it is an "a" ==> DF8OE version, enable all bands
 	{
   		for(int i = 0; i < MAX_BANDS; i++)
   		{
       		band_enabled[i] = true;
   		}
+	}
+
+	// The 8m experimenters band needs the LO at 162.64 - 162.80 MHz to cover its 40.660 - 40.700 MHz
+	// tuning range. A standard (CMOS grade) Si570 is only rated up to 160 MHz, so do not offer the
+	// band unless the detected oscillator is rated to generate its LO frequency. This check comes
+	// last on purpose: no band may be offered which the oscillator cannot deliver.
+	if (band_enabled[BAND_MODE_8])
+	{
+	    const BandInfo* bi_8m = RadioManagement_GetBandInfo(BAND_MODE_8);
+	    band_enabled[BAND_MODE_8] = ((bi_8m->tune + bi_8m->size) <= osc->getRatedMaxFrequency());
 	}
 }
 
@@ -3181,7 +3218,7 @@ void UiDriver_SetDemodMode(uint8_t new_mode)
 #if 0
 	static encoder_mode_store_t demod_modes[] =
 	{
-			{ ENC_ONE_MODE_AUDIO_GAIN, ENC_TWO_MODE_RF_GAIN, ENC_THREE_MODE_RIT }, // USB, LSB,(S)AM,FM,FreeDV
+			{ ENC_ONE_MODE_AUDIO_GAIN, ENC_TWO_MODE_RF_GAIN, ENC_THREE_MODE_RIT }, // USB, LSB,(S)AM,FM
 			{ ENC_ONE_MODE_ST_GAIN, -1, ENC_THREE_MODE_CW_SPEED }, // CW
 			{ ENC_ONE_MODE_RTTY_SPEED, ENC_TWO_MODE_RTTY_SHIFT, -1 }, // RTTY
 	};
@@ -3275,19 +3312,24 @@ void UiDriver_SelectBandMemory(uint16_t vfo_sel, uint8_t new_band_index)
 		uint16_t new_dmod_mode = vfo[vfo_sel].band[new_band_index].decod_mode;
 		uint16_t new_digital_mode = vfo[vfo_sel].band[new_band_index].digital_mode;
 
-		bool isNewDigitalMode = ts.digital_mode != new_digital_mode && new_dmod_mode == DEMOD_DIGI;
-
+		bool update_mode = (ts.dmod_mode != new_dmod_mode) || (new_dmod_mode == DEMOD_CW && ts.cw_lsb != new_lsb);
 
 		// we need to mute here since changing bands may cause audible click/pops
 		RadioManagement_MuteTemporarilyRxAudio();
 
-		ts.digital_mode = new_digital_mode;
+		if ((new_digital_mode >= DigitalMode_RTTY) && (new_digital_mode < DigitalMode_Num_Modes))
+		{
+			// the band memory remembers the digital mode used there, a memory which never used
+			// digital mode keeps the current selection
+			update_mode = update_mode || ((new_dmod_mode == DEMOD_DIGI) && (new_digital_mode != ts.digital_mode));
+			ts.digital_mode = new_digital_mode;
+		}
 
-		if(ts.dmod_mode != new_dmod_mode || (new_dmod_mode == DEMOD_CW && ts.cw_lsb != new_lsb) || isNewDigitalMode)
+		if (update_mode)
 		{
 			// Update mode
 			ts.cw_lsb = new_lsb;
-			RadioManagement_SetDemodMode(new_dmod_mode);
+			UiDriver_SetDemodMode(new_dmod_mode);
 		}
 
 		// Finally update public flag by setting the
@@ -4466,25 +4508,17 @@ static void UiDriver_DisplayModulationType()
 {
 
 	ushort bgclr = ts.dvmode?Orange:Blue;
-	ushort color = digimodes[ts.digital_mode].enabled?(ts.dvmode?Black:White):Grey2;
+	ushort color = ts.dvmode?Black:White;
 	char txt_empty[]="       ";
 	char txt_SSB[]="SSB";
 	char txt_CW[]="CW";
 
-	//const char* txt = digimodes[ts.digital_mode].label;
 	const char* txt;
 	switch(ts.dmod_mode)
 	{
 	case DEMOD_DIGI:
-#if defined(USE_FREEDV)
-	    if  (ts.digital_mode == DigitalMode_FreeDV)
 	    {
-	        txt = freedv_modes[freedv_conf.mode].label;
-	    }
-	    else
-#endif
-	    {
-	        txt = digimodes[ts.digital_mode].label;
+	        txt = digimodes[ts.digital_mode];
 	    }
 		break;
 	case DEMOD_LSB:
@@ -4657,6 +4691,9 @@ void RadioManagement_HandleIqGainAndSMeter()
 
 static void UiDriver_HandleSMeter()
 {
+	// carrier level, carrier to PEP ratio and the measured powers, this is called while receiving
+	// as well so that the readout of the finished transmission is removed after the hold time
+	UiDriver_DisplayAmCarrierPep();
 
 	// Only in RX mode
 	if(ts.txrx_mode == TRX_MODE_RX)
@@ -4705,6 +4742,321 @@ static void UiDriver_HandleSMeter()
 	}
 }
 
+
+
+/**
+ * @brief x position of the AM carrier level label, next to the forward power scale of the meter
+ * @return x coordinate of the label, always inside the display
+ */
+static uint16_t am_carrier_level_x()
+{
+    // prefer the space right of the meter box, some layouts have the space on the left instead
+    const uint16_t meter_end = ts.Layout->SM_IND.x + ts.Layout->SM_IND.w + 4;
+
+    if ((meter_end + AM_CARRIER_LEVEL_LABEL_W) <= sd.Slayout->full.w)
+    {
+        return meter_end;
+    }
+    if (ts.Layout->SM_IND.x >= AM_CARRIER_LEVEL_LABEL_W)
+    {
+        return ts.Layout->SM_IND.x - AM_CARRIER_LEVEL_LABEL_W;
+    }
+    return ts.Layout->SM_IND.x;
+}
+
+// AM carrier to PEP measurement: during one transmission the lowest forward power is the
+// unmodulated carrier (the pauses in the modulation fall back to it) and the highest is the PEP.
+static struct
+{
+    float32_t carrier;          // lowest forward power of the current transmission in W
+    float32_t pep;              // highest forward power of the current transmission in W
+    uint8_t   carrier_level;    // carrier level setting the measurement was started with
+    uint8_t   power_level;      // power level setting the measurement was started with
+    uint32_t  bad_since;        // sysclock tick at which the ratio became clearly out of range
+    bool      bad_counting;     // is the ratio clearly out of range since bad_since?
+} am_pwr_track;
+
+#define AM_PWR_TRACK_MIN    0.10f   // forward power in W below which a reading is not trusted
+
+// carrier to PEP ratio a correctly set AM carrier produces: at 100 % modulation the carrier is
+// 25 % of the PEP, i.e. 6 dB below it. The target is configurable in steps of half a dB, the ratio
+// is shown in green while it is within the tolerance, yellow while it is off and red once the
+// carrier level is clearly wrong.
+#define AM_CARRIER_PEP_TOLERANCE_DB   1.0f
+#define AM_CARRIER_PEP_BAD_DB         3.0f
+
+// width of the "C100% " part of the label, the ratio part follows it
+#define AM_CARRIER_LEVEL_CHARS        6   // width of the carrier level part of the label
+
+// width of the carrier to PEP ratio and of the measured power line, both are padded to these
+// widths so a shorter value overwrites the whole field of the previous one
+#define AM_CARRIER_PEP_RATIO_CHARS    8
+#define AM_CARRIER_PEP_WATTS_CHARS   10
+
+// distance of the measured power line below the carrier level line
+#define AM_CARRIER_PEP_WATTS_DY      25
+
+// the times of the readout are configured in steps of half a second, ts.sysclock runs at 100 Hz, so
+// one step is 50 ticks
+#define AM_CARRIER_PEP_HALF_SECOND_TICKS     50
+
+// colour of the readout while it is held after the transmission, it has to be clearly dimmer
+// than the colours used during the transmission
+#define AM_CARRIER_PEP_HELD_COLOUR   Grey1
+
+// a ratio which stays clearly out of range during a transmission is flagged by blinking it, the
+// delay before the blinking starts is configurable, the blinking itself toggles with this period
+#define AM_CARRIER_PEP_BLINK_TICKS    50    // half a second visible, half a second hidden
+
+/**
+ * @brief start a new carrier to PEP measurement, the settings are remembered so that a change of
+ *        the carrier or power level starts a new measurement
+ */
+static void UiDriver_ResetAmCarrierPep()
+{
+    am_pwr_track.carrier = 0;
+    am_pwr_track.pep = 0;
+    am_pwr_track.carrier_level = ts.am_carrier_level;
+    am_pwr_track.power_level = ts.power_level;
+    am_pwr_track.bad_since = 0;
+    am_pwr_track.bad_counting = false;
+}
+
+/**
+ * @brief follow carrier and PEP of the AM transmission in progress
+ */
+static void UiDriver_TrackAmCarrierPep()
+{
+    const float32_t fwd = swrm.fwd_pwr;
+
+    if (fwd < AM_PWR_TRACK_MIN)     // no usable reading, e.g. during silence or before key down
+    {
+        return;
+    }
+
+    if ((am_pwr_track.carrier <= 0) || (fwd < am_pwr_track.carrier))
+    {
+        am_pwr_track.carrier = fwd;
+    }
+    if (fwd > am_pwr_track.pep)
+    {
+        am_pwr_track.pep = fwd;
+    }
+}
+
+/**
+ * @brief carrier to PEP ratio the readout compares against
+ * @return configured target ratio in dB below PEP
+ */
+static float32_t UiDriver_AmCarrierPepTarget()
+{
+    // the setting is stored in half dB below PEP, so 12 means -6.0 dB
+    return -((float32_t)ts.am_carrier_pep_target / 2.0f);
+}
+
+/**
+ * @brief carrier to PEP ratio of the current AM transmission
+ * @param ratio_db receives the ratio in dB, it is always negative (carrier below PEP)
+ * @return true if a modulated transmission has been measured, false if there is nothing to report
+ */
+static bool UiDriver_GetAmCarrierToPep(float32_t* ratio_db)
+{
+    if ((am_pwr_track.carrier <= 0) || (am_pwr_track.pep <= 0))
+    {
+        return false;
+    }
+
+    // without a clearly modulated signal the ratio would only reflect meter noise
+    if (am_pwr_track.pep < (am_pwr_track.carrier * 1.1f))
+    {
+        return false;
+    }
+
+    *ratio_db = 10.0f * log10f(am_pwr_track.carrier / am_pwr_track.pep);
+    return true;
+}
+
+/**
+ * @brief pads a text with spaces up to the given number of characters, so that a shorter value
+ *        overwrites the complete field of the previous value instead of leaving characters behind
+ * @param txt text to pad, must be writable and have room for the padding
+ * @param size size of the buffer holding the text
+ * @param chars width the text is padded to
+ */
+static void UiDriver_PadText(char* txt, size_t size, uint8_t chars)
+{
+    size_t len = strlen(txt);
+
+    while ((len < chars) && ((len + 1) < size))
+    {
+        txt[len++] = ' ';
+    }
+    txt[len] = 0;
+}
+
+/**
+ * @brief shows the AM carrier level, the measured carrier to PEP ratio and the measured carrier and
+ *        PEP powers next to the forward power meter, so the modulation can be judged while the
+ *        carrier level is being adjusted, the reading is held briefly after the transmission and
+ *        shown dimmed then, and a ratio which stays clearly out of range is flagged by blinking it
+ */
+static void UiDriver_DisplayAmCarrierPep()
+{
+    static bool     label_shown = false;    // is the readout on screen?
+    static bool     held_dimmed = false;    // is it shown in the held (dimmed) state?
+    static bool     tx_active = false;      // was there an AM transmission during the last update?
+    static uint32_t hold_until;             // sysclock tick at which the held readout is removed
+
+    // the texts as last drawn, so the readout can be redrawn when it is held after the transmission
+    static char     level_txt[10];
+    static char     ratio_txt[12];
+    static char     watts_txt[14];
+
+    const bool am_tx = (ts.txrx_mode == TRX_MODE_TX) && (ts.dmod_mode == DEMOD_AM);
+
+    const uint16_t x = am_carrier_level_x();
+    const uint16_t y = ts.Layout->SM_IND.y + 5;
+
+    if (!am_tx)
+    {
+        tx_active = false;
+
+        if (label_shown && ((int32_t)(ts.sysclock - hold_until) >= 0))
+        {
+            // the hold time is over, remove both lines
+            UiLcdHy28_PrintText(x, y, "              ", Black, Black, 4);
+            UiLcdHy28_PrintText(x, y + AM_CARRIER_PEP_WATTS_DY, "          ", Black, Black, 4);
+            label_shown = false;
+            held_dimmed = false;
+        }
+        else if (label_shown && (ts.am_carrier_pep_dim != 0) && !held_dimmed)
+        {
+            // the transmission has ended, the frozen values are drawn dimmed so that they cannot be
+            // mistaken for a running measurement
+            UiLcdHy28_PrintText(x, y, level_txt, AM_CARRIER_PEP_HELD_COLOUR, Black, 4);
+            UiLcdHy28_PrintText(x + (AM_CARRIER_LEVEL_CHARS * SMALL_FONT_WIDTH), y, ratio_txt,
+                                AM_CARRIER_PEP_HELD_COLOUR, Black, 4);
+            UiLcdHy28_PrintText(x, y + AM_CARRIER_PEP_WATTS_DY, watts_txt, AM_CARRIER_PEP_HELD_COLOUR, Black, 4);
+            held_dimmed = true;
+        }
+
+        return;
+    }
+
+    // a new transmission or a changed carrier or power level starts a new measurement
+    if (!tx_active || (am_pwr_track.carrier_level != ts.am_carrier_level) || (am_pwr_track.power_level != ts.power_level))
+    {
+        UiDriver_ResetAmCarrierPep();
+    }
+    tx_active = true;
+
+    UiDriver_TrackAmCarrierPep();
+
+    uint32_t   ratio_colour = Cyan;
+    uint32_t   watts_colour = Black;    // an empty line is cleared with black on black
+    bool       bad_deviation = false;   // is the ratio clearly off the configured target?
+    float32_t  ratio_db;
+
+    // the carrier level setting never changes width, so the ratio always starts at the same place
+    snprintf(level_txt, sizeof(level_txt), "C%3u%% ", ts.am_carrier_level);
+
+    if (UiDriver_GetAmCarrierToPep(&ratio_db))
+    {
+        const int32_t ratio_db10 = lroundf(ratio_db * 10.0f);
+        const int32_t ratio_abs = (ratio_db10 < 0) ? -ratio_db10 : ratio_db10;
+
+        const float32_t deviation = ratio_db - UiDriver_AmCarrierPepTarget();
+        const float32_t deviation_abs = (deviation < 0) ? -deviation : deviation;
+
+        if (deviation_abs <= AM_CARRIER_PEP_TOLERANCE_DB)
+        {
+            ratio_colour = Green;       // carrier level is right for the audio level
+        }
+        else if (deviation_abs <= AM_CARRIER_PEP_BAD_DB)
+        {
+            ratio_colour = Yellow;      // somewhat off, worth adjusting
+        }
+        else
+        {
+            ratio_colour = Red2;        // carrier is far too high or too low
+        }
+
+        bad_deviation = (deviation_abs > AM_CARRIER_PEP_BAD_DB);
+
+        // point out the direction in which the carrier level has to move: a ratio below the
+        // target means the carrier is too low, a ratio above it means the carrier is too high
+        char hint = ' ';
+        if (deviation < (-AM_CARRIER_PEP_TOLERANCE_DB))
+        {
+            hint = '^';         // raise the carrier level
+        }
+        else if (deviation > AM_CARRIER_PEP_TOLERANCE_DB)
+        {
+            hint = 'v';         // lower the carrier level
+        }
+
+        snprintf(ratio_txt, sizeof(ratio_txt), "%c%d.%ddB%c",
+                 (ratio_db10 < 0) ? '-' : '+', (int)(ratio_abs / 10), (int)(ratio_abs % 10), hint);
+    }
+    else
+    {
+        // no modulation measured yet, only the carrier level setting is shown
+        snprintf(ratio_txt, sizeof(ratio_txt), "   --");
+    }
+    UiDriver_PadText(ratio_txt, sizeof(ratio_txt), AM_CARRIER_PEP_RATIO_CHARS);
+
+    // a ratio which is clearly off for more than a few seconds is flagged by blinking it, the
+    // carrier level is evidently not being adjusted
+    if (bad_deviation)
+    {
+        if (!am_pwr_track.bad_counting)
+        {
+            am_pwr_track.bad_since = ts.sysclock;
+            am_pwr_track.bad_counting = true;
+        }
+    }
+    else
+    {
+        am_pwr_track.bad_counting = false;
+    }
+
+    const uint32_t warn_ticks = (uint32_t)ts.am_carrier_pep_warn * AM_CARRIER_PEP_HALF_SECOND_TICKS;
+
+    if (am_pwr_track.bad_counting
+            && (warn_ticks > 0)             // a warning delay of zero switches the blinking off
+            && ((uint32_t)(ts.sysclock - am_pwr_track.bad_since) >= warn_ticks)
+            && (((ts.sysclock / AM_CARRIER_PEP_BLINK_TICKS) & 1) != 0))
+    {
+        ratio_colour = Black;           // blink phase off, the ratio is hidden
+    }
+
+    if (am_pwr_track.carrier > 0)
+    {
+        const uint32_t carrier_dw = (uint32_t)lroundf(am_pwr_track.carrier * 10.0f);
+        const uint32_t pep_dw = (uint32_t)lroundf(am_pwr_track.pep * 10.0f);
+
+        // carrier and PEP in tenths of a watt, e.g. "0.5/2.0W"
+        snprintf(watts_txt, sizeof(watts_txt), "%u.%u/%u.%uW",
+                 (unsigned)(carrier_dw / 10), (unsigned)(carrier_dw % 10),
+                 (unsigned)(pep_dw / 10), (unsigned)(pep_dw % 10));
+        watts_colour = Grey;
+    }
+    else
+    {
+        // no trustworthy power reading yet, keep the line empty
+        snprintf(watts_txt, sizeof(watts_txt), " ");
+    }
+    UiDriver_PadText(watts_txt, sizeof(watts_txt), AM_CARRIER_PEP_WATTS_CHARS);
+
+    UiLcdHy28_PrintText(x, y, level_txt, Cyan, Black, 4);
+    UiLcdHy28_PrintText(x + (AM_CARRIER_LEVEL_CHARS * SMALL_FONT_WIDTH), y, ratio_txt, ratio_colour, Black, 4);
+    UiLcdHy28_PrintText(x, y + AM_CARRIER_PEP_WATTS_DY, watts_txt, watts_colour, Black, 4);
+
+    // the measurement is current, keep it readable for the configured time after the operator unkeys
+    hold_until = ts.sysclock + ((uint32_t)ts.am_carrier_pep_hold * AM_CARRIER_PEP_HALF_SECOND_TICKS);
+    label_shown = true;
+    held_dimmed = false;
+}
 
 
 /**
@@ -4825,6 +5177,7 @@ static void UiDriver_HandleTXMeters()
 		// show selected bottom meter value
 		UiDriver_UpdateBtmMeter(btm_mtr_val, btm_mtr_red_level);   // update the meter, setting the "red" threshold
 	}
+
 }
 
 
@@ -6427,10 +6780,10 @@ void UiAction_ChangeFrequencyByTouch()
 
 void UiAction_ChangeDigitalMode()
 {
-	incr_wrap_uint8(&ts.digital_mode,0,DigitalMode_Num_Modes-1);
-	// We limit the reachable modes to the ones truly available
-	// which is FreeDV1, RTTY, BPSK for now
-	UiDriver_ToggleDigitalMode();
+	// the mode box cycles through the digital modes, leaving digital mode is done with the mode button
+	uint8_t new_digital_mode = ts.digital_mode;
+	incr_wrap_uint8(&new_digital_mode,DigitalMode_RTTY,DigitalMode_BPSK);
+	UiDriver_SetDigitalMode(new_digital_mode);
 }
 
 void UiAction_ChangeDynamicTuning()
@@ -7126,7 +7479,7 @@ extern USBH_HandleTypeDef hUsbHostHS;
  * is interrupted by all other interrupts with a higher priority.
  *
  * Please note: Do not call any UI related functions here, essentially we should only include high prio
- * tasks such as longer running audio processing (e.g. FreeDV or the NR processing) which should be executed
+ * tasks such as longer running audio processing (e.g. the NR processing) which should be executed
  * with as low latency as possible but take too long for being included in the audio interrupt handler itself
  * Also relevant: If this handler function does take too long, the UI handling including display updates
  * will feel sluggish or will not work at all since all processing time is spend here then and
@@ -7142,15 +7495,9 @@ void UiDriver_TaskHandler_HighPrioTasks()
     if (ads.af_disabled == false)
     {
         // we only process these audio things if rx data processing is active
-#ifdef USE_FREEDV
-        if (ts.dmod_mode == DEMOD_DIGI && ts.digital_mode == DigitalMode_FreeDV)
-        {
-            FreeDv_HandleFreeDv();
-        }
-#endif // USE_FREEDV
 
 #ifdef USE_ALTERNATE_NR
-        if ((is_dsp_nb_active() || is_dsp_nr()) && (ads.decimated_freq == 12000))
+        if ((is_dsp_nb_active() || is_dsp_nr()) && ((ads.decimated_freq == 12000) || (ads.decimated_freq == 24000)))
         {
 
             AudioNr_HandleNoiseReduction();
@@ -7426,12 +7773,6 @@ void UiDriver_TaskHandler_MainTasks()
 	            UiDriver_HandleTXMeters();
 	            RadioManagement_HandleIqGainAndSMeter();
 				UiDriver_HandleSMeter();
-#ifdef USE_FREEDV
-				if (ts.dmod_mode == DEMOD_DIGI && ts.digital_mode == DigitalMode_FreeDV)
-				{
-			        FreeDv_DisplayUpdate();
-				}
-#endif // USE_FREEDV
 
 			}
 			break;
@@ -7473,6 +7814,18 @@ void UiDriver_TaskHandler_MainTasks()
 				if(ts.show_debug_info)
 				{
 					UiLcdHy28_PrintText(ts.Layout->LOAD_X,ts.Layout->LOADANDDEBUG_Y,str,White,Black,0);
+
+					// cost of the two noise reduction stages and of the FFT pair inside the spectral NR
+					// in microseconds per 128 sample frame, all are measured on the very same frames
+					// so they can be compared directly: NB = blanker, NR = whole spectral NR,
+					// F = forward plus inverse FFT
+					const uint32_t fft_us = UiDriver_ProfileEventDisplayUs(ProfileNoiseReductionFftForward)
+									      + UiDriver_ProfileEventDisplayUs(ProfileNoiseReductionFftInverse);
+					snprintf(str,20,"NB%3u NR%3u F%3u",
+							(unsigned int)UiDriver_ProfileEventDisplayUs(ProfileNoiseBlanker),
+							(unsigned int)UiDriver_ProfileEventDisplayUs(ProfileTP8),
+							(unsigned int)fft_us);
+					UiLcdHy28_PrintText(DSP_TIMING_X,ts.Layout->LOADANDDEBUG_Y,str,White,Black,0);
 				}
 #endif
 			}

@@ -766,10 +766,29 @@ static void UiVk_ModSelVKeyCallBackShort(uint8_t KeyNum, uint32_t param)
 {
 	if(UiVk_KeyState[KeyNum]!=Vbtn_State_Disabled)
 	{
-		uint8_t param2nd=(param>>8)&0xff;
-		uint8_t param3rd=(param>>16)&0xff;
+		const uint8_t demod_mode = param&0xff;
+		const uint8_t param2nd=(param>>8)&0xff;
+		const uint8_t param3rd=(param>>16)&0xff;
 
-		switch(param&0xff)
+		if (demod_mode == DEMOD_DIGI)
+		{
+			// a digital mode key selects the mode and enters digital mode, both are done by the
+			// shared entry point which the mode box and the menu use as well
+			UiDriver_SetDigitalMode(param3rd);
+
+			// the key names the sideband explicitly, this wins over the sideband which is taken from
+			// SSB when digital mode is entered. Like the mode itself it is not changed while tuning
+			// or transmitting
+			if ((ts.dmod_mode == DEMOD_DIGI) && (ts.txrx_mode == TRX_MODE_RX) && (ts.tune == 0))
+			{
+				ts.digi_lsb = param2nd;
+				UiDriver_UpdateDisplayAfterParamChange();
+			}
+			UiVk_DrawVKeypad();
+			return;
+		}
+
+		switch(demod_mode)
 		{
 		case DEMOD_CW:
 			ts.cw_lsb=param2nd;
@@ -777,13 +796,9 @@ static void UiVk_ModSelVKeyCallBackShort(uint8_t KeyNum, uint32_t param)
 		case DEMOD_SAM:
 			ads.sam_sideband = param2nd;
 			break;
-		case DEMOD_DIGI:
-			ts.digi_lsb=param2nd;
-			ts.digital_mode=param3rd;
-			break;
 		}
 
-		UiDriver_SetDemodMode(param&0xff);
+		UiDriver_SetDemodMode(demod_mode);
 		UiVk_DrawVKeypad();
 	}
 }
@@ -901,18 +916,10 @@ const VKey Keys_ModSel480x320[]={
 		{.ShortFnc=UiVk_ModSelVKeyCallBackShort, .ShortPar=DEMOD_DIGI|(0<<8)|(DigitalMode_RTTY<<16), .KeyText="DIGI\nRTTY-U", .LongFnc=UiVk_ModSelVKeyToggleDIGI,.TextColor=col_Keys_BndSel_npr, .PressedTextColor=col_Keys_BndSel_pr},
 		{.ShortFnc=UiVk_ModSelVKeyCallBackShort, .ShortPar=DEMOD_DIGI|(1<<8)|(DigitalMode_BPSK<<16), .KeyText="DIGI\nBPSK-L", .LongFnc=UiVk_ModSelVKeyToggleDIGI,.TextColor=col_Keys_BndSel_npr, .PressedTextColor=col_Keys_BndSel_pr},
 		{.ShortFnc=UiVk_ModSelVKeyCallBackShort, .ShortPar=DEMOD_DIGI|(0<<8)|(DigitalMode_BPSK<<16), .KeyText="DIGI\nBPSK-U", .LongFnc=UiVk_ModSelVKeyToggleDIGI,.TextColor=col_Keys_BndSel_npr, .PressedTextColor=col_Keys_BndSel_pr},
-#ifdef USE_FREEDV
-		{.ShortFnc=UiVk_ModSelVKeyCallBackShort, .ShortPar=DEMOD_DIGI|(1<<8)|(DigitalMode_FreeDV<<16), .KeyText="DIGI\nFreeDV-L", .LongFnc=UiVk_ModSelVKeyToggleDIGI,.TextColor=col_Keys_BndSel_npr, .PressedTextColor=col_Keys_BndSel_pr},
-		{.ShortFnc=UiVk_ModSelVKeyCallBackShort, .ShortPar=DEMOD_DIGI|(0<<8)|(DigitalMode_FreeDV<<16), .KeyText="DIGI\nFreeDV-U", .LongFnc=UiVk_ModSelVKeyToggleDIGI,.TextColor=col_Keys_BndSel_npr, .PressedTextColor=col_Keys_BndSel_pr},
-#endif
 };
 
 const VKeypad Keypad_ModSel480x320={
-#ifdef USE_FREEDV
-	.NumberOfKeys=15,
-#else
 	.NumberOfKeys=13,
-#endif
 	.Rows=3,
 	.Columns=5,
 	.Keys=Keys_ModSel480x320,

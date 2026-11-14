@@ -120,15 +120,10 @@
     #define USE_8bit_FONT
     #define USE_PREDEFINED_WINDOW_DATA
 
-    // OPTION
-    // with IS_SMALL_BUILD we are not automatically including USE_FREEDV as it uses lot of memory
-    // both RAM and flash
-    #define USE_FREEDV
 #endif // IS_SMALL_BUILD
 
 // some special switches
 //#define   DEBUG_BUILD
-//#define   DEBUG_FREEDV
 
 // if enabled the alternate (read new and better) noise reduction is active
 // this is the standard NR now (Febr 2018)
@@ -222,12 +217,6 @@
 #define SAMPLES_PER_CENTISECOND (IQ_SAMPLE_RATE/100)
 
 
-#ifdef STM32F4
-    #define USE_SIMPLE_FREEDV_FILTERS
-    #define USE_FREEDV_1600
-#else
-    #define USE_FREEDV_700D
-#endif
 
 
 #if (IQ_SAMPLE_RATE) != 48000

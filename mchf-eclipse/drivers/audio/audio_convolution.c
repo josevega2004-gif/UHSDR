@@ -15,10 +15,8 @@
 #include "arm_const_structs.h"
 #include "filters.h"
 
-// we cannot use a shared buffer structure with FreeDV,
-// because we need to filter with convolution and simultaneously
-// use FreeDV buffers, if we switch on digital voice mode FreeDV
-// user code
+// convolution needs buffers of its own, the audio interrupt is using the
+// shared buffers at the same time
 
 #ifdef USE_CONVOLUTION
 __IO int32_t Sample_in_head = 0;
@@ -552,12 +550,6 @@ void AudioDriver_RxProcessorConvolution(AudioSample_t * const src, AudioSample_t
 
         bool dvmode_signal = false;
 
-#ifdef USE_FREEDV
-        if (ts.dvmode == true && ts.digital_mode == DigitalMode_FreeDV)
-        {
-            dvmode_signal = AudioDriver_RxProcessorDigital(src, adb.a_buffer[1], blockSize);
-        }
-#endif
 
 	// Convolution Filtering DD4WH 2018_08_18
 
@@ -606,7 +598,7 @@ void AudioDriver_RxProcessorConvolution(AudioSample_t * const src, AudioSample_t
 
                 for (int k = 0; k < blockSizeDecim; k++) //transfer our noisy audio to our NR-input buffer
                 {
-                	// use new buffers for I & Q, because we cannot use FreeDV buffers
+                	// use new buffers for I & Q, because we cannot use the shared buffers
                 	cob.i_buffer_convolution[Sample_fill_in_pt][trans_count_in] = adb.i_buffer[k];
                 	cob.q_buffer_convolution[Sample_fill_in_pt][trans_count_in] = adb.q_buffer[k];
 
@@ -790,12 +782,8 @@ void AudioDriver_RxProcessorConvolution(AudioSample_t * const src, AudioSample_t
 
                 if (ts.nb_setting > 0 || (dsp_active & DSP_NR_ENABLE)) //start of new nb or new noise reduction
                 {
-                    // NR_in and _out buffers are using the same physical space than the freedv_iq_buffer in a
-                    // shared MultiModeBuffer union.
-                    // for NR reduction we use a maximum of 256 real samples
-                    // so we use the freedv_iq buffers in a way, that we use the first half of each array for the input
-                    // and the second half for the output
-                    // .real and .imag are loosing there meaning here as they represent consecutive real samples
+                    // NR in and out buffers are the share of the multi mode buffers used for the audio
+                    // interrupt: the input uses the first half of each array, the output the second half
 
                     if (ads.decimation_rate == 4)   //  to make sure, that we are at 12Ksamples
                     {

@@ -17,8 +17,6 @@
 //#define IQ_RX_NUM_TAPS_HI      499
 //#define IQ_RX_NUM_TAPS_MAX     499
 
-#define FIR_TX_FREEDV_INTERPOLATE_NUM_TAPS 30
-
 typedef struct {
     const float32_t* i;
     const float32_t* q;
@@ -33,8 +31,6 @@ extern const arm_fir_interpolate_instance_f32 FirRxInterpolate;
 extern const arm_fir_interpolate_instance_f32 FirRxInterpolate_4_5k;
 extern const arm_fir_interpolate_instance_f32 FirRxInterpolate_4_10k;
 extern const arm_fir_interpolate_instance_f32 FirRxInterpolate10KHZ;
-extern const arm_fir_instance_f32 Fir_TxFreeDV_Interpolate;
-extern const float Fir_Rx_FreeDV_Interpolate_Coeffs[24];
 
 extern const float iq_rx_am_10k_coeffs[IQ_RX_NUM_TAPS];
 extern const float iq_rx_am_2k3_coeffs[IQ_RX_NUM_TAPS];
@@ -53,10 +49,6 @@ extern const float i_rx_7k5_coeffs[IQ_RX_NUM_TAPS];
 //extern const float i_rx_coeffs[IQ_NUM_TAPS];
 extern const float i_rx_wow_coeffs[IQ_RX_NUM_TAPS_HI];
 extern const float i_rx_new_coeffs[IQ_RX_NUM_TAPS_HI];
-extern const float i_rx_FREEDV_700D_coeffs[IQ_RX_NUM_TAPS];
-extern const float q_rx_FREEDV_700D_coeffs[IQ_RX_NUM_TAPS];
-extern const float i_rx_FREEDV_700D_F4_coeffs[IQ_RX_NUM_TAPS_LO];
-extern const float q_rx_FREEDV_700D_F4_coeffs[IQ_RX_NUM_TAPS_LO];
 
 extern const float q_rx_new_coeffs[IQ_RX_NUM_TAPS_HI];
 extern const float q_rx_wow_coeffs[IQ_RX_NUM_TAPS_HI];

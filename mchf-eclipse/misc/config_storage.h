@@ -14,8 +14,13 @@
 #ifndef __CONFIG_STORAGE_H
 #define __CONFIG_STORAGE_H
 
-/* Max variables number */
-#define NB_OF_VAR               (0x1ff)
+/*
+ * Number of configuration values the storage can address, the highest usable value id is therefore
+ * NB_OF_VAR - 1. Every value occupies one 32 bit record in the flash page used for the EEPROM
+ * emulation and two bytes in a serial EEPROM. The flash page has to hold several complete saves
+ * before it is swapped, which is what limits this number, see uhsdr_flash.c.
+ */
+#define NB_OF_VAR               (0x3ff)
 
 
 void ConfigStorage_Init();

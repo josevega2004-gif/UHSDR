@@ -117,6 +117,18 @@ typedef struct {
 
 extern const pa_power_levels_info_t mchf_power_levelsInfo;
 
+typedef enum
+{
+    AmSideband_Both = 0,        // carrier plus both sidebands, the classic AM signal
+    AmSideband_LSB,             // carrier plus the lower sideband only
+    AmSideband_USB,             // carrier plus the upper sideband only
+    AmSideband_Num
+} am_sideband_t;
+
+// a single sideband AM signal puts its modulation power into one sideband only, so it can run a
+// higher carrier than double sideband AM, which is limited by the PA to AM_SIDEBAND_MAX_POWER
+#define AM_SIDEBAND_MAX_POWER   10000
+
 typedef struct
 {
     char* name;
@@ -145,16 +157,14 @@ typedef enum
     BAND_MODE_17 = 5,
     BAND_MODE_15 = 6,
     BAND_MODE_12 = 7,
-    BAND_MODE_10 = 8,
-    BAND_MODE_6 =  9,
-    BAND_MODE_4 =  10,
-    BAND_MODE_2 =  11,
-    BAND_MODE_70 = 12,
-    BAND_MODE_23 = 13,
-    BAND_MODE_2200 = 14,
-    BAND_MODE_630 = 15,
-    BAND_MODE_160 = 16,
-    BAND_MODE_GEN = 17          // General Coverage
+    BAND_MODE_11 = 8,
+    BAND_MODE_10 = 9,
+    BAND_MODE_6 =  10,
+    BAND_MODE_2200 = 11,
+    BAND_MODE_630 = 12,
+    BAND_MODE_160 = 13,
+    BAND_MODE_8 = 14,
+    BAND_MODE_GEN = 15          // General Coverage
 } band_mode_t;
 
 
@@ -168,9 +178,7 @@ typedef enum
     COUPLING_20M,
     COUPLING_15M,
     COUPLING_6M,
-    COUPLING_2M,
-    COUPLING_70CM,
-    COUPLING_23CM,
+    COUPLING_11M,
     COUPLING_MAX
 } filter_band_t;
 
@@ -283,25 +291,15 @@ typedef enum {
 
 typedef enum
 {
-    DigitalMode_None = 0,
-#ifdef USE_FREEDV
-    DigitalMode_FreeDV,
-#endif
+    DigitalMode_None = 0,       // idle state, no digital modulation, the transceiver works analog
     DigitalMode_RTTY,
     DigitalMode_BPSK,
     DigitalMode_Num_Modes
 } digital_modes_t;
 
-typedef struct
-{
-    const char* label;
-    const uint32_t enabled;
-} digital_mode_desc_t;
-
-// The following descriptor table has to be in the order of the enum digital_modes_t in  radio_management.h
-// This table is stored in flash (due to const) and cannot be written to
-// for operational data per mode [r/w], use a different table with order of modes
-extern const digital_mode_desc_t digimodes[DigitalMode_Num_Modes];
+// Names of the digital modes, indexed by digital_modes_t. RTTY and BPSK are the digital
+// modulation modes, DigitalMode_None only marks the idle state.
+extern const char* const digimodes[DigitalMode_Num_Modes];
 
 
 typedef struct

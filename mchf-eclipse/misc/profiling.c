@@ -57,7 +57,7 @@ void profileEventsTracePrint()
 {
 #ifdef XPROFILE_EVENTS
 
-            for (int i = 0;i < 10;i++)
+            for (int i = 0;i < EventProfileMax;i++)
             {
                 ProfilingTimedEvent* ev_ptr = profileTimedEventGet(i);
                 if (ev_ptr->count != 0)

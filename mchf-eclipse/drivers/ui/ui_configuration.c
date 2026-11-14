@@ -41,6 +41,187 @@ static int32_t UiConfiguration_CompareConfigBuildVersions(uint major, uint32_t m
 
 static uint16_t number_of_entries_cur_fw; // we need this to be able to read config values without modifying anything
 
+// set while a configuration stored in the previous EEPROM layout is read, see UiConfiguration_LoadEepromValues()
+static bool config_layout_migration_active = false;
+
+/*
+ * Migration of configurations stored with the previous EEPROM layout.
+ *
+ * The previous layout had 17 bands plus general coverage and used 18 slots per per-band block.
+ * The current layout has 14 bands plus general coverage (11m added, 4m/2m/70cm/23cm removed) and
+ * uses 15 slots per block, so almost every configuration address moved. Instead of forcing all
+ * settings to their defaults, a stored configuration is read once through the address translation
+ * below and then written back in the current layout by the next save.
+ *
+ * Values below were derived by comparing both address maps. Only the band dependent blocks need a
+ * real translation, the remaining values moved by a constant offset per section.
+ */
+#define CONFIG_LAYOUT_OLD_NO_VALUE     0xffff               // value did not exist in the previous layout
+#define CONFIG_LAYOUT_NEW_BAND_SLOTS   (MAX_BANDS)          // per band memories per block, general coverage is not stored
+#define CONFIG_LAYOUT_OLD_BAND_SLOTS   18                   // bands plus general coverage, previous layout
+#define CONFIG_LAYOUT_OLD_VFO_BASE     183                  // EEPROM_BAND0_MODE_A of the previous layout
+#define CONFIG_LAYOUT_OLD_FULL_BASE    115                  // EEPROM_BAND0_FULL of the previous layout
+
+#if (EEPROM_CONFIG_LAYOUT_VERSION >= EEPROM_FIRST_UNUSED)
+    #error "The configuration layout marker must be inside the configuration address range"
+#endif
+
+/**
+ * Per-band EEPROM slot of a band in the previous layout
+ * @param new_slot band slot in the current layout
+ * @return the slot used by the previous layout or CONFIG_LAYOUT_OLD_NO_VALUE if the band did not exist there
+ */
+static uint16_t UiConfiguration_OldBandSlot(uint16_t new_slot)
+{
+    switch (new_slot)
+    {
+    case BAND_MODE_10:   return 8;      // 10m was band memory 8
+    case BAND_MODE_6:    return 9;      // 6m was band memory 9
+    case BAND_MODE_2200: return 14;
+    case BAND_MODE_630:  return 15;
+    case BAND_MODE_160:  return 16;
+    case BAND_MODE_GEN:  return 17;                         // general coverage was the last slot
+    case BAND_MODE_11:   return CONFIG_LAYOUT_OLD_NO_VALUE; // no 11m band memory existed before
+    case BAND_MODE_8:    return CONFIG_LAYOUT_OLD_NO_VALUE; // no 8m band memory existed before
+    default:             return new_slot;                   // 80m .. 12m kept their band memory
+    }
+}
+
+/**
+ * Translates a band slot stored by the previous layout into the current band numbering
+ * @param old_slot band slot as stored by the previous layout
+ * @return band slot of the current layout
+ */
+static uint8_t UiConfiguration_NewBandSlot(uint8_t old_slot)
+{
+    switch (old_slot)
+    {
+    case 8:  return BAND_MODE_10;
+    case 9:  return BAND_MODE_6;
+    case 14: return BAND_MODE_2200;
+    case 15: return BAND_MODE_630;
+    case 16: return BAND_MODE_160;
+    case 10:    // 4m  - no longer supported
+    case 11:    // 2m  - no longer supported
+    case 12:    // 70cm - no longer supported
+    case 13:    // 23cm - no longer supported
+    case 17:    // general coverage is not a selectable band memory
+        return BAND_MODE_80;
+    default:
+        return old_slot < MAX_BANDS ? old_slot : BAND_MODE_80;
+    }
+}
+
+/**
+ * Address of a configuration value in the previous EEPROM layout
+ * @param id address of the value in the current layout
+ * @return address of the value in the previous layout or CONFIG_LAYOUT_OLD_NO_VALUE if it did not exist there
+ */
+static uint16_t UiConfiguration_OldLayoutAddress(uint16_t id)
+{
+    // per band output power factors. The 5W table kept its base address, the FULL table lost three slots
+    if (id >= EEPROM_BAND0_5W && id <= EEPROM_BAND13_5W)
+    {
+        uint16_t slot = UiConfiguration_OldBandSlot(id - EEPROM_BAND0_5W);
+        return slot == CONFIG_LAYOUT_OLD_NO_VALUE ? slot : (uint16_t)(EEPROM_BAND0_5W + slot);
+    }
+    if (id >= EEPROM_BAND0_FULL && id <= EEPROM_BAND13_FULL)
+    {
+        uint16_t slot = UiConfiguration_OldBandSlot(id - EEPROM_BAND0_FULL);
+        return slot == CONFIG_LAYOUT_OLD_NO_VALUE ? slot : (uint16_t)(CONFIG_LAYOUT_OLD_FULL_BASE + slot);
+    }
+
+    // per band mode/frequency memories of VFO A and VFO B: six contiguous blocks
+    if (id >= EEPROM_BAND0_MODE_A && id < EEPROM_BAND0_MODE_A + 6 * CONFIG_LAYOUT_NEW_BAND_SLOTS)
+    {
+        uint16_t block = (id - EEPROM_BAND0_MODE_A) / CONFIG_LAYOUT_NEW_BAND_SLOTS;
+        uint16_t slot = UiConfiguration_OldBandSlot((id - EEPROM_BAND0_MODE_A) % CONFIG_LAYOUT_NEW_BAND_SLOTS);
+        if (slot == CONFIG_LAYOUT_OLD_NO_VALUE)
+        {
+            return CONFIG_LAYOUT_OLD_NO_VALUE;
+        }
+        return (uint16_t)(CONFIG_LAYOUT_OLD_VFO_BASE + block * CONFIG_LAYOUT_OLD_BAND_SLOTS + slot);
+    }
+
+    // the remaining values moved by a constant offset per section
+    if (id < EEPROM_BAND0_5W)
+    {
+        return id;                                          // 80m .. 12m power factors and all low addresses
+    }
+    if (id < 127)
+    {
+        return id;                                          // reserved slots of the band power tables
+    }
+    if (id < 160)
+    {
+        return id + 6;                                      // after the band power tables
+    }
+    if (id < EEPROM_BAND0_MODE_A)
+    {
+        return id + 4;                                      // DSP/AGC block
+    }
+    if (id < 295)
+    {
+        return id + 22;                                     // after the per band memories
+    }
+    if (id < 299)
+    {
+        return id + 32;
+    }
+    if (id <= EEPROM_BAND_REGION)
+    {
+        return id + 57;                                     // EEPROM_BAND_REGION was the last address of the previous layout
+    }
+    return CONFIG_LAYOUT_OLD_NO_VALUE;
+}
+
+/**
+ * Base address of one of the six per band memory blocks, taking a pending layout migration into account
+ * @param new_base base address of the block in the current layout
+ * @return base address of the block to read from
+ */
+static uint16_t UiConfiguration_BandMemBlockBase(uint16_t new_base)
+{
+    if (!config_layout_migration_active)
+    {
+        return new_base;
+    }
+    uint16_t block = (new_base - EEPROM_BAND0_MODE_A) / CONFIG_LAYOUT_NEW_BAND_SLOTS;
+    return (uint16_t)(CONFIG_LAYOUT_OLD_VFO_BASE + block * CONFIG_LAYOUT_OLD_BAND_SLOTS);
+}
+
+/**
+ * Address to read a configuration value from, taking a pending layout migration into account
+ * @param id address of the value in the current layout
+ * @return address to read the value from
+ */
+static uint16_t UiConfiguration_LayoutAddress(uint16_t id)
+{
+    uint16_t old_id = config_layout_migration_active ? UiConfiguration_OldLayoutAddress(id) : id;
+    return old_id == CONFIG_LAYOUT_OLD_NO_VALUE ? id : old_id;
+}
+
+/**
+ * Is the stored configuration still using the previous EEPROM layout?
+ * The previous firmware never stored the layout marker, so its absence identifies such a configuration.
+ * @return true if the configuration has to be migrated
+ */
+static bool UiConfiguration_LayoutMigrationRequired(void)
+{
+    uint16_t layout_version = 0;
+
+    if (ts.configstore_in_use == CONFIGSTORE_IN_USE_ERROR)
+    {
+        return false;                                       // no usable storage, nothing to migrate
+    }
+    if (ConfigStorage_ReadVariable(EEPROM_CONFIG_LAYOUT_VERSION, &layout_version) != HAL_OK)
+    {
+        // the marker may still be stored at the address used before the AM carrier level was added,
+        return true;                                        // no marker was ever stored
+    }
+    return layout_version != CONFIG_LAYOUT_VERSION_MAGIC;
+}
+
 #define CONFIG_UINT8x2_COMBINE(a,b) ((((a) << 8) | (b)))
 
 #define UI_C_EEPROM_BAND_5W_PF(bandNo,bandName1,bandName2) { ConfigEntry_UInt8 | Calib_Val, EEPROM_BAND##bandNo##_5W,&ts.pwr_adj[ADJ_REF_PWR][BAND_MODE_##bandName1],TX_POWER_FACTOR_##bandName1##_DEFAULT,0,TX_POWER_FACTOR_MAX },
@@ -88,6 +269,12 @@ const ConfigEntryDescriptor ConfigEntryInfo[] =
     { ConfigEntry_Int32_16, EEPROM_AGC_WDSP_TAU_DECAY_4,&agc_wdsp_conf.tau_decay[4], 50,100,5000}, // NO INT DEFAULT PROBLEM
     { ConfigEntry_Int32_16, EEPROM_AGC_WDSP_TAU_HANG_DECAY,&agc_wdsp_conf.tau_hang_decay, 500,100,5000}, // NO INT DEFAULT PROBLEM
     { ConfigEntry_Int32_16, EEPROM_MIC_BOOST,&ts.tx_mic_boost, MIC_BOOST_DEFAULT,MIC_BOOST_MIN,MIC_BOOST_MAX},
+    { ConfigEntry_UInt8, EEPROM_AM_CARRIER_LEVEL,&ts.am_carrier_level,AM_CARRIER_LEVEL_DEFAULT,AM_CARRIER_LEVEL_MIN,AM_CARRIER_LEVEL_MAX},
+    { ConfigEntry_UInt8, EEPROM_AM_TX_SIDEBAND,&ts.am_tx_sideband,AmSideband_Both,AmSideband_Both,AmSideband_USB},
+    { ConfigEntry_UInt8, EEPROM_AM_PEP_HOLD,&ts.am_carrier_pep_hold,AM_PEP_HOLD_DEFAULT,AM_PEP_HOLD_MIN,AM_PEP_HOLD_MAX},
+    { ConfigEntry_UInt8, EEPROM_AM_PEP_DIM,&ts.am_carrier_pep_dim,AM_PEP_DIM_DEFAULT,0,1},
+    { ConfigEntry_UInt8, EEPROM_AM_PEP_TARGET,&ts.am_carrier_pep_target,AM_PEP_TARGET_DEFAULT,AM_PEP_TARGET_MIN,AM_PEP_TARGET_MAX},
+    { ConfigEntry_UInt8, EEPROM_AM_PEP_WARN,&ts.am_carrier_pep_warn,AM_PEP_WARN_DEFAULT,AM_PEP_WARN_MIN,AM_PEP_WARN_MAX},
     { ConfigEntry_UInt8, EEPROM_MIC_GAIN,&ts.tx_gain[TX_AUDIO_MIC], MIC_GAIN_DEFAULT,MIC_GAIN_MIN,MIC_GAIN_MAX},
     { ConfigEntry_UInt8, EEPROM_LINE_GAIN,&ts.tx_gain[TX_AUDIO_LINEIN_L], LINE_GAIN_DEFAULT,LINE_GAIN_MIN,LINE_GAIN_MAX},
     { ConfigEntry_UInt32_16, EEPROM_SIDETONE_FREQ,&ts.cw_sidetone_freq,CW_SIDETONE_FREQ_DEFAULT,CW_SIDETONE_FREQ_MIN,CW_SIDETONE_FREQ_MAX},
@@ -179,6 +366,7 @@ const ConfigEntryDescriptor ConfigEntryInfo[] =
     { ConfigEntry_UInt8 | Calib_Val, EEPROM_DETECTOR_COUPLING_COEFF_20M,&swrm.coupling_calc[COUPLING_20M],SWR_COUPLING_DEFAULT,SWR_COUPLING_MIN,SWR_COUPLING_MAX},
     { ConfigEntry_UInt8 | Calib_Val, EEPROM_DETECTOR_COUPLING_COEFF_15M,&swrm.coupling_calc[COUPLING_15M],SWR_COUPLING_DEFAULT,SWR_COUPLING_MIN,SWR_COUPLING_MAX},
     { ConfigEntry_UInt8 | Calib_Val, EEPROM_DETECTOR_COUPLING_COEFF_6M,&swrm.coupling_calc[COUPLING_6M],SWR_COUPLING_DEFAULT,SWR_COUPLING_MIN,SWR_COUPLING_MAX},
+    { ConfigEntry_UInt8 | Calib_Val, EEPROM_DETECTOR_COUPLING_COEFF_11M,&swrm.coupling_calc[COUPLING_11M],SWR_COUPLING_DEFAULT,SWR_COUPLING_MIN,SWR_COUPLING_MAX},
     { ConfigEntry_UInt32_16 | Calib_Val, EEPROM_VOLTMETER_CALIBRATE,&ts.voltmeter_calibrate,POWER_VOLTMETER_CALIBRATE_DEFAULT,POWER_VOLTMETER_CALIBRATE_MIN,POWER_VOLTMETER_CALIBRATE_MAX},
     { ConfigEntry_UInt8 | Calib_Val, EEPROM_LOW_POWER_CONFIG,&ts.low_power_config,LOW_POWER_CONFIG_DEFAULT,LOW_POWER_CONFIG_MIN,LOW_POWER_CONFIG_MAX},
     { ConfigEntry_UInt8, EEPROM_WATERFALL_COLOR_SCHEME,&ts.waterfall.color_scheme,WATERFALL_COLOR_DEFAULT,WATERFALL_COLOR_MIN,WATERFALL_COLOR_MAX},
@@ -205,7 +393,7 @@ const ConfigEntryDescriptor ConfigEntryInfo[] =
     { ConfigEntry_UInt8, EEPROM_DISPLAY_DBM,&ts.display_dbm,0,0,2},
     { ConfigEntry_Int32_16 | Calib_Val, EEPROM_DBM_CALIBRATE,&ts.dbm_constant,0,-100,100}, // MINOR INT DEFAULT PROBLEM,see above
 //    { ConfigEntry_UInt8, EEPROM_S_METER,&ts.s_meter,0,0,2},
-    { ConfigEntry_UInt8, EEPROM_DIGI_MODE_CONF,&ts.digital_mode,DigitalMode_None,0,DigitalMode_Num_Modes-1},
+    { ConfigEntry_UInt8, EEPROM_DIGI_MODE_CONF,&ts.digital_mode,DigitalMode_RTTY,DigitalMode_RTTY,DigitalMode_BPSK},
 	{ ConfigEntry_Int32_16, EEPROM_BASS_GAIN,&ts.dsp.bass_gain,2,-20,20}, // INT DEFAULT PROBLEM,see above
     { ConfigEntry_Int32_16, EEPROM_TREBLE_GAIN,&ts.dsp.treble_gain,0,-20,20},  // MINOR INT DEFAULT PROBLEM,see above
     { ConfigEntry_UInt8, EEPROM_TX_FILTER,&ts.tx_filter,0,0,TX_FILTER_BASS},
@@ -224,7 +412,7 @@ const ConfigEntryDescriptor ConfigEntryInfo[] =
 	{ ConfigEntry_UInt8, EEPROM_Freq_Display_Font,&ts.FreqDisplayFont,0,0,1},
 
 
-    UI_C_EEPROM_BAND_5W_PF( 0,80,m)
+    UI_C_EEPROM_BAND_5W_PF(0,80,m)
     UI_C_EEPROM_BAND_5W_PF(1,60,m)
     UI_C_EEPROM_BAND_5W_PF(2,40,m)
     UI_C_EEPROM_BAND_5W_PF(3,30,m)
@@ -232,15 +420,13 @@ const ConfigEntryDescriptor ConfigEntryInfo[] =
     UI_C_EEPROM_BAND_5W_PF(5,17,m)
     UI_C_EEPROM_BAND_5W_PF(6,15,m)
     UI_C_EEPROM_BAND_5W_PF(7,12,m)
-    UI_C_EEPROM_BAND_5W_PF(8,10,m)
-    UI_C_EEPROM_BAND_5W_PF(9,6,m)
-    UI_C_EEPROM_BAND_5W_PF(10,4,m)
-    UI_C_EEPROM_BAND_5W_PF(11,2,m)
-    UI_C_EEPROM_BAND_5W_PF(12,70,cm)
-    UI_C_EEPROM_BAND_5W_PF(13,23,cm)
-    UI_C_EEPROM_BAND_5W_PF(14,2200,m)
-    UI_C_EEPROM_BAND_5W_PF(15,630,m)
-    UI_C_EEPROM_BAND_5W_PF(16,160,m)
+    UI_C_EEPROM_BAND_5W_PF(8,11,m)
+    UI_C_EEPROM_BAND_5W_PF(9,10,m)
+    UI_C_EEPROM_BAND_5W_PF(10,6,m)
+    UI_C_EEPROM_BAND_5W_PF(11,2200,m)
+    UI_C_EEPROM_BAND_5W_PF(12,630,m)
+    UI_C_EEPROM_BAND_5W_PF(13,160,m)
+    
     UI_C_EEPROM_BAND_FULL_PF(0,80,m)
     UI_C_EEPROM_BAND_FULL_PF(1,60,m)
     UI_C_EEPROM_BAND_FULL_PF(2,40,m)
@@ -249,15 +435,12 @@ const ConfigEntryDescriptor ConfigEntryInfo[] =
     UI_C_EEPROM_BAND_FULL_PF(5,17,m)
     UI_C_EEPROM_BAND_FULL_PF(6,15,m)
     UI_C_EEPROM_BAND_FULL_PF(7,12,m)
-    UI_C_EEPROM_BAND_FULL_PF(8,10,m)
-    UI_C_EEPROM_BAND_FULL_PF(9,6,m)
-    UI_C_EEPROM_BAND_FULL_PF(10,4,m)
-    UI_C_EEPROM_BAND_FULL_PF(11,2,m)
-    UI_C_EEPROM_BAND_FULL_PF(12,70,cm)
-    UI_C_EEPROM_BAND_FULL_PF(13,23,cm)
-    UI_C_EEPROM_BAND_FULL_PF(14,2200,m)
-    UI_C_EEPROM_BAND_FULL_PF(15,630,m)
-    UI_C_EEPROM_BAND_FULL_PF(16,160,m)
+    UI_C_EEPROM_BAND_FULL_PF(8,11,m)
+    UI_C_EEPROM_BAND_FULL_PF(9,10,m)
+    UI_C_EEPROM_BAND_FULL_PF(10,6,m)
+    UI_C_EEPROM_BAND_FULL_PF(11,2200,m)
+    UI_C_EEPROM_BAND_FULL_PF(12,630,m)
+    UI_C_EEPROM_BAND_FULL_PF(13,160,m)
 	{ ConfigEntry_UInt8, EEPROM_Scope_TRACE_HL_BW,&ts.scope_trace_BW_colour,SPEC_COLOUR_TRACEBW_DEFAULT,0,SPEC_MAX_COLOUR},
 	{ ConfigEntry_UInt8, EEPROM_Scope_TRACE_HL_BW_BGR,&ts.scope_backgr_BW_colour,SPEC_COLOUR_BACKGRBW_DEFAULT,0,100},
 	{ ConfigEntry_Int32 | Calib_Val, EEPROM_TScal0_High,&mchf_touchscreen.cal[0], 72816, INT32_MIN,INT32_MAX}, // INT DEFAULT PROBLEM,see above
@@ -542,17 +725,21 @@ static uint32_t UiConfiguration_LimitFrequency(BandInfo_c* bandInfo, const uint3
     return do_reset == true? resetval : retval;
 }
 
-void UiReadSettingsBandMode(const uint8_t i, const uint16_t band_mode, const uint16_t band_freq_high, const uint16_t  band_freq_low, VfoReg* vforeg, bool load_default)
+/**
+ * @param i index into the band table, also selects the band info used for the defaults
+ * @param mem_slot band memory slot to read from, differs from i while migrating a stored configuration
+ */
+void UiReadSettingsBandMode(const uint8_t i, const uint16_t mem_slot, const uint16_t band_mode, const uint16_t band_freq_high, const uint16_t  band_freq_low, VfoReg* vforeg, bool load_default)
 {
     uint32_t value32;
 
-    UiReadSettingEEPROM_UInt8x2_Split(band_mode + i,
+    UiReadSettingEEPROM_UInt8x2_Split(band_mode + mem_slot,
             &vforeg->decod_mode, DEMOD_LSB, 0, DEMOD_MAX_MODE,
-            &vforeg->digital_mode, DigitalMode_None, 0, DigitalMode_Num_Modes-1,
+            &vforeg->digital_mode, DigitalMode_RTTY, DigitalMode_RTTY, DigitalMode_BPSK,
             load_default);
 
     // Try to read Freq saved values
-    UiReadSettingEEPROM_UInt32(band_freq_high + i, band_freq_low + i,&value32,bandInfo[i]->tune + DEFAULT_FREQ_OFFSET,0,0xffffffff, load_default);
+    UiReadSettingEEPROM_UInt32(band_freq_high + mem_slot, band_freq_low + mem_slot,&value32,bandInfo[i]->tune + DEFAULT_FREQ_OFFSET,0,0xffffffff, load_default);
     {
         // We make sure to read only frequency which are permitted for band in given
         // configuration.
@@ -627,11 +814,12 @@ static uint16_t UiWriteSettingEEPROM_Filter()
 void UiReadSettingEEPROM_Filter(bool load_default)
 {
     int idx, mem_idx;
+    const uint16_t base = UiConfiguration_LayoutAddress(EEPROM_FILTER_PATH_MAP_BASE);
     for (idx = 0; idx < FILTER_MODE_MAX; idx++)
     {
         for (mem_idx = 0; mem_idx < FILTER_PATH_MEM_MAX; mem_idx++)
         {
-            UiReadSettingEEPROM_UInt16(EEPROM_FILTER_PATH_MAP_BASE+idx*FILTER_PATH_MEM_MAX+mem_idx,&(ts.filter_path_mem[idx][mem_idx]),0,0,AUDIO_FILTER_PATH_NUM-1, load_default);
+            UiReadSettingEEPROM_UInt16(base+idx*FILTER_PATH_MEM_MAX+mem_idx,&(ts.filter_path_mem[idx][mem_idx]),0,0,AUDIO_FILTER_PATH_NUM-1, load_default);
         }
     }
 }
@@ -652,9 +840,10 @@ static int32_t UiConfiguration_CompareConfigBuildVersions(uint major, uint32_t m
 
     if (config_major == 0)
     {
-        UiReadSettingEEPROM_UInt16(EEPROM_VERSION_MAJOR,&config_major,0,0,255, false);
-        UiReadSettingEEPROM_UInt16(EEPROM_VERSION_MINOR,&config_minor,0,0,255, false);
-        UiReadSettingEEPROM_UInt16(EEPROM_VERSION_RELEASE,&config_release,0,0,255, false);
+        // while migrating, the version was stored at the address of the previous layout
+        UiReadSettingEEPROM_UInt16(UiConfiguration_LayoutAddress(EEPROM_VERSION_MAJOR),&config_major,0,0,255, false);
+        UiReadSettingEEPROM_UInt16(UiConfiguration_LayoutAddress(EEPROM_VERSION_MINOR),&config_minor,0,0,255, false);
+        UiReadSettingEEPROM_UInt16(UiConfiguration_LayoutAddress(EEPROM_VERSION_RELEASE),&config_release,0,0,255, false);
     }
 
     if (major < config_major)
@@ -684,35 +873,35 @@ static int32_t UiConfiguration_CompareConfigBuildVersions(uint major, uint32_t m
 }
 
 
-void UiConfiguration_ReadConfigEntryData(const ConfigEntryDescriptor* ced_ptr, bool load_default)
+void UiConfiguration_ReadConfigEntryData(const ConfigEntryDescriptor* ced_ptr, bool load_default, uint16_t addr)
 {
     switch(ced_ptr->typeId & ConfigEntry_TypeMask)
     {
 
     case ConfigEntry_UInt8:
-        UiReadSettingEEPROM_UInt8(ced_ptr->id,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+        UiReadSettingEEPROM_UInt8(addr,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
         break;
     case ConfigEntry_UInt16:
-        UiReadSettingEEPROM_UInt16(ced_ptr->id,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+        UiReadSettingEEPROM_UInt16(addr,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
         break;
     case ConfigEntry_UInt32_16:
-        UiReadSettingEEPROM_UInt32_16(ced_ptr->id,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+        UiReadSettingEEPROM_UInt32_16(addr,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
         break;
     case ConfigEntry_Int32_16:
-        UiReadSettingEEPROM_Int32_16(ced_ptr->id,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+        UiReadSettingEEPROM_Int32_16(addr,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
         break;
     case ConfigEntry_Int16:
-        UiReadSettingEEPROM_Int16(ced_ptr->id,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+        UiReadSettingEEPROM_Int16(addr,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
         break;
     case ConfigEntry_UInt8x2:
-        UiReadSettingEEPROM_UInt8x2(ced_ptr->id,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+        UiReadSettingEEPROM_UInt8x2(addr,ced_ptr->val_ptr,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
         break;
     case ConfigEntry_Int32:
     {
     	uint32_t Data;
     	uint16_t DataLo,DataHi;
-    	UiReadSettingEEPROM_UInt16(ced_ptr->id,&DataHi,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
-    	UiReadSettingEEPROM_UInt16(ced_ptr->id+1,&DataLo,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+    	UiReadSettingEEPROM_UInt16(addr,&DataHi,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+    	UiReadSettingEEPROM_UInt16(addr+1,&DataLo,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
     	Data=DataHi<<16|DataLo;
     	*(int32_t*)ced_ptr->val_ptr=(int32_t)Data;
     }
@@ -782,12 +971,28 @@ uint16_t UiConfiguration_WriteConfigEntries()
  * @param force_default_above from which parameter index on shall we force loading defaults even if load_defaults is false
  *
  */
-static void __attribute__ ((noinline)) UiConfiguration_ReadConfigEntries(bool load_default, int32_t force_default_above)
+static void __attribute__ ((noinline)) UiConfiguration_ReadConfigEntries(bool load_default, int32_t force_default_above, bool migrate)
 {
     int idx;
     for (idx = 0; ConfigEntryInfo[idx].typeId != ConfigEntry_Stop ; idx++)
     {
-        UiConfiguration_ReadConfigEntryData(&ConfigEntryInfo[idx], (ConfigEntryInfo[idx].id>force_default_above) ? true : load_default);
+        bool load_this_default = (ConfigEntryInfo[idx].id>force_default_above) ? true : load_default;
+        uint16_t addr = ConfigEntryInfo[idx].id;
+
+        if (migrate)
+        {
+            uint16_t old_addr = UiConfiguration_OldLayoutAddress(addr);
+            if (old_addr == CONFIG_LAYOUT_OLD_NO_VALUE)
+            {
+                // this value did not exist in the previous layout, use its default
+                load_this_default = true;
+            }
+            else
+            {
+                addr = old_addr;
+            }
+        }
+        UiConfiguration_ReadConfigEntryData(&ConfigEntryInfo[idx], load_this_default, addr);
     }
 }
 
@@ -875,17 +1080,27 @@ void UiConfiguration_LoadEepromValues(bool load_freq_mode_defaults, bool load_ee
 
     uint32_t value32;
 
+    // A configuration stored with the previous EEPROM layout is read through the address
+    // translation of that layout and written back in the current layout by the next save.
+    config_layout_migration_active = !load_eeprom_defaults && UiConfiguration_LayoutMigrationRequired();
+    const bool migrate = config_layout_migration_active;
 
-
-    UiConfiguration_ReadConfigEntries(load_eeprom_defaults, UiConfiguration_NeedsDefaultIndex());
+    UiConfiguration_ReadConfigEntries(load_eeprom_defaults,
+            migrate ? INT32_MAX : UiConfiguration_NeedsDefaultIndex(), migrate);
 
     // ------------------------------------------------------------------------------------
     // Try to read Band and Mode saved values, but read freq-limit-settings before
     uint8_t band_mem_idx;
     UiReadSettingEEPROM_UInt8x2_Split(EEPROM_BAND_MODE,
             &ts.dmod_mode, DEMOD_LSB, 0, DEMOD_MAX_MODE,
-            &band_mem_idx, BAND_MODE_80, 0, MAX_BANDS -1,
+            &band_mem_idx, BAND_MODE_80, 0, migrate ? 0xff : MAX_BANDS -1,
             load_eeprom_defaults);
+
+    if (migrate)
+    {
+        // the stored band memory index uses the previous band numbering
+        band_mem_idx = UiConfiguration_NewBandSlot(band_mem_idx);
+    }
 
     // restore the bandInfo for a given band info set and band memory index
     if (bandinfo_idx >= BAND_INFO_SET_NUM)
@@ -916,16 +1131,38 @@ void UiConfiguration_LoadEepromValues(bool load_freq_mode_defaults, bool load_ee
     }
     // Try to read saved per-band values for frequency, mode and filter
 
+    // the per band memory blocks start at a different address while migrating
+    const uint16_t band_mode_a = UiConfiguration_BandMemBlockBase(EEPROM_BAND0_MODE_A);
+    const uint16_t band_freq_high_a = UiConfiguration_BandMemBlockBase(EEPROM_BAND0_FREQ_HIGH_A);
+    const uint16_t band_freq_low_a = UiConfiguration_BandMemBlockBase(EEPROM_BAND0_FREQ_LOW_A);
+    const uint16_t band_mode_b = UiConfiguration_BandMemBlockBase(EEPROM_BAND0_MODE_B);
+    const uint16_t band_freq_high_b = UiConfiguration_BandMemBlockBase(EEPROM_BAND0_FREQ_HIGH_B);
+    const uint16_t band_freq_low_b = UiConfiguration_BandMemBlockBase(EEPROM_BAND0_FREQ_LOW_B);
+
     for(int i = 0; i < MAX_BANDS; i++)
     {
+        bool load_band_defaults = load_eeprom_defaults || load_freq_mode_defaults;
+        uint16_t mem_slot = i;
+
+        if (migrate)
+        {
+            mem_slot = UiConfiguration_OldBandSlot(i);
+            if (mem_slot == CONFIG_LAYOUT_OLD_NO_VALUE)
+            {
+                // the 11m band has no stored memories in the previous layout
+                mem_slot = 0;
+                load_band_defaults = true;
+            }
+        }
+
         // read from stored bands
-        UiReadSettingsBandMode(i,EEPROM_BAND0_MODE_A,EEPROM_BAND0_FREQ_HIGH_A,EEPROM_BAND0_FREQ_LOW_A, &vfo[VFO_A].band[i], load_eeprom_defaults || load_freq_mode_defaults);
-        UiReadSettingsBandMode(i,EEPROM_BAND0_MODE_B,EEPROM_BAND0_FREQ_HIGH_B,EEPROM_BAND0_FREQ_LOW_B, &vfo[VFO_B].band[i], load_eeprom_defaults || load_freq_mode_defaults);
+        UiReadSettingsBandMode(i, mem_slot, band_mode_a, band_freq_high_a, band_freq_low_a, &vfo[VFO_A].band[i], load_band_defaults);
+        UiReadSettingsBandMode(i, mem_slot, band_mode_b, band_freq_high_b, band_freq_low_b, &vfo[VFO_B].band[i], load_band_defaults);
     }
 
 
-    UiReadSettingEEPROM_UInt32( EEPROM_XVERTER_OFFSET_HIGH,EEPROM_XVERTER_OFFSET_LOW,&ts.xverter_offset,0,0,XVERTER_OFFSET_MAX, load_eeprom_defaults);
-    UiReadSettingEEPROM_UInt32( EEPROM_XVERTER_OFFSET_TX_HIGH,EEPROM_XVERTER_OFFSET_TX_LOW,&ts.xverter_offset_tx,0,0,XVERTER_OFFSET_MAX, load_eeprom_defaults);
+    UiReadSettingEEPROM_UInt32( UiConfiguration_LayoutAddress(EEPROM_XVERTER_OFFSET_HIGH),UiConfiguration_LayoutAddress(EEPROM_XVERTER_OFFSET_LOW),&ts.xverter_offset,0,0,XVERTER_OFFSET_MAX, load_eeprom_defaults);
+    UiReadSettingEEPROM_UInt32( UiConfiguration_LayoutAddress(EEPROM_XVERTER_OFFSET_TX_HIGH),UiConfiguration_LayoutAddress(EEPROM_XVERTER_OFFSET_TX_LOW),&ts.xverter_offset_tx,0,0,XVERTER_OFFSET_MAX, load_eeprom_defaults);
 
     UiReadSettingEEPROM_Filter(load_eeprom_defaults);
 
@@ -937,6 +1174,9 @@ void UiConfiguration_LoadEepromValues(bool load_freq_mode_defaults, bool load_ee
 
     // this fixes an issue with bad initialization which happens if you had version 2.9.85 installed.
     UiConfiguration_FixDefaultsNotLoadedIssue();
+
+    // from here on all version comparisons refer to the current layout again
+    config_layout_migration_active = false;
 
     // TODO: Find a better solution: We need the negated setting for the menu to not display
     // disable rx iq settings in menu when autocorr is enabled
@@ -1029,6 +1269,13 @@ uint16_t UiConfiguration_SaveEepromValues(void)
         if (retval == HAL_OK)
         {
             retval = UiWriteSettingEEPROM_Filter();
+        }
+
+        if (retval == HAL_OK)
+        {
+            // all values have been written in the current layout: mark the stored
+            // configuration as migrated so the previous layout addresses are no longer used
+            retval = ConfigStorage_WriteVariable(EEPROM_CONFIG_LAYOUT_VERSION, CONFIG_LAYOUT_VERSION_MAGIC);
         }
 
         if(retval == HAL_OK && ts.configstore_in_use == CONFIGSTORE_IN_USE_RAMCACHE)

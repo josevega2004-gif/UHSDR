@@ -837,6 +837,89 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
     case MENU_AM_DISABLE: // AM mode enable/disable
         UiMenu_HandleDemodModeDisable(var, mode, options, &clr, DEMOD_AM_DISABLE);
         break;
+    case MENU_AM_CARRIER_LEVEL: // AM carrier level relative to the rated carrier
+        var_change = UiDriverMenuItemChangeUInt8(var, mode, &ts.am_carrier_level,
+                                              AM_CARRIER_LEVEL_MIN,
+                                              AM_CARRIER_LEVEL_MAX,
+                                              AM_CARRIER_LEVEL_DEFAULT,
+                                              1
+                                             );
+        snprintf(options, 32, "   %3u%%", ts.am_carrier_level);
+        break;
+    case MENU_AM_TX_SIDEBAND: // AM transmit sideband, single sideband AM or both sidebands
+        var_change = UiDriverMenuItemChangeUInt8(var, mode, &ts.am_tx_sideband,
+                                                 AmSideband_Both,
+                                                 AmSideband_USB,
+                                                 AmSideband_Both,
+                                                 1);
+        if (var_change)
+        {
+            // the AM power limit depends on the sideband, so the selected power level has to be
+            // applied again in order to pick up the new limit
+            RadioManagement_SetPowerLevel(RadioManagement_GetBand(df.tune_new), ts.power_level);
+        }
+        switch (ts.am_tx_sideband)
+        {
+        case AmSideband_LSB:
+            txt_ptr = "   LSB";
+            break;
+        case AmSideband_USB:
+            txt_ptr = "   USB";
+            break;
+        default:
+            txt_ptr = "  BOTH";
+            break;
+        }
+        break;
+    case MENU_AM_PEP_HOLD: // how long the carrier to PEP readout stays on screen after the transmission
+        var_change = UiDriverMenuItemChangeUInt8(var, mode, &ts.am_carrier_pep_hold,
+                                                 AM_PEP_HOLD_MIN,
+                                                 AM_PEP_HOLD_MAX,
+                                                 AM_PEP_HOLD_DEFAULT,
+                                                 1);
+        if (ts.am_carrier_pep_hold == 0)
+        {
+            txt_ptr = "   OFF";
+        }
+        else
+        {
+            // the value is stored in half seconds
+            snprintf(options, 32, "  %u.%u s", ts.am_carrier_pep_hold / 2, (ts.am_carrier_pep_hold % 2) * 5);
+        }
+        break;
+    case MENU_AM_PEP_DIM: // the held readout is drawn in a dim colour
+        var_change = UiDriverMenuItemChangeUInt8(var, mode, &ts.am_carrier_pep_dim,
+                                                 0,
+                                                 1,
+                                                 AM_PEP_DIM_DEFAULT,
+                                                 1);
+        txt_ptr = (ts.am_carrier_pep_dim != 0) ? "    ON" : "   OFF";
+        break;
+    case MENU_AM_PEP_TARGET: // carrier to PEP ratio an ideally set carrier produces
+        var_change = UiDriverMenuItemChangeUInt8(var, mode, &ts.am_carrier_pep_target,
+                                                 AM_PEP_TARGET_MIN,
+                                                 AM_PEP_TARGET_MAX,
+                                                 AM_PEP_TARGET_DEFAULT,
+                                                 1);
+        // the value is stored in half dB below PEP
+        snprintf(options, 32, " -%u.%u dB", ts.am_carrier_pep_target / 2, (ts.am_carrier_pep_target % 2) * 5);
+        break;
+    case MENU_AM_PEP_WARN: // delay before a clearly out of range ratio starts to blink
+        var_change = UiDriverMenuItemChangeUInt8(var, mode, &ts.am_carrier_pep_warn,
+                                                 AM_PEP_WARN_MIN,
+                                                 AM_PEP_WARN_MAX,
+                                                 AM_PEP_WARN_DEFAULT,
+                                                 1);
+        if (ts.am_carrier_pep_warn == 0)
+        {
+            txt_ptr = "   OFF";
+        }
+        else
+        {
+            // the value is stored in half seconds
+            snprintf(options, 32, "  %u.%u s", ts.am_carrier_pep_warn / 2, (ts.am_carrier_pep_warn % 2) * 5);
+        }
+        break;
     case MENU_DIGI_DISABLE: // AM mode enable/disable
         UiMenu_HandleDemodModeDisable(var, mode, options, &clr, DEMOD_DIGI_DISABLE);
         break;
@@ -2910,14 +2993,8 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
     case CONFIG_FWD_REV_COUPLING_6M_ADJ:        // RF power sensor coupling adjust (6m)
         UiDriverMenuBandRevCouplingAdjust(var, mode, COUPLING_6M, options, &clr);
         break;
-    case CONFIG_FWD_REV_COUPLING_2M_ADJ:        // RF power sensor coupling adjust (2m)
-        UiDriverMenuBandRevCouplingAdjust(var, mode, COUPLING_2M, options, &clr);
-        break;
-    case CONFIG_FWD_REV_COUPLING_70CM_ADJ:      // RF power sensor coupling adjust (70cm)
-        UiDriverMenuBandRevCouplingAdjust(var, mode, COUPLING_70CM, options, &clr);
-        break;
-    case CONFIG_FWD_REV_COUPLING_23CM_ADJ:      // RF power sensor coupling adjust (23cm)
-        UiDriverMenuBandRevCouplingAdjust(var, mode, COUPLING_23CM, options, &clr);
+    case CONFIG_FWD_REV_COUPLING_11M_ADJ:       // RF power sensor coupling adjust (11m)
+        UiDriverMenuBandRevCouplingAdjust(var, mode, COUPLING_11M, options, &clr);
         break;
     case CONFIG_FWD_REV_SENSE_SWAP: // Enable/disable swap of FWD/REV A/D inputs on power sensor
         var_change = UiDriverMenuItemChangeEnableOnOffFlag(var, mode, &ts.flags1,0,options,&clr, FLAGS1_SWAP_FWDREV_SENSE);
@@ -3081,23 +3158,14 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
     case CONFIG_12M_5W_ADJUST:      // 12m 5 watt adjust
         UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_12, PA_LEVEL_HIGH, options, &clr);
         break;
+    case CONFIG_11M_5W_ADJUST:      // 11m 5 watt adjust
+        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_11, PA_LEVEL_HIGH, options, &clr);
+        break;
     case CONFIG_10M_5W_ADJUST:      // 10m 5 watt adjust
         UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_10, PA_LEVEL_HIGH, options, &clr);
         break;
     case CONFIG_6M_5W_ADJUST:       // 6m 5 watt adjust
         UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_6, PA_LEVEL_HIGH, options, &clr);
-        break;
-    case CONFIG_4M_5W_ADJUST:       // 4m 5 watt adjust
-        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_4, PA_LEVEL_HIGH, options, &clr);
-        break;
-    case CONFIG_2M_5W_ADJUST:       // 2m 5 watt adjust
-        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_2, PA_LEVEL_HIGH, options, &clr);
-        break;
-    case CONFIG_70CM_5W_ADJUST:     // 70cm 5 watt adjust
-        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_70, PA_LEVEL_HIGH, options, &clr);
-        break;
-    case CONFIG_23CM_5W_ADJUST:     // 23cm 5 watt adjust
-        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_23, PA_LEVEL_HIGH, options, &clr);
         break;
     case CONFIG_2200M_FULL_POWER_ADJUST:        // 2200m 5 watt adjust
         UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_2200, PA_LEVEL_FULL, options, &clr);
@@ -3132,23 +3200,14 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
     case CONFIG_12M_FULL_POWER_ADJUST:      // 12m 5 watt adjust
         UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_12, PA_LEVEL_FULL, options, &clr);
         break;
+    case CONFIG_11M_FULL_POWER_ADJUST:      // 11m 5 watt adjust
+        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_11, PA_LEVEL_FULL, options, &clr);
+        break;
     case CONFIG_10M_FULL_POWER_ADJUST:      // 10m 5 watt adjust
         UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_10, PA_LEVEL_FULL, options, &clr);
         break;
     case CONFIG_6M_FULL_POWER_ADJUST:       // 6m 5 watt adjust
         UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_6, PA_LEVEL_FULL, options, &clr);
-        break;
-    case CONFIG_4M_FULL_POWER_ADJUST:       // 4m 5 watt adjust
-        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_4, PA_LEVEL_FULL, options, &clr);
-        break;
-    case CONFIG_2M_FULL_POWER_ADJUST:       // 2m 5 watt adjust
-        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_2, PA_LEVEL_FULL, options, &clr);
-        break;
-    case CONFIG_70CM_FULL_POWER_ADJUST:     // 70cm 5 watt adjust
-        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_70, PA_LEVEL_FULL, options, &clr);
-        break;
-    case CONFIG_23CM_FULL_POWER_ADJUST:     // 23cm 5 watt adjust
-        UiDriverMenuBandPowerAdjust(var, mode, BAND_MODE_23, PA_LEVEL_FULL, options, &clr);
         break;
     case CONFIG_REDUCE_POWER_ON_LOW_BANDS:
         var_change = UiDriverMenuItemChangeEnableOnOffFlag(var, mode, &ts.flags2,0,options,&clr, FLAGS2_LOW_BAND_BIAS_REDUCE);
@@ -4247,17 +4306,24 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
     	 break;
 
     case MENU_DIGITAL_MODE_SELECT:
-        var_change = UiDriverMenuItemChangeUInt8(var, mode, &ts.digital_mode,0,DigitalMode_Num_Modes-1,0,1);
-        if (var_change)
         {
-            // TODO: Factor this out into a Ui function for (de-)activating Rtty mode
-            if (RadioManagement_IsApplicableDemodMode(DEMOD_DIGI))
+            // DigitalMode_None is the idle state, it is not a selectable modulation: it is
+            // displayed as the first digital mode without changing anything
+            uint8_t digital_mode = (ts.digital_mode == DigitalMode_None) ? DigitalMode_RTTY : ts.digital_mode;
+
+            var_change = UiDriverMenuItemChangeUInt8(var, mode, &digital_mode,
+                                                    DigitalMode_RTTY,
+                                                    DigitalMode_BPSK,
+                                                    DigitalMode_RTTY,
+                                                    1);
+            snprintf(options,32,"     %s",digimodes[digital_mode]);
+
+            if (var_change)
             {
-                UiDriver_SetDemodMode(DEMOD_DIGI);
+                // the same entry point as the mode box uses, so both always agree
+                UiDriver_SetDigitalMode(digital_mode);
             }
         }
-        snprintf(options,32,"     %s",digimodes[ts.digital_mode].label);
-        clr = digimodes[ts.digital_mode].enabled?White:Red;
         break;
 
     case CONFIG_CAT_PTT_RTS:
@@ -4348,47 +4414,6 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
             break;
 
 
-#ifdef USE_FREEDV
-        case MENU_DEBUG_FREEDV_MODE:
-            temp_var_u8 = freedv_conf.mode;
-            var_change = UiDriverMenuItemChangeUInt8(var, mode, &temp_var_u8,
-                    0,
-                    freedv_modes_num-1,
-                    0,
-                    1);
-            if (var_change)
-            {
-                if (FreeDV_SetMode(temp_var_u8, false) == false)
-                {
-                    clr = Red;
-                }
-            }
-
-            txt_ptr = freedv_modes[freedv_conf.mode].name;
-            break;
-
-        case MENU_DEBUG_FREEDV_SQL_THRESHOLD:
-            var_change = UiDriverMenuItemChangeUInt8(var, mode, &freedv_conf.squelch_snr_thresh,
-                    FDV_SQUELCH_OFF,
-                    FDV_SQUELCH_MAX,
-                    FDV_SQUELCH_DEFAULT,
-                    1);
-
-            if (var_change)
-            {
-                FreeDV_Squelch_Update(&freedv_conf);
-            }
-
-            if (FreeDV_Is_Squelch_Enable(&freedv_conf))
-            {
-                snprintf(options,32,"     %ld",FreeDV_Get_Squelch_SNR(&freedv_conf));
-            }
-            else
-            {
-                txt_ptr = "OFF";
-            }
-            break;
-#endif
         case MENU_DEBUG_SMOOTH_DYN_TUNE:
             var_change = UiDriverMenuItemChangeEnableOnOffFlag(var, mode, &ts.expflags1,0,options,&clr, EXPFLAGS1_SMOOTH_DYNAMIC_TUNE);
             clr = White;

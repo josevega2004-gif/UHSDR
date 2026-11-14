@@ -53,7 +53,7 @@ typedef struct {
 
 #ifdef USE_CONVOLUTION
 typedef struct {
-   COMP samples[SAMPLE_BUFFER_SIZE];
+   comp_float_t samples[SAMPLE_BUFFER_SIZE];
 }  Sample_Buffer;
 #endif
 
@@ -420,13 +420,15 @@ typedef struct SMeter
 //
 #define	AM_GAIN_COMP		1.133				// This compensates for slight differences in gain processing in the AM algorithm (empirically derived)
 //
-#define FREEDV_GAIN_COMP   (20*SSB_GAIN_COMP)
 
 // The following are calibration constants for AM (transmitter) modulation, carefully adjusted for proper D/A scaling to set
 // maximum possible 95-100% AM modulation depth.
 //
 #define	AM_ALC_GAIN_CORRECTION	0.23			// This scales the output of the ALC for 100% modulation with respect to the carrier level
-#define	AM_CARRIER_LEVEL		5100			// This sets the AM carrier level in DAC units, scaled for proper ALC operation and 100% modulation
+#define	AM_CARRIER_LEVEL		5100			// AM carrier level in DAC units at the default setting, scaled for proper ALC operation and 100% modulation
+#define	AM_CARRIER_LEVEL_DEFAULT	100			// AM carrier level in percent of the level above
+#define	AM_CARRIER_LEVEL_MIN		50
+#define	AM_CARRIER_LEVEL_MAX		125
 //
 // DO NOT change the above unless you know *EXACTLY* what you are doing!  If you screw with these numbers, you WILL wreck the
 // AM modulation!!!  (No, I'm not kidding!)

@@ -75,6 +75,14 @@
 /* Includes ------------------------------------------------------------------*/
 #include "uhsdr_flash.h"
 
+/*
+ * Every configuration value is stored as one 32 bit record (virtual address and value) in a page,
+ * the first 4 bytes of a page hold its status. A page must take several complete saves of all
+ * values before it has to be swapped, otherwise the flash is worn out by the saves. This fails to
+ * compile (negative array size) if the number of values is too large for the page.
+ */
+typedef char Flash_CheckPageFitsAllVariables[(PAGE_SIZE >= ((NB_OF_VAR * 4 * 4) + 4)) ? 1 : -1];
+
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
 #define VAR_ADDR_START  (0xAA01)
@@ -191,7 +199,8 @@ static uint16_t Flash_TransferFullPage(uint8_t fromPage, uint8_t toPage, bool sk
 
     uint16_t retval = HAL_OK;
 
-    /* Transfer data from Page0 to Page1 */
+    /* Transfer data from Page0 to Page1, this covers every value the storage can address, which is
+       why NB_OF_VAR has to be at least as large as the highest value id in use */
     for (uint16_t VarIdx = 0; retval == HAL_OK && VarIdx < NB_OF_VAR; VarIdx++)
     {
         uint16_t virtAddress = Flash_GetVirtAddrForId(VarIdx);

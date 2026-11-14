@@ -196,6 +196,7 @@ void UiDriver_ChangeTuningStep(uchar is_up);
 void UiDriver_UpdateDisplayAfterParamChange(void);
 void UiDriver_UpdateDemodSpecificDisplayAfterParamChange(void);
 void UiDriver_SetDemodMode(uint8_t new_mode);
+void UiDriver_SetDigitalMode(uint8_t new_digital_mode);
 
 void UiDriver_StartUpScreenInit(void);
 void UiDriver_StartUpScreenFinish(void);

@@ -63,10 +63,16 @@ const MenuDescriptor topGroup[] =
 const MenuDescriptor baseGroup[] =
 {
 //    { MENU_BASE, MENU_ITEM, MENU_SSB_NARROW_FILT,"029","CW Filt in SSB Mode", UiMenuDesc(":soon:") },
-    { MENU_BASE, MENU_ITEM, MENU_SSB_AUTO_MODE_SELECT, NULL, "LSB/USB Auto Select", UiMenuDesc("If enabled, the appropriate sideband mode for SSB and FreeDV is chosen as default for each band by its frequency.")},
+    { MENU_BASE, MENU_ITEM, MENU_SSB_AUTO_MODE_SELECT, NULL, "LSB/USB Auto Select", UiMenuDesc("If enabled, the appropriate sideband mode for SSB is chosen as default for each band by its frequency.")},
     { MENU_BASE, MENU_ITEM, MENU_DIGI_DISABLE,  NULL,"Digital Modes", UiMenuDesc("Disable appearance of digital modes when pressing Mode button")},
     { MENU_BASE, MENU_ITEM, MENU_CW_DISABLE, NULL, "CW Mode", UiMenuDesc("Disable appearance of CW mode when pressing Mode button")},
     { MENU_BASE, MENU_ITEM, MENU_AM_DISABLE, NULL, "AM Mode", UiMenuDesc("Disable appearance of AM mode when pressing Mode button")},
+    { MENU_BASE, MENU_ITEM, MENU_AM_CARRIER_LEVEL, NULL, "AM Carrier Level", UiMenuDesc("AM carrier level in percent of the rated AM carrier, default is 100. Lowering it reduces the unmodulated carrier relative to PEP, which leaves headroom for the positive modulation peaks so the negative peaks stay below 100 percent. Setting it too low distorts the audio, so values around 50 to 100 are the useful range and also reduce the load on the final amplifier.")},
+    { MENU_BASE, MENU_ITEM, MENU_AM_TX_SIDEBAND, NULL, "AM TX Sideband", UiMenuDesc("Transmit sideband for AM. BOTH generates the usual double sideband AM signal, LSB or USB generate the carrier with a single sideband only. Single sideband AM concentrates the modulation in one sideband, so more carrier power is available; the transmit power of this mode is limited to 10 watts.")},
+    { MENU_BASE, MENU_ITEM, MENU_AM_PEP_HOLD, NULL, "AM Meter Hold", UiMenuDesc("How long the carrier level, the carrier to PEP ratio and the measured powers stay on screen after the transmission ends, in steps of half a second. This makes it possible to read the result after unkeying. Set to OFF to remove the readout as soon as the transmission ends.")},
+    { MENU_BASE, MENU_ITEM, MENU_AM_PEP_DIM, NULL, "AM Meter Dim", UiMenuDesc("Show the carrier level and carrier to PEP ratio of a finished transmission in a dim colour, so that a held reading cannot be mistaken for a live one.")},
+    { MENU_BASE, MENU_ITEM, MENU_AM_PEP_TARGET, NULL, "AM PEP Target", UiMenuDesc("Carrier to PEP ratio an ideally set AM carrier produces and which the readout next to the forward power meter is compared against. With 100 percent modulation the carrier is 25 percent of the PEP, which is -6.0 dB and therefore the default. Lower the target when a lower carrier than that is intended, for example when the carrier level setting is reduced on purpose.")},
+    { MENU_BASE, MENU_ITEM, MENU_AM_PEP_WARN, NULL, "AM PEP Warn Delay", UiMenuDesc("How long the carrier to PEP ratio has to stay clearly out of range during a transmission before the readout starts blinking. Shorter values warn quickly, longer ones only when the carrier level is really wrong for most of the transmission. Set to OFF to switch the blinking off, the ratio is then only shown in red.")},
     { MENU_BASE, MENU_ITEM, MENU_DEMOD_SAM,  NULL,"SyncAM Mode",UiMenuDesc("Disable appearance of SyncAM modes when pressing Mode button")  },
     { MENU_BASE, MENU_ITEM, MENU_SAM_PLL_LOCKING_RANGE, NULL, "SAM PLL locking range", UiMenuDesc("SAM PLL Locking Range in Hz: this determines how far up and down from the carrier frequency of an AM station we can offtune the receiver, so that the PLL will still lock to the carrier.") },
     { MENU_BASE, MENU_ITEM, MENU_SAM_PLL_STEP_RESPONSE, NULL, "SAM PLL step response", UiMenuDesc("Step response = Zeta = damping factor of the SAM PLL. Sets the stability and transient response of the PLL. Larger values give faster lock even if you are offtune, but PLL is also more sensitive.") },
@@ -338,12 +344,9 @@ const MenuDescriptor powGroup[] =
     { MENU_POW, MENU_ITEM, CONFIG_17M_5W_ADJUST, NULL, "17m   5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_15M_5W_ADJUST, NULL, "15m   5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_12M_5W_ADJUST, NULL, "12m   5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
+    { MENU_POW, MENU_ITEM, CONFIG_11M_5W_ADJUST,&band_enabled[BAND_MODE_11],"11m   5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_10M_5W_ADJUST, NULL, "10m   5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_6M_5W_ADJUST,&band_enabled[BAND_MODE_6],"6m    5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
-    { MENU_POW, MENU_ITEM, CONFIG_4M_5W_ADJUST,&band_enabled[BAND_MODE_4],"4m    5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
-    { MENU_POW, MENU_ITEM, CONFIG_2M_5W_ADJUST,&band_enabled[BAND_MODE_2],"2m    5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
-    { MENU_POW, MENU_ITEM, CONFIG_70CM_5W_ADJUST,&band_enabled[BAND_MODE_70],"70cm  5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
-    { MENU_POW, MENU_ITEM, CONFIG_23CM_5W_ADJUST,&band_enabled[BAND_MODE_23],"23cm  5W PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve 5W power on this band. See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_2200M_FULL_POWER_ADJUST,&band_enabled[BAND_MODE_2200],"2200m Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_630M_FULL_POWER_ADJUST,&band_enabled[BAND_MODE_630],"630m  Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_160M_FULL_POWER_ADJUST, NULL, "160m  Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
@@ -355,12 +358,9 @@ const MenuDescriptor powGroup[] =
     { MENU_POW, MENU_ITEM, CONFIG_17M_FULL_POWER_ADJUST, NULL, "17m   Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_15M_FULL_POWER_ADJUST, NULL, "15m   Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_12M_FULL_POWER_ADJUST, NULL, "12m   Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
+    { MENU_POW, MENU_ITEM, CONFIG_11M_FULL_POWER_ADJUST,&band_enabled[BAND_MODE_11],"11m   Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_10M_FULL_POWER_ADJUST, NULL, "10m   Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_6M_FULL_POWER_ADJUST,&band_enabled[BAND_MODE_6],"6m    Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
-    { MENU_POW, MENU_ITEM, CONFIG_4M_FULL_POWER_ADJUST,&band_enabled[BAND_MODE_4],"4m    Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
-    { MENU_POW, MENU_ITEM, CONFIG_2M_FULL_POWER_ADJUST,&band_enabled[BAND_MODE_2],"2m    Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
-    { MENU_POW, MENU_ITEM, CONFIG_70CM_FULL_POWER_ADJUST,&band_enabled[BAND_MODE_70],"70cm  Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
-    { MENU_POW, MENU_ITEM, CONFIG_23CM_FULL_POWER_ADJUST,&band_enabled[BAND_MODE_23],"23cm  Full PWR Adjust", UiMenuDesc("Defines the internal power adjustment factor to achieve full power on this band. Check the output signal when adjusting for full power! See Adjustment and Calibration for more information.") },
     { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_2200M_ADJ,&band_enabled[BAND_MODE_2200],"2200m Coupling Adj.", UiMenuDesc("Power Meter Adjustment factor for the 2200m band power values. See Wiki.") },
     { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_630M_ADJ,&band_enabled[BAND_MODE_630],"630m Coupling Adj.", UiMenuDesc("Power Adjustment factor for the 630m band power values. See Wiki.") },
     { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_160M_ADJ, NULL, "160m Coupling Adj.", UiMenuDesc("Power Meter Adjustment factor for the 160m band power values. See Wiki.") },
@@ -369,9 +369,7 @@ const MenuDescriptor powGroup[] =
     { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_20M_ADJ, NULL, "20m  Coupling Adj.", UiMenuDesc("Power Meter Adjustment factor for the 20m and 30m band power values. See Wiki.") },
     { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_15M_ADJ, NULL, "15m  Coupling Adj.", UiMenuDesc("Power Meter Adjustment factor for the 10m - 17m bands power values. See Wiki.") },
     { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_6M_ADJ,&band_enabled[BAND_MODE_6], "6m   Coupling Adj.", UiMenuDesc("Power Meter Adjustment factor for the 6m band power values. See Wiki.") },
-    { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_2M_ADJ,&band_enabled[BAND_MODE_2], "2m   Coupling Adj.", UiMenuDesc("Power Meter Adjustment factor for the 2m band power values. See Wiki.") },
-    { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_70CM_ADJ,&band_enabled[BAND_MODE_70], "70cm Coupling Adj.", UiMenuDesc("Power Meter Adjustment factor for the 70cm band power values. See Wiki.") },
-    { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_23CM_ADJ,&band_enabled[BAND_MODE_23], "23cm Coupling Adj.", UiMenuDesc("Power Meter Adjustment factor for the 23cm band power values. See Wiki.") },
+    { MENU_POW, MENU_ITEM, CONFIG_FWD_REV_COUPLING_11M_ADJ,&band_enabled[BAND_MODE_11], "11m  Coupling Adj.", UiMenuDesc("Power Meter Adjustment factor for the 11m band power values. See Wiki.") },
 
     { MENU_POW, MENU_STOP, 0, NULL, NULL, UiMenuDesc("") }
 };
@@ -383,7 +381,7 @@ const MenuDescriptor men2touchGroup[] =
     { MENU_MEN2TOUCH, MENU_ITEM, MENU_SPECTRUM_MODE, NULL, "Spectrum Type", UiMenuDesc("Select if you want a scope-like or a waterfall-like (actually a fountain) display") },
     { MENU_MEN2TOUCH, MENU_ITEM, MENU_SPECTRUM_MAGNIFY, NULL, "Spectrum Magnify", UiMenuDesc("Select level of magnification (1x, 2x, 4x, 8x, 16x, 32x) of spectrum and waterfall display. Also changeable via touch screen. Refresh rate is much slower with high magnification settings. The dBm display has its maximum accuracy in magnify 1x setting.") },
     { MENU_MEN2TOUCH, MENU_ITEM, MENU_RESTART_CODEC, NULL, "Restart Codec", UiMenuDesc("Sometimes there is a problem with the I2S IQ signal stream from the Codec, resulting in mirrored signal reception. Restarting the CODEC Stream will cure that problem. Try more than once, if first call did not help.") },
-    { MENU_MEN2TOUCH, MENU_ITEM, MENU_DIGITAL_MODE_SELECT, NULL, "Digital Mode", UiMenuDesc("Select the active digital mode (FreeDV,RTTY, ...).") },
+    { MENU_MEN2TOUCH, MENU_ITEM, MENU_DIGITAL_MODE_SELECT, NULL, "Digital Mode", UiMenuDesc("Select the digital mode, RTTY or BPSK. Selecting one switches the radio to digital mode, leaving digital mode is done with the mode button. The selection is kept, so digital mode always comes back with the same modulation.") },
     { MENU_MEN2TOUCH, MENU_STOP, 0, NULL, NULL, UiMenuDesc("") }
 };
 
@@ -416,7 +414,7 @@ const MenuDescriptor infoGroup[] =
 
 const MenuDescriptor debugGroup[] =
 {
-    { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_ENABLE_INFO, NULL,"Enable Debug Info Display", UiMenuDesc("Enable debug outputs on LCD for testing purposes (touch screen coordinates, load) and audio interrupt duration indication via green led") },
+    { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_ENABLE_INFO, NULL,"Enable Debug Info Display", UiMenuDesc("Enable debug outputs on LCD for testing purposes (touch screen coordinates, load, noise blanker, noise reduction and FFT timing) and audio interrupt duration indication via green led") },
     { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_CW_OFFSET_SHIFT_KEEP_SIGNAL, NULL,"CW Shift Keeps Signal", UiMenuDesc("Enable automatic sidetone correction for CW OFFSET MODE = SHIFT. If you tuned in SSB to a CW signal around the sidetone frequency, you'll keep that signal when going to CW. Even if you switch from USB to CW-LSB etc.") },
     { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_TX_AUDIO, NULL,"TX Audio via USB", UiMenuDesc("If enabled, send generated audio to PC during TX.") },
     { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_CLONEOUT, NULL,"FT817 Clone Transmit", UiMenuDesc("Will in future send out memory data to an FT817 Clone Info (to be used with CHIRP).") },
@@ -465,8 +463,6 @@ const MenuDescriptor debugGroup[] =
     { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_HMC1023_DRVR, &hmc1023.present,"HMC1023 Driver Bias", UiMenuDesc("Debug Setting: Set HMC1023 Driver Bias") },
     { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_TWINPEAKS_CORR_RUN, NULL,"Trigger Twinpeaks Corr.", UiMenuDesc("Trigger Twinpeaks Correction Manually if IQ Auto Correction is enabled, otherwise you will see 'Not Possible'") },
     { MENU_DEBUG, MENU_ITEM, CONFIG_RESET_SER_EEPROM_SIGNATURE, NULL, "Rst Conf EEPROM", UiMenuDesc("Clear the EEPROMi signature but keep all config values. This is mainly for debugging purposes).") },
-    { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_FREEDV_MODE, NULL, "FreeDV Mode", UiMenuDesc("Change active FreeDV mode. Please note, you have to reboot to activate new mode") },
-    { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_FREEDV_SQL_THRESHOLD, NULL, "FreeDV Squelch threshold", UiMenuDesc("If not OFF, FreeDV will squelch if detected SNR is below set value.") },
     { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_SMOOTH_DYN_TUNE, NULL, "Smooth dynamic tune", UiMenuDesc("Activate smooth dynamic tune.") },
 
 	{ MENU_DEBUG, MENU_STOP, 0, NULL, NULL, UiMenuDesc("") }

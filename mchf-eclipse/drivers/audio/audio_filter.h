@@ -29,8 +29,6 @@ extern arm_fir_instance_f32    Fir_Tx_Hilbert_Q;
 extern arm_fir_instance_f32    Fir_Tx_Hilbert_I;
 extern arm_fir_instance_f32    Fir_Rx_Hilbert_Q;
 extern arm_fir_instance_f32    Fir_Rx_Hilbert_I;
-extern arm_fir_instance_f32    Fir_TxFreeDV_Interpolate_Q;
-extern arm_fir_instance_f32    Fir_TxFreeDV_Interpolate_I;
 extern arm_fir_decimate_instance_f32 DECIMATE_RX_I;
 extern arm_fir_decimate_instance_f32 DECIMATE_RX_Q;
 

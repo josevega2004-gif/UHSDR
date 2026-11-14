@@ -270,9 +270,6 @@ const LcdLayout LcdLayouts[LcdLayoutsCount]=
 				.TextMsg_buffer_max=44,
 				.TextMsg_font=4,
 
-				.FREEDV_SNR = { 5, 116},
-				.FREEDV_BER = { 5, 104},
-				.FREEDV_FONT=4,
 
 				.SM_IND={.x=R320240_SM_IND_X,.y=R320240_SM_IND_Y,.h=R320240_SM_IND_H,.w=R320240_SM_IND_W},
 				.PWR_IND={.x = 4, .y = 193+15},
@@ -339,11 +336,6 @@ const LcdLayout LcdLayouts[LcdLayoutsCount]=
 				.TextMsg_buffer_max=50,
 				.TextMsg_font=0,
 
-				//.FREEDV_SNR = { 280, 28},
-				//.FREEDV_BER = {380, 28},
-				.FREEDV_SNR = {410,288},
-				.FREEDV_BER = {410,297},
-				.FREEDV_FONT=4,
 
 				.SM_IND={.x = R480320_SM_IND_X, .y = R480320_SM_IND_Y, .h = R480320_SM_IND_H, .w = R480320_SM_IND_W},
 				.PWR_IND={ .x = 420, .y = 307},
@@ -412,11 +404,6 @@ const LcdLayout LcdLayouts[LcdLayoutsCount]=
 				.TextMsg_buffer_max=50,
 				.TextMsg_font=0,
 
-				//.FREEDV_SNR = { 280, 28},
-				//.FREEDV_BER = {380, 28},
-				.FREEDV_SNR = {410,288},
-				.FREEDV_BER = {410,297},
-				.FREEDV_FONT=4,
 
 				.SM_IND={.x = R480320_SM_IND_X, .y = R480320_SM_IND_Y, .h = R480320_SM_IND_H, .w = R480320_SM_IND_W},
 				.PWR_IND={ .x = 420, .y = 307},

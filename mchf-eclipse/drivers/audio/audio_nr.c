@@ -77,6 +77,8 @@ NR_Buffer* NR_out_buffers[NR_BUFFER_FIFO_SIZE];
 */
 const float32_t SQRT_von_Hann_256[256] = {0,0.01231966,0.024637449,0.036951499,0.049259941,0.061560906,0.073852527,0.086132939,0.098400278,0.110652682,0.122888291,0.135105247,0.147301698,0.159475791,0.171625679,0.183749518,0.195845467,0.207911691,0.219946358,0.231947641,0.24391372,0.255842778,0.267733003,0.279582593,0.291389747,0.303152674,0.314869589,0.326538713,0.338158275,0.349726511,0.361241666,0.372701992,0.384105749,0.395451207,0.406736643,0.417960345,0.429120609,0.440215741,0.451244057,0.462203884,0.473093557,0.483911424,0.494655843,0.505325184,0.515917826,0.526432163,0.536866598,0.547219547,0.557489439,0.567674716,0.577773831,0.587785252,0.597707459,0.607538946,0.617278221,0.626923806,0.636474236,0.645928062,0.65528385,0.664540179,0.673695644,0.682748855,0.691698439,0.700543038,0.709281308,0.717911923,0.726433574,0.734844967,0.743144825,0.75133189,0.759404917,0.767362681,0.775203976,0.78292761,0.790532412,0.798017227,0.805380919,0.812622371,0.819740483,0.826734175,0.833602385,0.840344072,0.846958211,0.853443799,0.859799851,0.866025404,0.872119511,0.878081248,0.88390971,0.889604013,0.895163291,0.900586702,0.905873422,0.911022649,0.916033601,0.920905518,0.92563766,0.930229309,0.934679767,0.938988361,0.943154434,0.947177357,0.951056516,0.954791325,0.958381215,0.961825643,0.965124085,0.968276041,0.971281032,0.974138602,0.976848318,0.979409768,0.981822563,0.984086337,0.986200747,0.988165472,0.989980213,0.991644696,0.993158666,0.994521895,0.995734176,0.996795325,0.99770518,0.998463604,0.999070481,0.99952572,0.99982925,0.999981027,0.999981027,0.99982925,0.99952572,0.999070481,0.998463604,0.99770518,0.996795325,0.995734176,0.994521895,0.993158666,0.991644696,0.989980213,0.988165472,0.986200747,0.984086337,0.981822563,0.979409768,0.976848318,0.974138602,0.971281032,0.968276041,0.965124085,0.961825643,0.958381215,0.954791325,0.951056516,0.947177357,0.943154434,0.938988361,0.934679767,0.930229309,0.92563766,0.920905518,0.916033601,0.911022649,0.905873422,0.900586702,0.895163291,0.889604013,0.88390971,0.878081248,0.872119511,0.866025404,0.859799851,0.853443799,0.846958211,0.840344072,0.833602385,0.826734175,0.819740483,0.812622371,0.805380919,0.798017227,0.790532412,0.78292761,0.775203976,0.767362681,0.759404917,0.75133189,0.743144825,0.734844967,0.726433574,0.717911923,0.709281308,0.700543038,0.691698439,0.682748855,0.673695644,0.664540179,0.65528385,0.645928062,0.636474236,0.626923806,0.617278221,0.607538946,0.597707459,0.587785252,0.577773831,0.567674716,0.557489439,0.547219547,0.536866598,0.526432163,0.515917826,0.505325184,0.494655843,0.483911424,0.473093557,0.462203884,0.451244057,0.440215741,0.429120609,0.417960345,0.406736643,0.395451207,0.384105749,0.372701992,0.361241666,0.349726511,0.338158275,0.326538713,0.314869589,0.303152674,0.291389747,0.279582593,0.267733003,0.255842778,0.24391372,0.231947641,0.219946358,0.207911691,0.195845467,0.183749518,0.171625679,0.159475791,0.147301698,0.135105247,0.122888291,0.110652682,0.098400278,0.086132939,0.073852527,0.061560906,0.049259941,0.036951499,0.024637449,0.01231966,0};
 
+MultiModeBuffer_t __MCHF_SPECIALMEM mmb;
+
 void NR_Init()
 {
     nr_params.alpha = 0.94; // spectral noise reduction
@@ -88,6 +90,7 @@ void NR_Init()
     nr_params.first_time = 1;
     nr_params.NR_decimation_enable = true;
     nr_params.fft_256_enable = true;
+    nr_params.audio_sample_rate = 12000;
     ts.special_functions_enabled = 0;
     NR2.width = 4;
     NR2.power_threshold = 0.40;
@@ -336,7 +339,7 @@ void AudioNr_HandleNoiseReduction()
         // here are the current input samples:  input_buf->samples
         // NR_output samples have to be placed here: fdv_iq_buff[NR.current_buffer_idx].samples
         // but starting at an offset of NR_FFT_SIZE as we are using the same buffer for in and out
-        // here is the only place where we are referring to fdv_iq... as this is the name of the used freedv buffer
+        // the NR input buffer is shared with the audio interrupt
 
         //profileTimedEventStart(ProfileTP8);
 
@@ -361,9 +364,14 @@ static void AudioNr_RunNoiseReduction(float32_t* inputsamples, float32_t* output
 
     float32_t* Energy=0;
 
-    if(is_dsp_nb_active())
+    // the blanker works on 128 sample frames, its impulse detection assumes 6 or 12 ksps audio.
+    // At 24 ksps (wide AM) a frame is only half as long, so it is left to the time domain
+    // impulse suppressor in the demodulated audio path instead.
+    if(is_dsp_nb_active() && (nr_params.audio_sample_rate <= 12000))
     {
+        profileTimedEventStart(ProfileNoiseBlanker);
         alt_noise_blanking(inputsamples,NR_FFT_SIZE,Energy);
+        profileTimedEventStop(ProfileNoiseBlanker);
     }
 
     //    if((ts.dsp_active & DSP_NR_ENABLE) || (ts.dsp_active & DSP_NOTCH_ENABLE))
@@ -1859,7 +1867,7 @@ void spectral_noise_reduction_3 (float* in_buffer)
     const float32_t width = FilterInfo[ts.filters_p->id].width;
     const float32_t offset = ts.filters_p->offset;
 
-    float32_t NR_sample_rate = nr_params.NR_decimation_active? 6000.0: 12000.0;
+    const float32_t NR_sample_rate = (nr_params.audio_sample_rate > 0) ? (float32_t)nr_params.audio_sample_rate : 12000.0f;
 
     static uint8_t NR_init_counter = 0;
     uint8_t VAD_low=0;
@@ -1871,25 +1879,32 @@ void spectral_noise_reduction_3 (float* in_buffer)
     //const float32_t tinc = 0.00533333; // frame time 5.3333ms
     //const float32_t tax=0.071;	// noise output smoothing time constant - absolut value in seconds
     //const float32_t tap=0.152;	// speech prob smoothing time constant  - absolut value in seconds
-    const float32_t psthr=0.99;	// threshold for smoothed speech probability [0.99]
-    const float32_t pnsaf=0.01;	// noise probability safety value [0.01]
+    const float32_t psthr=0.99f;	// threshold for smoothed speech probability [0.99]
+    const float32_t pnsaf=0.01f;	// noise probability safety value [0.01]
     //const float32_t asnr=15; 	// active SNR in dB
-    const float32_t psini=0.5;	// initial speech probability [0.5]
-    const float32_t pspri=0.5;	// prior speech probability [0.5]
+    const float32_t psini=0.5f;	// initial speech probability [0.5]
+    const float32_t pspri=0.5f;	// prior speech probability [0.5]
 
     // for 12ksps and FFT128
     //NR2.ax = 0.9276; 		//expf(-tinc / tax);
     //NR2.ap = 0.9655; 		//expf(-tinc / tap);
 
     // for 6ksps and FFT256
-    NR2.ax = 0.7405;
-    NR2.ap = 0.8691;
+    NR2.ax = 0.7405f;                // frame advance 128 samples / 6000 Hz = 21.3 ms
+    NR2.ap = 0.8691f;
+    if (NR_sample_rate >= 20000.0f)
+    {
+        // 24ksps and FFT256: the same FFT covers twice the bandwidth, the frame advance is
+        // only 5.3 ms, so the smoothing constants have to follow much faster
+        NR2.ax = 0.9276f;
+        NR2.ap = 0.9655f;
+    }
     //NR2.xih1 = 31.62; 		//powf(10, (float32_t)NR2.asnr / 10.0);
-    NR2.xih1 = pow10f((float32_t)NR2.asnr / 10.0);
-    NR2.xih1r = 1.0 / (1.0 + NR2.xih1) - 1.0;
-    NR2.pfac= (1.0 / pspri - 1.0) * (1.0 + NR2.xih1);
-    NR2.snr_prio_min = 0.001; 			//powf(10, - (float32_t)NR2.snr_prio_min_int / 10.0);  //range should be down to -30dB min
-    NR2.power_threshold = (float32_t)(NR2.power_threshold_int)/100.0;
+    NR2.xih1 = pow10f((float32_t)NR2.asnr / 10.0f);
+    NR2.xih1r = 1.0f / (1.0f + NR2.xih1) - 1.0f;
+    NR2.pfac= (1.0f / pspri - 1.0f) * (1.0f + NR2.xih1);
+    NR2.snr_prio_min = 0.001f; 			//powf(10, - (float32_t)NR2.snr_prio_min_int / 10.0);  //range should be down to -30dB min
+    NR2.power_threshold = (float32_t)(NR2.power_threshold_int)/100.0f;
     static float32_t pslp[NR_FFT_SIZE];
     static float32_t xt[NR_FFT_SIZE];
     float32_t xtr;
@@ -1908,14 +1923,14 @@ void spectral_noise_reduction_3 (float* in_buffer)
 
     /*if (nr_params.fft_256_enable && nr_params.NR_decimation_enable)
   {
-    NR2.ax = 0.7405;
-    NR2.ap = 0.8691;
+    NR2.ax = 0.7405f;
+    NR2.ap = 0.8691f;
   }
 else
   if (nr_params.fft_256_enable || nr_params.NR_decimation_enable)
     {
-      NR2.ax = 0.8605;
-      NR2.ap = 0.9322;
+      NR2.ax = 0.8605f;
+      NR2.ap = 0.9322f;
     } */
 
 
@@ -1924,16 +1939,27 @@ else
 
         for(int bindx = 0; bindx < nr_params.NR_FFT_L / 2; bindx++)
         {
-            NR.last_sample_buffer_L[bindx] = 0.0;
-            NR2.Hk[bindx] = 1.0;
+            NR.last_sample_buffer_L[bindx] = 0.0f;
+            NR2.Hk[bindx] = 1.0f;
             //xu[bindx] = 1.0;  //has to be replaced by other variable
-            NR.Hk_old[bindx] = 1.0; // old gain or xu in development mode
-            NR.Nest[bindx][0] = 0.0;
-            NR.Nest[bindx][1] = 1.0;
-            pslp[bindx] = 0.5;
+            NR.Hk_old[bindx] = 1.0f; // old gain or xu in development mode
+            NR.Nest[bindx][0] = 0.0f;
+            NR.Nest[bindx][1] = 1.0f;
+            pslp[bindx] = 0.5f;
             //              NR2.long_tone_gain[bindx] = 1.0;
         }
         nr_params.first_time = 2; // we need to do some more a bit later down
+    }
+
+    // The real FFT needs half the work of the complex one used before: 256 real samples in,
+    // 128 bins out in the packed format {DC, Nyquist, re[1], im[1], ...}. Its inverse is scaled
+    // internally like arm_cfft_f32's, so the levels stay the same.
+    static arm_rfft_fast_instance_f32 nr_fft_instance;
+    static uint8_t nr_fft_instance_ready = 0;
+    if ((nr_fft_instance_ready == 0) || (nr_fft_instance.fftLenRFFT != nr_params.NR_FFT_L))
+    {
+        arm_rfft_fast_init_f32(&nr_fft_instance, nr_params.NR_FFT_L);
+        nr_fft_instance_ready = 1;
     }
 
     for(int k = 0; k < nr_params.NR_FFT_LOOP_NO; k++)
@@ -1943,8 +1969,7 @@ else
         // fill first half of FFT_buffer with last events audio samples
         for(int i = 0; i < nr_params.NR_FFT_L / 2; i++)
         {
-            NR.FFT_buffer[i * 2] = NR.last_sample_buffer_L[i]; // real
-            NR.FFT_buffer[i * 2 + 1] = 0.0; // imaginary
+            NR.FFT_buffer[i] = NR.last_sample_buffer_L[i];
         }
         // copy recent samples to last_sample_buffer for next time!
         for(int i = 0; i < nr_params.NR_FFT_L  / 2; i++)
@@ -1954,8 +1979,7 @@ else
         // now fill recent audio samples into second half of FFT_buffer
         for(int i = 0; i < nr_params.NR_FFT_L / 2; i++)
         {
-            NR.FFT_buffer[nr_params.NR_FFT_L + i * 2] = in_buffer[i+ k * (nr_params.NR_FFT_L / 2)]; // real
-            NR.FFT_buffer[nr_params.NR_FFT_L + i * 2 + 1] = 0.0;
+            NR.FFT_buffer[nr_params.NR_FFT_L / 2 + i] = in_buffer[i+ k * (nr_params.NR_FFT_L / 2)];
         }
         /////////////////////////////////7
         // WINDOWING
@@ -1964,9 +1988,11 @@ else
         {
             for (int idx = 0; idx < nr_params.NR_FFT_L; idx++)
             {
-                NR.FFT_buffer[idx * 2] *= SQRT_von_Hann_256[idx];
+                NR.FFT_buffer[idx] *= SQRT_von_Hann_256[idx];
             }
-            arm_cfft_f32(&arm_cfft_sR_f32_len256, NR.FFT_buffer, 0, 1);
+            profileTimedEventStart(ProfileNoiseReductionFftForward);
+            arm_rfft_fast_f32(&nr_fft_instance, NR.FFT_buffer, &NR.FFT_buffer[nr_params.NR_FFT_L], 0);
+            profileTimedEventStop(ProfileNoiseReductionFftForward);
         }
         /*else
           {
@@ -1982,17 +2008,22 @@ else
 
 
 
-        for(int bindx = 0; bindx < nr_params.NR_FFT_L / 2; bindx++)
         {
-            //here we need squared magnitude
-            NR2.X[bindx][0] = (NR.FFT_buffer[bindx * 2] * NR.FFT_buffer[bindx * 2] + NR.FFT_buffer[bindx * 2 + 1] * NR.FFT_buffer[bindx * 2 + 1]);
+            const float32_t* spectrum = &NR.FFT_buffer[nr_params.NR_FFT_L];
+
+            NR2.X[0][0] = spectrum[0] * spectrum[0]; // DC is purely real
+            for(int bindx = 1; bindx < nr_params.NR_FFT_L / 2; bindx++)
+            {
+                //here we need squared magnitude
+                NR2.X[bindx][0] = (spectrum[bindx * 2] * spectrum[bindx * 2] + spectrum[bindx * 2 + 1] * spectrum[bindx * 2 + 1]);
+            }
         }
 
         if(nr_params.first_time == 2)
         {
             for(int bindx = 0; bindx < nr_params.NR_FFT_L / 2; bindx++)
             {
-                NR.Nest[bindx][0] = NR.Nest[bindx][0] + 0.05* NR2.X[bindx][0];// we do it 20 times to average over 20 frames for app. 100ms only on NR_on/bandswitch/modeswitch,...
+                NR.Nest[bindx][0] = NR.Nest[bindx][0] + 0.05f* NR2.X[bindx][0];// we do it 20 times to average over 20 frames for app. 100ms only on NR_on/bandswitch/modeswitch,...
                 xt[bindx] = psini * NR.Nest[bindx][0];
             }
             NR_init_counter++;
@@ -2009,28 +2040,28 @@ else
 
             for(int bindx = 0; bindx < nr_params.NR_FFT_L / 2; bindx++)// 1. Step of NR - calculate the SNR's
             {
-                ph1y[bindx] = 1.0 / (1.0 + NR2.pfac * expf(NR2.xih1r * NR2.X[bindx][0]/xt[bindx]));
-                pslp[bindx] = NR2.ap * pslp[bindx] + (1.0 - NR2.ap) * ph1y[bindx];
+                ph1y[bindx] = 1.0f / (1.0f + NR2.pfac * expf(NR2.xih1r * NR2.X[bindx][0]/xt[bindx]));
+                pslp[bindx] = NR2.ap * pslp[bindx] + (1.0f - NR2.ap) * ph1y[bindx];
                 //ph1y[bindx] = fmin(ph1y[bindx], 1.0 - pnsaf * (pslp[bindx] > psthr)); //?????
 
                 if (pslp[bindx] > psthr)
                 {
-                    ph1y[bindx] = 1.0 - pnsaf;
+                    ph1y[bindx] = 1.0f - pnsaf;
                 }
                 else
                 {
-                    ph1y[bindx] = fmin(ph1y[bindx] , 1.0);
+                    ph1y[bindx] = fminf(ph1y[bindx] , 1.0f);
                 }
-                xtr = (1.0 - ph1y[bindx]) * NR2.X[bindx][0] + ph1y[bindx] * xt[bindx];
-                xt[bindx] = NR2.ax * xt[bindx] + (1.0 - NR2.ax) * xtr;
+                xtr = (1.0f - ph1y[bindx]) * NR2.X[bindx][0] + ph1y[bindx] * xt[bindx];
+                xt[bindx] = NR2.ax * xt[bindx] + (1.0f - NR2.ax) * xtr;
             }
 
 
             for(int bindx = 0; bindx < nr_params.NR_FFT_L / 2; bindx++)// 1. Step of NR - calculate the SNR's
             {
-                NR.SNR_post[bindx] = fmax(fmin(NR2.X[bindx][0] / xt[bindx],1000.0), NR2.snr_prio_min); // limited to +30 /-15 dB, might be still too much of reduction, let's try it?
+                NR.SNR_post[bindx] = fmaxf(fminf(NR2.X[bindx][0] / xt[bindx],1000.0f), NR2.snr_prio_min); // limited to +30 /-15 dB, might be still too much of reduction, let's try it?
 
-                NR.SNR_prio[bindx] = fmax(nr_params.alpha * NR.Hk_old[bindx] + (1.0 - nr_params.alpha) * fmax(NR.SNR_post[bindx] - 1.0, 0.0), 0.0);
+                NR.SNR_prio[bindx] = fmaxf(nr_params.alpha * NR.Hk_old[bindx] + (1.0f - nr_params.alpha) * fmaxf(NR.SNR_post[bindx] - 1.0f, 0.0f), 0.0f);
             }
 
             VAD_low = (int)lf_freq;
@@ -2066,21 +2097,21 @@ else
 
             for(int bindx = VAD_low; bindx < VAD_high; bindx++)// maybe we should limit this to the signal containing bins (filtering!!)
             {
-                float32_t v = NR.SNR_prio[bindx] * NR.SNR_post[bindx] / (1.0 + NR.SNR_prio[bindx]);
+                float32_t v = NR.SNR_prio[bindx] * NR.SNR_post[bindx] / (1.0f + NR.SNR_prio[bindx]);
 
-                NR2.Hk[bindx] = fmax(1.0 / NR.SNR_post[bindx] * sqrtf((0.7212 * v + v * v)),0.001); //limit HK's to 0.001'
+                NR2.Hk[bindx] = fmaxf(1.0f / NR.SNR_post[bindx] * sqrtf((0.7212f * v + v * v)),0.001f); //limit HK's to 0.001'
 
                 NR.Hk_old[bindx] = NR.SNR_post[bindx] * NR2.Hk[bindx] * NR2.Hk[bindx]; //
 
 
                 /*if(!(ts.dsp_active & DSP_NR_ENABLE)) // if NR is not enabled (but notch is enabled !)
 			  {
-				  NR2.Hk[bindx] = 1.0;
+				  NR2.Hk[bindx] = 1.0f;
 			  } */
             }
             // musical noise "artefact" reduction by dynamic averaging - depending on SNR ratio
-            NR2.pre_power = 0.0;
-            NR2.post_power = 0.0;
+            NR2.pre_power = 0.0f;
+            NR2.post_power = 0.0f;
             for(int bindx = VAD_low; bindx < VAD_high; bindx++)
             {
                 NR2.pre_power += NR2.X[bindx][0];
@@ -2090,17 +2121,17 @@ else
             NR2.power_ratio = NR2.post_power / NR2.pre_power;
             if (NR2.power_ratio > NR2.power_threshold)
             {
-                NR2.power_ratio = 1.0;
+                NR2.power_ratio = 1.0f;
                 NR2.NN = 1;
             }
             else
             {
-                NR2.NN = 1 + 2 * (int)(0.5 + NR2.width * (1.0 - NR2.power_ratio / NR2.power_threshold));
+                NR2.NN = 1 + 2 * (int)(0.5f + NR2.width * (1.0f - NR2.power_ratio / NR2.power_threshold));
             }
 
             for(int bindx = VAD_low + NR2.NN/2; bindx < VAD_high - NR2.NN/2; bindx++)
             {
-                NR.Nest[bindx][0] = 0.0;
+                NR.Nest[bindx][0] = 0.0f;
                 for(int m = bindx - NR2.NN/2; m <= bindx + NR2.NN/2;m++)
                 {
                     NR.Nest[bindx][0] += NR2.Hk[m];
@@ -2112,7 +2143,7 @@ else
             // lower edge
             for(int bindx = VAD_low; bindx < VAD_low + NR2.NN/2; bindx++)
             {
-                NR.Nest[bindx][0] = 0.0;
+                NR.Nest[bindx][0] = 0.0f;
                 for(int m = bindx; m < (bindx + NR2.NN);m++)
                 {
                     NR.Nest[bindx][0] += NR2.Hk[m];
@@ -2123,7 +2154,7 @@ else
             // upper edge - only going NN steps backward and taking the average
             for(int bindx = VAD_high - NR2.NN; bindx < VAD_high; bindx++)
             {
-                NR.Nest[bindx][0] = 0.0;
+                NR.Nest[bindx][0] = 0.0f;
                 for(int m = bindx; m > (bindx - NR2.NN); m--)
                 {
                     NR.Nest[bindx][0] += NR2.Hk[m];
@@ -2145,16 +2176,21 @@ else
         // only do this for the bins inside the filter passband
         // if you do this for all the bins, you will get distorted audio: plopping !
         //              for(int bindx = 0; bindx < nr_params.NR_FFT_L / 2; bindx++) // plopping !!!!
-        for(int bindx = VAD_low; bindx < VAD_high; bindx++) // no plopping
         {
-            NR.FFT_buffer[bindx * 2] = 						NR.FFT_buffer [bindx * 2] * NR2.Hk[bindx]; // real part
-            NR.FFT_buffer[bindx * 2 + 1] = 					NR.FFT_buffer [bindx * 2 + 1] * NR2.Hk[bindx]; // imag part
-            NR.FFT_buffer[nr_params.NR_FFT_L * 2 - bindx * 2 - 2] = 	NR.FFT_buffer[nr_params.NR_FFT_L * 2 - bindx * 2 - 2] * NR2.Hk[bindx]; // real part conjugate symmetric
-            NR.FFT_buffer[nr_params.NR_FFT_L * 2 - bindx * 2 - 1] = 	NR.FFT_buffer[nr_params.NR_FFT_L * 2 - bindx * 2 - 1] * NR2.Hk[bindx]; // imag part conjugate symmetric
-            //                  NR.FFT_buffer[bindx * 2] = NR.FFT_buffer [bindx * 2] * NR2.Hk[bindx] * NR2.long_tone_gain[bindx]; // real part
-            //                  NR.FFT_buffer[bindx * 2 + 1] = NR.FFT_buffer [bindx * 2 + 1] * NR2.Hk[bindx] * NR2.long_tone_gain[bindx]; // imag part
-            //                  NR.FFT_buffer[nr_params.NR_FFT_L * 2 - bindx * 2 - 2] = NR.FFT_buffer[nr_params.NR_FFT_L * 2 - bindx * 2 - 2] * NR2.Hk[bindx] * NR2.long_tone_gain[bindx]; // real part conjugate symmetric
-            //                  NR.FFT_buffer[nr_params.NR_FFT_L * 2 - bindx * 2 - 1] = NR.FFT_buffer[nr_params.NR_FFT_L * 2 - bindx * 2 - 1] * NR2.Hk[bindx] * NR2.long_tone_gain[bindx]; // imag part conjugate symmetric
+            float32_t* spectrum = &NR.FFT_buffer[nr_params.NR_FFT_L];
+
+            for(int bindx = VAD_low; bindx < VAD_high; bindx++) // no plopping
+            {
+                if (bindx == 0)
+                {
+                    spectrum[0] = spectrum[0] * NR2.Hk[0]; // DC has no imaginary part, index 1 is Nyquist
+                }
+                else
+                {
+                    spectrum[bindx * 2] = spectrum[bindx * 2] * NR2.Hk[bindx]; // real part
+                    spectrum[bindx * 2 + 1] = spectrum[bindx * 2 + 1] * NR2.Hk[bindx]; // imag part
+                }
+            }
         }
 
         /*****************************************************************
@@ -2164,10 +2200,12 @@ else
         // & Window on exit!
         //      if(nr_params.fft_256_enable)
         {
-            arm_cfft_f32(&arm_cfft_sR_f32_len256, NR.FFT_buffer, 1, 1);
+            profileTimedEventStart(ProfileNoiseReductionFftInverse);
+            arm_rfft_fast_f32(&nr_fft_instance, &NR.FFT_buffer[nr_params.NR_FFT_L], NR.FFT_buffer, 1);
+            profileTimedEventStop(ProfileNoiseReductionFftInverse);
             for (int idx = 0; idx < nr_params.NR_FFT_L; idx++)
             {
-                NR.FFT_buffer[idx * 2] *= SQRT_von_Hann_256[idx];
+                NR.FFT_buffer[idx] *= SQRT_von_Hann_256[idx];
             }
         }
         /*else
@@ -2183,11 +2221,11 @@ else
         for(int i = 0; i < nr_params.NR_FFT_L / 2; i++)
         { // take real part of first half of current iFFT result and add to 2nd half of last iFFT_result
             //              NR_output_audio_buffer[i + k * (nr_params.NR_FFT_L / 2)] = NR_FFT_buffer[i * 2] + NR_last_iFFT_result[i];
-            in_buffer[i + k * (nr_params.NR_FFT_L / 2)] = NR.FFT_buffer[i * 2] + NR.last_iFFT_result[i];
+            in_buffer[i + k * (nr_params.NR_FFT_L / 2)] = NR.FFT_buffer[i] + NR.last_iFFT_result[i];
         }
         for(int i = 0; i < nr_params.NR_FFT_L / 2; i++)
         {
-            NR.last_iFFT_result[i] = NR.FFT_buffer[nr_params.NR_FFT_L + i * 2];
+            NR.last_iFFT_result[i] = NR.FFT_buffer[nr_params.NR_FFT_L / 2 + i];
         }
         // end of "for" loop which repeats the FFT_iFFT_chain two times !!!
     }
@@ -2270,6 +2308,7 @@ const float32_t NR_test_sinus_samp[128] = {
 #define impulse_length 7 // has to be odd!!!! 7 / 3 should be enough
 #define PL             3 // has to be (impulse_length-1)/2 !!!!
 #define order         10 // lpc's order
+#define nb_screen_ratio 2.0f // skip a frame whose peak does not exceed its neighbours this much
     arm_fir_instance_f32 LPC;
     float32_t lpcs[order+1]; // we reserve one more than "order" because of a leading "1"
     float32_t reverse_lpcs[order+1]; //this takes the reversed order lpc coefficients
@@ -2369,12 +2408,43 @@ const float32_t NR_test_sinus_samp[128] = {
 
     memcpy(&working_buffer[2*PL + 2*order],insamp,NR_FFT_SIZE * sizeof(float32_t));// copy incomming samples to the end of our working bufer
 
+    // Cheap screen before the expensive part: the blanker can only repair something if the frame
+    // has an impulse in it, and an impulse has to be the frame's peak and has to stand out from the
+    // samples around it. If the peak does not stand out by the screen ratio there is nothing to
+    // repair, so the autocorrelation, the Levinson-Durbin recursion and both FIR passes are
+    // skipped. The result is exactly the same in that case, only the sliding history has to be
+    // advanced the way the end of this function does. A tone never stands out from its neighbours
+    // this way, a click always does, even when it sits on band noise.
+    int peak_index = 0;
+    float32_t peak = 0.0f;
+    for (int i = 0; i < NR_FFT_SIZE; i++)
+    {
+        const float32_t magnitude = fabsf(insamp[i]);
+        if (magnitude > peak)
+        {
+            peak = magnitude;
+            peak_index = i;
+        }
+    }
+
+    const float32_t before = fabsf(insamp[(peak_index > 0) ? (peak_index - 1) : 1]);
+    const float32_t after = fabsf(insamp[(peak_index < (NR_FFT_SIZE - 1)) ? (peak_index + 1) : (NR_FFT_SIZE - 2)]);
+    const float32_t neighbours = fmaxf(before, after);
+    const uint8_t impulsive = (peak > 1e-6f) && (peak > (nb_screen_ratio * neighbours));
+
+    if (impulsive == 0)
+    {
+        memcpy(insamp,&working_buffer[order+PL],NR_FFT_SIZE * sizeof(float32_t));
+        memcpy(working_buffer,&working_buffer[NR_FFT_SIZE],(2*order + 2*PL) * sizeof(float32_t));
+        return;
+    }
+
 
     //  start of test timing zone
 
     for (int i=0; i<impulse_length; i++)  // generating 2 Windows for the combination of the 2 predictors
     {                                     // will be a constant window later!
-        Wbw[i]=1.0*i/(impulse_length-1);
+        Wbw[i]=1.0f*i/(float)(impulse_length-1);
         Wfw[impulse_length-i-1]=Wbw[i];
     }
 
@@ -2390,7 +2460,10 @@ const float32_t NR_test_sinus_samp[128] = {
 
     //alternative levinson durben algorithm to calculate the lpc coefficients from the crosscorrelation
 
-    R[0] = R[0] * (1.0 + 1.0e-9);
+    // keep the autocorrelation from being exactly singular for the Levinson-Durbin recursion.
+    // The original 1e-9 relative term is below single precision resolution (it would be a no-op),
+    // so the smallest factor that is still representable in float is used.
+    R[0] = R[0] * (1.0f + 1.0e-6f);
 
     lpcs[0] = 1;   //set lpc 0 to 1
 
@@ -2401,7 +2474,7 @@ const float32_t NR_test_sinus_samp[128] = {
 
     for (int m = 1; m <= order; m++)
     {
-        s = 0.0;
+        s = 0.0f;
         for (int u = 1; u < m; u++)
             s = s + lpcs[u] * R[m-u];
 
@@ -2422,12 +2495,12 @@ const float32_t NR_test_sinus_samp[128] = {
     for (int o = 0; o < order+1; o++ )             //store the reverse order coefficients separately
         reverse_lpcs[order-o]=lpcs[o];        // for the matched impulse filter
 
-    arm_fir_init_f32(&LPC,order+1,&reverse_lpcs[0],&firStateF32[0],NR_FFT_SIZE);                                         // we are using the same function as used in freedv
+    arm_fir_init_f32(&LPC,order+1,&reverse_lpcs[0],&firStateF32[0],NR_FFT_SIZE);                                         // same LPC filtering as used by the analysis
 
     //arm_fir_f32(&LPC,insamp,tempsamp,Nsam); //do the inverse filtering to eliminate voice and enhance the impulses
     arm_fir_f32(&LPC,&working_buffer[order+PL],tempsamp,Nsam); //do the inverse filtering to eliminate voice and enhance the impulses
 
-    arm_fir_init_f32(&LPC,order+1,&lpcs[0],&firStateF32[0],NR_FFT_SIZE);                                         // we are using the same function as used in freedv
+    arm_fir_init_f32(&LPC,order+1,&lpcs[0],&firStateF32[0],NR_FFT_SIZE);                                         // same LPC filtering as used by the analysis
 
     arm_fir_f32(&LPC,tempsamp,tempsamp,Nsam); // do a matched filtering to detect an impulse in our now voiceless signal
 
@@ -2437,7 +2510,7 @@ const float32_t NR_test_sinus_samp[128] = {
     arm_power_f32(lpcs,order,&lpc_power);  // calculate the sum of the squares (the "power") of the lpc's
 
     //    impulse_threshold = (float32_t)ts.nb_setting * 0.5 * sqrtf(sigma2 * lpc_power);  //set a detection level (3 is not really a final setting)
-    impulse_threshold = (float32_t)(16 - ts.dsp.nb_setting) * 0.5 * sqrtf(sigma2 * lpc_power);  //set a detection level (3 is not really a final setting)
+    impulse_threshold = (float32_t)(16 - ts.dsp.nb_setting) * 0.5f * sqrtf(sigma2 * lpc_power);  //set a detection level (3 is not really a final setting)
 
     //if ((nr_setting > 20) && (nr_setting <51))
     //    impulse_threshold = impulse_threshold / (0.9 + (nr_setting-20.0)/10);  //scaling the threshold by 1 ... 0.26

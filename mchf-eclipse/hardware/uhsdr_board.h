@@ -61,13 +61,12 @@ typedef enum {
 
 // codec x demod
 // analog USB LSB CW AM FM SAM
-// FreeDV USB LSB -  -  -  -
 
 
 #define		MIN_FREQ_CAL		-1499		// Minimum and maximum range of frequency calibration in 10xppm
 #define		MAX_FREQ_CAL		1499
 
-#define MAX_BANDS               17      // Highest band number:  17 = General coverage (RX only) band
+#define MAX_BANDS               15      // Highest band number:  15 = General coverage (RX only) band
 #define MAX_BAND_NUM            (MAX_BANDS+1)       // Number of Bands
 
 
@@ -132,12 +131,9 @@ enum
 #define	TX_POWER_FACTOR_17_DEFAULT	0
 #define	TX_POWER_FACTOR_15_DEFAULT	0
 #define	TX_POWER_FACTOR_12_DEFAULT	0
+#define	TX_POWER_FACTOR_11_DEFAULT	0
 #define	TX_POWER_FACTOR_10_DEFAULT	0
 #define TX_POWER_FACTOR_6_DEFAULT	0
-#define TX_POWER_FACTOR_4_DEFAULT	0
-#define TX_POWER_FACTOR_2_DEFAULT	0
-#define TX_POWER_FACTOR_70_DEFAULT	0
-#define TX_POWER_FACTOR_23_DEFAULT	0
 #define TX_POWER_FACTOR_2200_DEFAULT	0
 #define TX_POWER_FACTOR_630_DEFAULT	0
 #define TX_POWER_FACTOR_160_DEFAULT	0
@@ -389,6 +385,12 @@ typedef struct TransceiverState
     uint32_t	tx_mic_gain_mult;
     uint8_t	tx_gain[TX_AUDIO_NUM];
     int16_t	tx_comp_level;			// Used to hold compression level which is used to calculate other values for compression.  0 = manual.
+    uint8_t	am_carrier_level;		// AM carrier level in percent of the rated carrier (50 .. 125, default 100)
+    uint8_t	am_carrier_pep_hold;	// how long the carrier to PEP readout is held after TX in half seconds (0 = no hold)
+    uint8_t	am_carrier_pep_dim;		// show the held carrier to PEP readout dimmed
+    uint8_t	am_carrier_pep_target;	// carrier to PEP ratio of a correctly set carrier in half dB (4 .. 40 = -2.0 .. -20.0 dB)
+    uint8_t	am_carrier_pep_warn;		// delay before a clearly out of range ratio starts to blink in half seconds (0 = warning off)
+    uint8_t	am_tx_sideband;		// AM transmit sideband: both (double sideband), LSB or USB
 
     // Global tuning flag - in every demod mode
     uint8_t 	tune;
@@ -564,7 +566,7 @@ typedef struct TransceiverState
     uint32_t	voltmeter_calibrate;			// used to calibrate the voltmeter
 
 
-    bool	dvmode;					// TRUE if alternate (stripped-down) RX and TX functions (USB-only) are to be used
+    bool	dvmode;					// TRUE while a digital mode (RTTY/BPSK) runs the digital codec instead of the analog audio path
     uint8_t	txrx_switch_audio_muting_timing;			// timing value used for muting TX audio when keying PTT to suppress "click" or "thump"
     uint32_t	audio_dac_muting_timer;			// timer value used for muting TX audio when keying PTT to suppress "click" or "thump"
     uint32_t audio_dac_muting_buffer_count; // the audio dac out will be muted for number of buffers

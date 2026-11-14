@@ -18,10 +18,24 @@
 #include "uhsdr_board_config.h"
 
 #ifdef USE_ALTERNATE_NR
-// this contains our shared buffer structure, since FreeDV and NR are mutually exclusive
-// they can use the same set of buffers for exchanging data between audio interrupt and
-// user code
-#include "freedv_uhsdr.h"
+#include "uhsdr_types.h"
+#include "uhsdr_board.h"
+
+// buffers used to exchange audio data between the audio interrupt and the noise reduction
+#define NR_BUFFER_NUM  4
+#define NR_BUFFER_SIZE 256 // 4*256*8 -> 8192
+#define NR_BUFFER_FIFO_SIZE (NR_BUFFER_NUM+1)
+
+typedef struct {
+   comp_float_t samples[NR_BUFFER_SIZE];
+}  NR_Buffer;
+
+typedef struct
+{
+    NR_Buffer nr_audio_buff[NR_BUFFER_NUM];
+} MultiModeBuffer_t;
+
+extern MultiModeBuffer_t mmb;
 
 #define NR_FFT_SIZE 128
 
@@ -105,6 +119,8 @@ typedef struct
     uint8_t NR_FFT_LOOP_NO;
     bool NR_decimation_enable; // set to true, if we want to use another decimation step for the spectral NR leading to 6ksps sample rate
     bool NR_decimation_active; // set to true if the current buffer content is "double decimated" down to 6khz, set by the buffer producer
+
+    uint32_t audio_sample_rate; // sample rate of the audio in the NR buffers (12000, 24000 or 6000 after double decimation)
 
 } audio_nr_params_t;
 
