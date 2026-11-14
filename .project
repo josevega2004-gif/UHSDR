@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<projectDescription>
+	<name>UHSDR</name>
+	<comment></comment>
+	<projects>
+		<project>mchf-eclipse</project>
+		<project>mchf-uhsdr</project>
+	</projects>
+	<buildSpec>
+	</buildSpec>
+	<natures>
+	</natures>
+</projectDescription>
