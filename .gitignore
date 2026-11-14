@@ -2,3 +2,11 @@ docs/
 mchf-eclipse/.settings/org.eclipse.cdt.managedbuilder.core.prefs
 .metadata
 build/
+
+# generated handbook artifacts, rebuilt by mk-menu-handbook / make docs
+mchf-eclipse/support/ui/menu/menu-handbook-build.timestamp
+mchf-eclipse/support/ui/menu/ui_menu_structure_graph.gv
+mchf-eclipse/support/ui/menu/ui_menu_structure_graph.png
+mchf-eclipse/support/ui/menu/ui_menu_structure_graph.svg
+mchf-eclipse/support/ui/menu/ui_menu_structure_mdtable.md
+mchf-eclipse/support/ui/menu/__pycache__/

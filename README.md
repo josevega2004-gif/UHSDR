@@ -1,11 +1,15 @@
 <div align="center"><h1><b>The UHSDR Project</b></h1></div>
 
+> **Note:** this is a private fork of [df8oe/UHSDR](https://github.com/df8oe/UHSDR).
+> The GNU GPLv3 licence of the original project is kept unchanged; `origin` is this
+> private fork and `upstream` refers to the public project.
+
 UHSDR stands for **U**niversal**H**am**S**oftware**D**efined**R**adio.
 The project provides  the firmware to run standalone HAM transceivers.
 It currently supports STM32F4 and STM32F7 MCU based QSD designs. The
 current firmware provides receive and transmit for various analog modes
 (SSB,AM, FM) including modes like Synchronous AM, plus digital modes
-like FreeDV, RTTY  and of course CW (including Iambic/Ultimatic keyer).
+like RTTY  and of course CW (including Iambic/Ultimatic keyer).
 An USB CAT and audio interface is part of the firmware as well. The
 bootloader, which is another part of the project, permits to update the
 firmware and bootloader using various means like USB disk or USB cable.
