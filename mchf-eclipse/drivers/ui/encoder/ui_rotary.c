@@ -226,6 +226,77 @@ int UiDriverEncoderRead(const uint32_t encId)
     return pot_diff;
 }
 
+
+//*----------------------------------------------------------------------------
+//* Function Name       : UiRotary_DiagSample
+//* Object              : encoder diagnostics for the debug overlay
+//*
+//* Reads the two phase pins of every encoder straight from the GPIO input
+//* register, independent of the timer decoder, and counts the edges of each
+//* phase separately, next to the net steps the timer produced. Turning a knob
+//* while the overlay is shown tells which side fails:
+//*   changes_a or changes_b stuck at 0 -> that phase (dirty contact, dead pull
+//*     up, broken pin): the timer then decodes every edge of the living phase
+//*     as the same direction, the classic "only turns down when cold"
+//*   both phases count, count does not -> timer/GPIO configuration issue
+//* The counters saturate, this is a human diagnostic, not an instrument.
+//----------------------------------------------------------------------------
+void UiRotary_DiagSample(UiRotaryDiag_t* diag, uint8_t max)
+{
+    static uint8_t last_state[ENC_MAX];
+    static uint16_t chg_a[ENC_MAX];
+    static uint16_t chg_b[ENC_MAX];
+    static int16_t  net_count[ENC_MAX];
+    static uint16_t last_cnt[ENC_MAX];
+    static bool     initialized = false;
+
+    if (!initialized)
+    {
+        for (uint8_t id = 0; id < ENC_MAX; id++)
+        {
+            const uint8_t a = (encoderIO[id].pin[0].pio->IDR & encoderIO[id].pin[0].pin) != 0;
+            const uint8_t b = (encoderIO[id].pin[1].pio->IDR & encoderIO[id].pin[1].pin) != 0;
+            last_state[id] = (uint8_t)((a << 1) | b);
+            last_cnt[id] = (uint16_t)encoderIO[id].tim->CNT;
+        }
+        initialized = true;
+    }
+
+    const uint8_t n = (max < ENC_MAX) ? max : ENC_MAX;
+    for (uint8_t id = 0; id < n; id++)
+    {
+        const uint8_t a = (encoderIO[id].pin[0].pio->IDR & encoderIO[id].pin[0].pin) != 0;
+        const uint8_t b = (encoderIO[id].pin[1].pio->IDR & encoderIO[id].pin[1].pin) != 0;
+        const uint8_t state = (uint8_t)((a << 1) | b);
+
+        if (((last_state[id] >> 1) & 1) != a && chg_a[id] < 999)
+        {
+            chg_a[id]++;
+        }
+        if ((last_state[id] & 1) != b && chg_b[id] < 999)
+        {
+            chg_b[id]++;
+        }
+        last_state[id] = state;
+
+        // the timer counter is free running 16 bit, the difference of two reads is the
+        // number of quadrature steps signed
+        const uint16_t cnt = (uint16_t)encoderIO[id].tim->CNT;
+        const int16_t steps = (int16_t)(uint16_t)(cnt - last_cnt[id]);
+        last_cnt[id] = cnt;
+        const int32_t sum = (int32_t)net_count[id] + steps;
+        net_count[id] = (int16_t)((sum > 999) ? 999 : ((sum < -999) ? -999 : sum));
+
+        if (diag)
+        {
+            diag[id].state_ab = state;
+            diag[id].changes_a = chg_a[id];
+            diag[id].changes_b = chg_b[id];
+            diag[id].count = net_count[id];
+        }
+    }
+}
+
 //left for some time only for reference.
 
 /*

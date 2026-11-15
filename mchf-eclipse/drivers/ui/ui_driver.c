@@ -7826,6 +7826,27 @@ void UiDriver_TaskHandler_MainTasks()
 							(unsigned int)UiDriver_ProfileEventDisplayUs(ProfileTP8),
 							(unsigned int)fft_us);
 					UiLcdHy28_PrintText(DSP_TIMING_X,ts.Layout->LOADANDDEBUG_Y,str,White,Black,0);
+
+					// encoder diagnostics: raw phase line levels, per phase edge counters and
+					// net steps the timer decoder produced, one line per encoder (E1 audio gain,
+					// E2 RF gain, E3 AF gain, EF tuning). Turn a knob slowly: if one phase stops
+					// counting while the other and the steps keep moving, that phase is dead -
+					// the timer reads every edge of the living phase as the same direction, the
+					// "cold encoder only turns down" failure
+					{
+						UiRotaryDiag_t enc_diag[ENC_MAX];
+						static const char* const enc_diag_names[ENC_MAX] = { "E1","E2","E3","EF" };
+						UiRotary_DiagSample(enc_diag, ENC_MAX);
+						for (uint8_t enc = 0; enc < ENC_MAX; enc++)
+						{
+							snprintf(str,20,"%s %d%d a%3u b%3u %+5d",
+									enc_diag_names[enc],
+									(enc_diag[enc].state_ab >> 1) & 1, enc_diag[enc].state_ab & 1,
+									(unsigned int)enc_diag[enc].changes_a, (unsigned int)enc_diag[enc].changes_b,
+									(int)enc_diag[enc].count);
+							UiLcdHy28_PrintText(0,(uint16_t)(ts.Layout->LOADANDDEBUG_Y + 9 * (enc + 1)),str,White,Black,0);
+						}
+					}
 				}
 #endif
 			}

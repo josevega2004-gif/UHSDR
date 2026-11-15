@@ -71,4 +71,22 @@ enum EncoderId
 
 int UiDriverEncoderRead(const uint32_t encId);
 
+// Encoder diagnostics, see the debug overlay: the raw phase pin states and how often each
+// phase changed since the last sampling, plus what the hardware timer decoder made of it.
+// A phase that never changes while the other one and the count do, is the failing encoder.
+typedef struct
+{
+    uint8_t  state_ab;          // current levels of phase A (bit 1) and phase B (bit 0)
+    uint16_t changes_a;         // phase A edge counter, saturates at 999
+    uint16_t changes_b;         // phase B edge counter, saturates at 999
+    int16_t  count;             // net steps the timer decoder produced, saturates at +/-999
+} UiRotaryDiag_t;
+
+/**
+ * @brief sample the encoder phase pins and the timer counters once, for the debug overlay
+ * @param diag receives one entry per encoder, may be NULL for an encoder
+ * @param max number of entries in diag
+ */
+void UiRotary_DiagSample(UiRotaryDiag_t* diag, uint8_t max);
+
 #endif
