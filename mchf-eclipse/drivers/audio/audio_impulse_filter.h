@@ -34,8 +34,19 @@
  * a window of 7 samples impulses of up to 3 samples (125 us to 250 us at 12 kHz).
  *
  * The window is centred, delaying the audio by (taps - 1) / 2 samples: 1 or 2 samples at
- * 12 kHz. The code is header only (static inline) so that the very same code can be compiled
- * and tested outside of the firmware.
+ * 12 kHz.
+ *
+ * A second detector runs in parallel on the energy of the last four samples: an ignition burst
+ * stores far more energy than its individual samples stand out against their direct neighbours
+ * (behind the AM filter a burst is a ringing oscillation only some times larger than loud
+ * modulation on the very samples the neighbour test sees), so whenever the window energy rises
+ * clearly above the median of the recent window energies the centre is treated as an impulse as
+ * well and is repaired by the same median reconstruction. A median is not trained upwards by
+ * repeated noise the way a tracked maximum is, and at the firing rates of a car engine even a
+ * dense burst sequence leaves most of the history untouched.
+ *
+ * The code is header only (static inline) so that the very same code can be compiled and tested
+ * outside of the firmware.
  */
 #ifndef AUDIO_IMPULSE_FILTER_H
 #define AUDIO_IMPULSE_FILTER_H
@@ -45,6 +56,8 @@
 
 #define AUDIO_IMPULSE_MAX_TAPS      7
 #define AUDIO_IMPULSE_MIN_LEVEL     1e-6f   // below this there is nothing to detect
+#define AUDIO_IMPULSE_ENERGY_TAPS   4       // samples in the energy window
+#define AUDIO_IMPULSE_ENERGY_HIST   16      // recent energy windows kept for the median
 
 typedef struct
 {
@@ -52,6 +65,12 @@ typedef struct
     uint8_t position;                           // next write position in history
     uint8_t fill;                               // valid samples in history, saturates at AUDIO_IMPULSE_MAX_TAPS
     uint8_t replacing;                          // samples still to be replaced by the median
+    float   square[AUDIO_IMPULSE_ENERGY_TAPS];  // squares of the last ENERGY_TAPS input samples
+    uint8_t square_pos;                         // next write position in square
+    float   energy_hist[AUDIO_IMPULSE_ENERGY_HIST]; // recent window energies, updated every ENERGY_TAPS samples
+    uint8_t energy_pos;                         // next write position in energy_hist
+    uint8_t energy_fill;                        // valid entries in energy_hist, saturates
+    float   energy_ref;                         // median of the valid energy_hist entries
 } AudioImpulseState_t;
 
 /**
@@ -67,6 +86,18 @@ static inline void AudioImpulse_Reset(AudioImpulseState_t *state)
     state->position = 0;
     state->fill = 0;
     state->replacing = 0;
+    for (uint8_t i = 0; i < AUDIO_IMPULSE_ENERGY_TAPS; i++)
+    {
+        state->square[i] = 0.0f;
+    }
+    state->square_pos = 0;
+    for (uint8_t i = 0; i < AUDIO_IMPULSE_ENERGY_HIST; i++)
+    {
+        state->energy_hist[i] = 0.0f;
+    }
+    state->energy_pos = 0;
+    state->energy_fill = 0;
+    state->energy_ref = 0.0f;
 }
 
 /**
@@ -151,7 +182,44 @@ static inline float AudioImpulse_Process(AudioImpulseState_t *state, float sampl
     }
     const float median = values[taps / 2];
 
-    const uint8_t impulse = (fabsf(current) > (threshold_factor * neighbours)) ? 1 : 0;
+    // the parallel energy detector: the square of the new input sample enters the window
+    // energy; every fourth sample the recent energies are re-sorted and their median becomes the
+    // reference. The current window energy is compared against that reference every sample, so a
+    // ringing burst whose individual samples only loosely stand out still keeps the flag up for
+    // all of its samples.
+    state->square[state->square_pos] = sample * sample;
+    state->square_pos = (uint8_t)((state->square_pos + 1) % AUDIO_IMPULSE_ENERGY_TAPS);
+    float energy = 0.0f;
+    for (uint8_t i = 0; i < AUDIO_IMPULSE_ENERGY_TAPS; i++)
+    {
+        energy += state->square[i];
+    }
+    if ((state->position % AUDIO_IMPULSE_ENERGY_TAPS) == 0)
+    {
+        state->energy_hist[state->energy_pos] = energy;
+        state->energy_pos = (uint8_t)((state->energy_pos + 1) % AUDIO_IMPULSE_ENERGY_HIST);
+        if (state->energy_fill < AUDIO_IMPULSE_ENERGY_HIST)
+        {
+            state->energy_fill++;
+        }
+        float med[AUDIO_IMPULSE_ENERGY_HIST];
+        for (uint8_t i = 0; i < state->energy_fill; i++)
+        {
+            const float key = state->energy_hist[i];
+            int8_t j = (int8_t)(i - 1);
+            med[i] = key;
+            while ((j >= 0) && (med[j] > key))
+            {
+                med[j + 1] = med[j];
+                j--;
+            }
+        }
+        state->energy_ref = med[state->energy_fill / 2];
+    }
+    const uint8_t energy_impulse = (state->energy_fill >= AUDIO_IMPULSE_ENERGY_HIST / 2)
+                                && (energy > threshold_factor * state->energy_ref);
+
+    const uint8_t impulse = (fabsf(current) > (threshold_factor * neighbours)) || energy_impulse;
     if (impulse)
     {
         state->replacing = (taps > 5) ? 3 : 1;          // impulses of more than one sample

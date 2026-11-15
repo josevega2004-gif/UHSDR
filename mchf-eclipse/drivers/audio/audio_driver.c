@@ -30,6 +30,7 @@
 #include "audio_driver.h"
 #include "audio_nr.h"
 #include "audio_impulse_filter.h"
+#include "audio_iq_blanker.h"
 #include "audio_agc.h"
 #include "audio_management.h"
 #include "radio_management.h"
@@ -2208,6 +2209,55 @@ static void AudioDriver_RxProcessorNoiseReduction(uint16_t blockSizeDecim, float
 }
 
 static AudioImpulseState_t impulse_filter_state[NUM_AUDIO_CHANNELS];
+static AudioIQBlankerState_t iq_blanker_state;
+
+/**
+ * @brief RF side blanker thresholds for the current "RX NB Setting"
+ *
+ * The blanker in audio_iq_blanker.h works on the 48 kHz I/Q stream before the receive filters,
+ * where an ignition pulse is still a spike of one to three samples. Both detectors are driven
+ * by the same menu setting, the ramp starts mild so that setting 1 is only slightly more than
+ * off. Host measurements (band limited test signal plus pulses) show zero audio disturbance at
+ * 4.5/3.5 and below, 93% to 100% of the pulse samples removed at 3.5/2.6 and better.
+ */
+static float AudioDriver_IqBlankerSpikeThreshold(void)
+{
+    float threshold = 4.5f - 0.11f * (float)(ts.dsp.nb_setting - 1);
+    if (threshold < 3.0f)
+    {
+        threshold = 3.0f;
+    }
+    return threshold;
+}
+
+static float AudioDriver_IqBlankerEnergyThreshold(void)
+{
+    float threshold = 3.5f - 0.107f * (float)(ts.dsp.nb_setting - 1);
+    if (threshold < 2.0f)
+    {
+        threshold = 2.0f;
+    }
+    return threshold;
+}
+
+/**
+ * @brief remove ignition spikes from the I/Q stream before the receive filters
+ *
+ * Runs on the raw 48 kHz I/Q, before the digital filters smear a spike into the ringing burst
+ * the audio suppressor has to fight later, and before the AGC could pump on it. Active with
+ * the DSP noise blanker on the modes where impulse noise dominates, AM and SAM; FM is skipped
+ * as for the audio suppressor, its limiter squelches short spikes anyway.
+ */
+static void AudioDriver_IqBlanker(float32_t* i_buffer, float32_t* q_buffer, uint16_t blockSize)
+{
+    if (!is_dsp_nb_active() || (ts.dmod_mode != DEMOD_AM && ts.dmod_mode != DEMOD_SAM))
+    {
+        AudioIQBlanker_Reset(&iq_blanker_state);
+        return;
+    }
+    AudioIQBlanker_Process(&iq_blanker_state, i_buffer, q_buffer, blockSize,
+                           AudioDriver_IqBlankerSpikeThreshold(), AudioDriver_IqBlankerEnergyThreshold());
+}
 
 /**
  * @brief impulse suppressor window length for the current "RX NB Setting"
@@ -2223,20 +2273,20 @@ static uint8_t AudioDriver_ImpulseWindow(void)
 /**
  * @brief impulse suppressor threshold for the current "RX NB Setting"
  *
- * A sample is replaced if it is this many times larger than its older neighbours. Lower values
- * are more aggressive; below about 3 wanted audio starts to be mistaken for impulses.
+ * A sample is replaced if it is this many times larger than its older neighbours; the energy
+ * detector in audio_impulse_filter.h uses the same factor against the median of the recent
+ * window energies. Lower values are more aggressive; below about 3 wanted audio starts to be
+ * mistaken for impulses.
+ * The ramp is continuous: setting 1 is only slightly more than off, every step adds a little.
  */
 static float AudioDriver_ImpulseThreshold(void)
 {
-    if (ts.dsp.nb_setting <= 5)
+    float threshold = 5.2f - 0.147f * (float)ts.dsp.nb_setting;
+    if (threshold < 3.0f)
     {
-        return 4.0f;
+        threshold = 3.0f;
     }
-    if (ts.dsp.nb_setting <= 10)
-    {
-        return 3.5f;
-    }
-    return 3.0f;
+    return threshold;
 }
 
 /**
@@ -2529,6 +2579,8 @@ static void AudioDriver_RxProcessor(IqSample_t * const srcCodec, AudioSample_t *
             arm_scale_f32 (adb.iq_buf.i_buffer, IQ_BIT_SCALE_DOWN, adb.iq_buf.i_buffer, blockSize);
             arm_scale_f32 (adb.iq_buf.q_buffer, IQ_BIT_SCALE_DOWN, adb.iq_buf.q_buffer, blockSize);
         }
+        AudioDriver_IqBlanker(adb.iq_buf.i_buffer, adb.iq_buf.q_buffer, blockSize);
+
         AudioDriver_RxHandleIqCorrection(adb.iq_buf.i_buffer, adb.iq_buf.q_buffer, blockSize);
 
         // at this point we have phase corrected IQ @ IQ_SAMPLE_RATE, unshifted in adb.iq_buf.i_buffer, adb.iq_buf.q_buffer
