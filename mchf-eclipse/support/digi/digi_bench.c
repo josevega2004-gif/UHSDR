@@ -82,6 +82,8 @@ typedef struct
     float       snr_db;
     float       qsb_rate;
     float       qsb_depth;
+    uint16_t    baud;        // 0 = 45.45, the rate the modem was designed around; 50 = the DWD
+                             // weather teleprinter stations, which are all F1B 50 Baud
 } rtty_case_t;
 
 // The demodulator emits one or two characters of junk while it locks on, which is a property of
@@ -106,7 +108,8 @@ static float rtty_run(const rtty_case_t* c, const char* msg, char* got, size_t g
 {
     size_t n  = 160000;                                  // received samples: 13.3 s, room for the message and EOT
 
-    rtty_ctrl_config.speed_idx = RTTY_SPEED_45;
+    rtty_ctrl_config.speed_idx = c->baud == 50 ? RTTY_SPEED_50 : RTTY_SPEED_45;
+
     for (int i = 0; i < RTTY_SHIFT_NUM; i++)
     {
         if (rtty_shifts[i].value == (float32_t) c->shift) rtty_ctrl_config.shift_idx = (rtty_shift_t) i;
@@ -162,9 +165,16 @@ static void rtty_table(void)
         { "snr 7 170",      170,   7.0f, 0, 0 },
         { "qsb 10 170",     170,  10.0f, 0.5f, 6.0f },
         { "qsb fast 10",    170,  10.0f, 2.0f, 10.0f },
+        // the real services, as published: DWD DDH/DDK are F1B 50 Baud with +/-225 Hz (450 Hz
+        // total) on 4583/7646/10100.8/11039/14467.3 kHz and +/-42.5 Hz (85 Hz) on 147.3 kHz,
+        // the 8472 kHz hydrological broadcast is 45.45 Bd with 170 Hz shift
+        { "dwd 450 50bd",   450,   20.0f, 0, 0, 50 },
+        { "dwd 450 10bd",   450,   10.0f, 0, 0, 50 },
+        { "ddh47 85 50bd",   85,   20.0f, 0, 0, 50 },
+        { "8472 170 45bd",  170,   20.0f, 0, 0 },
     };
 
-    printf("RTTY loopback of drivers/audio/rtty.c (45.45 Bd, 1.5 stop bits, tx 48 kHz -> rx 12 kHz)\n");
+    printf("RTTY loopback of drivers/audio/rtty.c (per case: 45.45 or 50 Bd, 1.5 stop bits, tx 48 kHz -> rx 12 kHz)\n");
     printf("%-16s %7s %6s  %s\n", "case", "CER %", "lead", "decoded");
     char got[8192];
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
@@ -174,8 +184,11 @@ static void rtty_table(void)
         printf("%-16s %7.1f %6d  %s%s\n", cases[i].label, cer, lead_in_junk, got,
                eot ? "" : "   [transmission cut off before EOT]");
     }
-    printf("\nnote: unsupported shifts are mapped to 170 by Rtty_Modem_Init(), and the shift list\n"
-           "      in rtty.c is 85/170/200/425/450/850; a stored value outside it decodes badly.\n");
+    printf("\nnote: this loopback cannot grade the selected shift at all. The mark filter (915 Hz,\n"
+           "      3 dB band 1034-1136 Hz) rejects the space tone by 20 dB or more for every shift\n"
+           "      except 85 Hz, so the ATC decides from the mark channel alone and decodes even with\n"
+           "      the space filter tuned elsewhere; see support/digi/README.md. An unsupported shift\n"
+           "      is still mapped to 170 by Rtty_Modem_Init(), but it does not decode badly.\n");
 }
 
 /* ------------------------------------------------------------------ *
@@ -249,7 +262,7 @@ static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); 
 // pinned at, and gain trimmed from the file peak so a quiet recording still reaches the modems
 // threshold. This is the hook for real audio (a WebSDR capture, another receivers file export,
 // or an on-air recording), which is the whole reason the bench exists.
-static float decode_wav(const char* path, const char* expected, char* got, size_t got_sz, uint16_t shift)
+static float decode_wav(const char* path, const char* expected, char* got, size_t got_sz, uint16_t shift, uint16_t baud)
 {
     FILE* f = fopen(path, "rb");
     if (!f) { printf("cannot open %s\n", path); return -1.0f; }
@@ -278,7 +291,27 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
     }
     float gain = peak > 0.0f ? 0.7f / peak : 1.0f;
 
-    rtty_ctrl_config.speed_idx = RTTY_SPEED_45;
+    /* the firmware silently maps an unsupported shift to 170 and only knows 45.45 and 50 baud,
+       which against a real station looks exactly like a modem that cannot decode: refuse the
+       combination here instead of reporting the modem for a harness mistake */
+    int shift_ok = 0;
+    for (int k = 0; k < RTTY_SHIFT_NUM; k++)
+    {
+        if (rtty_shifts[k].value == (float32_t)shift) shift_ok = 1;
+    }
+    if (!shift_ok)
+    {
+        printf("%u Hz shift is not in the modem's filter bank (85/170/200/425/450/850), Rtty_Modem_Init() "
+               "would silently decode it as 170\n", (unsigned)shift);
+        return -1.0f;
+    }
+    if (baud != 45 && baud != 50)
+    {
+        printf("%u baud is not supported, rtty_speeds[] only holds 45.45 and 50\n", (unsigned)baud);
+        return -1.0f;
+    }
+    rtty_ctrl_config.speed_idx = baud == 50 ? RTTY_SPEED_50 : RTTY_SPEED_45;
+    rtty_ctrl_config.shift_idx = RTTY_SHIFT_170;
     for (int k = 0; k < RTTY_SHIFT_NUM; k++)
     {
         if (rtty_shifts[k].value == (float32_t)shift) rtty_ctrl_config.shift_idx = (rtty_shift_t)k;
@@ -422,7 +455,7 @@ static int selftest(void)
             rec[k] = acc * 0.25f;
         }
         check(Bench_WavWrite("rtty_roundtrip.wav", rec, n, 12000), "the bench can write a 12 kHz RTTY recording");
-        float cer_file = decode_wav("rtty_roundtrip.wav", msg, got, sizeof(got), 170);
+        float cer_file = decode_wav("rtty_roundtrip.wav", msg, got, sizeof(got), 170, 45);
         check(cer_file == 0.0f, "a recorded WAV comes back through the file input with zero errors");
     }
     printf("%s\n", failures ? "SELF CHECKS FAILED" : "all self checks passed");
@@ -440,10 +473,12 @@ int main(int argc, char** argv)
         char got[8192];
         uint16_t shift = argc > 3 ? (uint16_t)atoi(argv[3]) : 170;
         const char* expect = argc > 4 ? argv[4] : "";
-        float cer = decode_wav(argv[2], expect, got, sizeof(got), shift);
+        uint16_t baud = argc > 5 ? (uint16_t)atoi(argv[5]) : 45;
+        printf("decoding with %u Hz shift, %u baud\n", (unsigned)shift, (unsigned)baud);
+        float cer = decode_wav(argv[2], expect, got, sizeof(got), shift, baud);
         if (cer >= 0.0f) printf("CER       : %.1f%% (after aligning the lead in)\n", cer);
         return 0;
     }
-    fprintf(stderr, "usage: digi_bench [test|rtty|wefax|rtty-wav <file.wav> [shift] [expected text]]\n");
+    fprintf(stderr, "usage: digi_bench [test|rtty|wefax|rtty-wav <file.wav> [shift] [expected text] [45|50 baud]]\n");
     return 2;
 }

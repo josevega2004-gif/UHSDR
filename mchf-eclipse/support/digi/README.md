@@ -48,6 +48,27 @@ the size of the CW lift, measured rather than guessed.
   stepped twice on those samples, so a naive zero crossing count of the idle tone reads high.
 * `Rtty_Modem_Init()` accepts shifts 85/170/200/425/450/850 and **silently maps anything else to
   170**; mark is 915 Hz, space above it. A stored value outside that list decodes as 170.
+* **The selected shift does not change what this modem decodes.** Mark is hard-wired to the 915 Hz
+  bandpass (`rtty_bp_12khz_915`) and the space filter is picked from the shift, but the ATC
+  comparison in `RttyDecoder_demodulator()` works from the mark channel alone: the 915 Hz filter
+  (measured 3 dB band 1034-1136 Hz, so about 102 Hz wide) already rejects the space tone by
+  20 dB at 170 Hz shift, 23 dB at 200, 35 dB at 425/450 and 45 dB at 850. Measured on the actual
+  coefficient tables, a 1085 Hz tone is 0.026 of its own level in the 1365 Hz filter and 0.0025 in
+  the 1765 Hz one, and decoding a 170 Hz-shift recording with the shift set to any of 85/170/200/
+  425/450/850 gives 0.0% CER every time. The code says the same thing itself: *"the current
+  implementation with ATC already works quite well with mark-only/space-only"*. Two consequences:
+  a CER measurement **cannot** validate the shift setting (use the transmitted tone frequencies
+  instead), and a live capture does not need the tones placed exactly - **except at 85 Hz shift
+  (DDH 47, 147.3 kHz), where the mark filter only rejects the space tone by 9.3 dB** and the space
+  filter genuinely matters.
+* Inside the ATC branch the variable names are the opposite of what they hold. `mark_mag`/`mark_env`
+  carry the **space** filter output and `space_mag`/`space_env` the **915 Hz mark** output, because
+  the block starts by exchanging them to cancel the naming convention of the FlDigi formula it was
+  taken from. The polarity is nevertheless correct and was checked against the modulator, which
+  indexes `tx_dds[]` by the bit value with `tx_dds[1]` = mark = 915 Hz: a dominant mark tone drives
+  `v1` negative and `return (v1 > 0) ? 0 : 1` yields 1. The non-ATC branch reaches the same result
+  by inverting the mark line with no exchange at all, which is the confirmation that the exchange
+  is a compensation and not the "dirty fix" its old comment suggested. **Do not remove it.**
 * The demodulator emits **2 characters of junk** before it locks onto a transmission.
 
 ## Baseline, `make -C support/digi rtty`

@@ -476,8 +476,14 @@ static int RttyDecoder_demodulator(float32_t sample)
 
     if(rtty_ctrl_config.atc_disable == false)
 	{   // RTTY decoding with ATC = automatic threshold correction
-		// FIXME: space & mark seem to be swapped in the following code
-		// dirty fix
+		/* Not a bug, and not to be "cleaned up": the mark/space names in the FlDigi ATC formula below
+		 * are the opposite of this modem's, so this exchange cancels that. After it, space_mag and
+		 * space_env carry the 915 Hz MARK filter output and mark_mag/mark_env the space filter output.
+		 * A dominant mark tone then drives v1 negative and the function returns 1, a dominant space
+		 * tone drives it positive and returns 0 - the same result the non-ATC branch below reaches by
+		 * inverting the mark line without any exchange. Dropping this swap would really invert mark
+		 * and space; see support/digi/README.md for how both branches were checked against the
+		 * modulator, which sends bit 1 at 915 Hz. */
 		float32_t helper = space_mag;
 		space_mag = mark_mag;
 		mark_mag = helper;
