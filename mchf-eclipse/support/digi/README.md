@@ -48,19 +48,22 @@ the size of the CW lift, measured rather than guessed.
   stepped twice on those samples, so a naive zero crossing count of the idle tone reads high.
 * `Rtty_Modem_Init()` accepts shifts 85/170/200/425/450/850 and **silently maps anything else to
   170**; mark is 915 Hz, space above it. A stored value outside that list decodes as 170.
-* **The selected shift does not change what this modem decodes.** Mark is hard-wired to the 915 Hz
-  bandpass (`rtty_bp_12khz_915`) and the space filter is picked from the shift, but the ATC
-  comparison in `RttyDecoder_demodulator()` works from the mark channel alone: the 915 Hz filter
-  (measured 3 dB band 1034-1136 Hz, so about 102 Hz wide) already rejects the space tone by
-  20 dB at 170 Hz shift, 23 dB at 200, 35 dB at 425/450 and 45 dB at 850. Measured on the actual
-  coefficient tables, a 1085 Hz tone is 0.026 of its own level in the 1365 Hz filter and 0.0025 in
-  the 1765 Hz one, and decoding a 170 Hz-shift recording with the shift set to any of 85/170/200/
-  425/450/850 gives 0.0% CER every time. The code says the same thing itself: *"the current
-  implementation with ATC already works quite well with mark-only/space-only"*. Two consequences:
-  a CER measurement **cannot** validate the shift setting (use the transmitted tone frequencies
-  instead), and a live capture does not need the tones placed exactly - **except at 85 Hz shift
-  (DDH 47, 147.3 kHz), where the mark filter only rejects the space tone by 9.3 dB** and the space
-  filter genuinely matters.
+* **The shift setting matters much more on live radio than on a synthetic loopback.** Mark is
+  hard-wired to the 915 Hz bandpass (`rtty_bp_12khz_915`) and the space filter is picked from the
+  shift. Measured on the real coefficient tables, that 915 Hz filter (3 dB band 1034-1136 Hz, about
+  102 Hz wide) rejects the space tone by 20 dB at 170 Hz shift, 23 dB at 200, 35 dB at 425/450 and
+  45 dB at 850, so on a clean generated two-tone recording the ATC comparison can decide from the
+  mark channel alone - which is why decoding a 170 Hz-shift *synthetic* recording returns 0.0% CER
+  whichever shift is selected, as the code's own comment predicts (*"works quite well with
+  mark-only/space-only"*). **Do not generalise that.** The same test on a live DDH 8 capture gives:
+
+  | selected shift | 85 | 170 | 200 | 425 | **450** | 850 |
+  |---|---|---|---|---|---|---|
+  | live decode | fails | fails | fails | full text | **full text** | fails |
+
+  So on air the space filter's selectivity is doing real work that a two-tone synthetic signal never
+  asks of it. Consequence for this bench: the loopback CER cases **cannot** grade the shift setting,
+  and a live capture does need the tones placed on the modem's own filter frequencies.
 * Inside the ATC branch the variable names are the opposite of what they hold. `mark_mag`/`mark_env`
   carry the **space** filter output and `space_mag`/`space_env` the **915 Hz mark** output, because
   the block starts by exchanging them to cancel the naming convention of the FlDigi formula it was
@@ -158,9 +161,31 @@ What is proven here and what is not:
   semantics at every shift and mask (`p` is an `Int16Array`, `qt`/`Kt` are float arrays, and
   `S*Ot + Ot/2` stays float until `>> 4`). **That port is unfinished and unvalidated**; nothing in
   this repository decodes it yet;
-* until it does, the practical way to get a WAV from these receivers is the browser: tune by hand
-  and use the client's own recorder, which already holds PCM in memory
-  (`soundapplet.rec_start()` ... `soundapplet.rec_finish()` -> `{wavdata, len, sr}`).
+* the recorder route that used to be documented here, `soundapplet.rec_start()` /
+  `rec_finish()`, **does not exist in the current build** - calling it captured an undefined buffer
+  and read back as digital silence (peak 8 of 32767), which is how a silent capture got mistaken for
+  a modem failure. The route that works on today's client, and which needs no user gesture, no DPCM
+  port and no server cooperation, is to tap the node that already holds the PCM: `soundapplet.p` is a
+  `ScriptProcessorNode` whose `onaudioprocess` delivers exactly what the page plays. Wrap it without
+  removing the original handler, average 4:1 to get 48 kHz down to the modem's 12 kHz, hold the
+  floats in an array, then build a 44-byte PCM header around them and trigger a Blob download. The
+  browser's download directory is on the same host as this checkout, so the WAV appears on disk and
+  goes straight into `digi_bench rtty-wav`. Tune with `document.querySelector('input[name=frequency]').value`
+  plus `setfreqif_fut(value)`; keep any in-page `await` under about 13 s or the tool call times out
+  (let the tap accumulate between short calls instead of blocking).
+
+## First live decode through this harness
+
+DDH 8, 14467.3 kHz, F1B, 50 Bd, +/-225 Hz (captured 11:41 UTC, 30 s at 12 kHz):
+
+```
+decoded: MSOHWWM PPUWWNW  6  8  3  MSO  12 WNW  6  8  4  MMO 23 Z A  34  3  MO 23 12Z SSW  5  2
+```
+
+Tuned so the received pair (14467.075 / 14467.525 kHz) lands on the modem's own 915 / 1365 Hz
+filters. The same audio decoded at 45.45 Bd instead of 50 gives `6 78 MOTLYMV20UWNW`, so the baud
+setting is what carries it, and the mark/space polarity in `RttyDecoder_demodulator()` is correct -
+an inversion there would have produced letters that are not in the DWD message set at all.
 
 Two things to keep in mind when picking a sample: NAVTEX is **512 kHz in the United States** and
 518 kHz internationally, so the receiver has to be in range of the service being tested; and for

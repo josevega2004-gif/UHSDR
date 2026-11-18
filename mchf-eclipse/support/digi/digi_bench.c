@@ -184,11 +184,12 @@ static void rtty_table(void)
         printf("%-16s %7.1f %6d  %s%s\n", cases[i].label, cer, lead_in_junk, got,
                eot ? "" : "   [transmission cut off before EOT]");
     }
-    printf("\nnote: this loopback cannot grade the selected shift at all. The mark filter (915 Hz,\n"
-           "      3 dB band 1034-1136 Hz) rejects the space tone by 20 dB or more for every shift\n"
-           "      except 85 Hz, so the ATC decides from the mark channel alone and decodes even with\n"
-           "      the space filter tuned elsewhere; see support/digi/README.md. An unsupported shift\n"
-           "      is still mapped to 170 by Rtty_Modem_Init(), but it does not decode badly.\n");
+    printf("\nnote: these loopback CER figures cannot grade the selected shift. The mark filter\n"
+           "      (915 Hz, 3 dB band 1034-1136 Hz) rejects the space tone by 20 dB or more for every\n"
+           "      shift except 85 Hz, so on a clean two-tone synthetic recording the ATC decides from\n"
+           "      the mark channel alone whatever shift is selected. On live radio that is not true:\n"
+           "      a DDH 8 capture decodes only at 425/450 Hz shift and fails at 85/170/200/850. See\n"
+           "      support/digi/README.md. An unsupported shift is still mapped to 170.\n");
 }
 
 /* ------------------------------------------------------------------ *
