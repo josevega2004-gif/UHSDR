@@ -43,12 +43,14 @@
 #if defined(__CC_ARM)       // Keil
     #define CODESECT AREA     ||.text||, CODE, READONLY, ALIGN=2
     #define LABEL
+    #define THUMBFUNC
 #elif defined(__IASMARM__)  // IAR
     #define CODESECT SECTION `.text`:CODE
     #define PROC
     #define LABEL
     #define ENDP
     #define EXPORT PUBLIC
+    #define THUMBFUNC
 #elif defined(__CSMC__)		/* Cosmic */
 	#define	CODESECT	switch .text
 	#define THUMB
@@ -56,6 +58,7 @@
 	#define PROC	:
 	#define LABEL	:
 	#define ENDP
+	#define THUMBFUNC
 	#define arm_bitreversal_32 _arm_bitreversal_32
 #elif defined (__GNUC__)    // GCC
     #define THUMB .thumb
@@ -64,6 +67,7 @@
     #define PROC :
     #define LABEL :
     #define ENDP
+    #define THUMBFUNC .thumb_func
     #define END
 
     .syntax unified
@@ -84,6 +88,7 @@
 
 #if defined(ARM_MATH_CM0) || defined(ARM_MATH_CM0PLUS)
 
+	THUMBFUNC
 arm_bitreversal_32 PROC
 	ADDS     r3,r1,#1
 	PUSH     {r4-r6}
@@ -109,6 +114,7 @@ arm_bitreversal_32_0 LABEL
 	BX       lr
 	ENDP
 
+	THUMBFUNC
 arm_bitreversal_16 PROC
 	ADDS     r3,r1,#1
 	PUSH     {r4-r6}
@@ -134,6 +140,7 @@ arm_bitreversal_16_0 LABEL
 
 #else
 
+	THUMBFUNC
 arm_bitreversal_32 PROC
 	ADDS     r3,r1,#1
 	CMP      r3,#1
@@ -174,6 +181,7 @@ arm_bitreversal_32_0 LABEL       ;/* loop unrolled by 2 */
 	BX       lr
 	ENDP
 
+	THUMBFUNC
 arm_bitreversal_16 PROC
 	ADDS     r3,r1,#1
 	CMP      r3,#1
