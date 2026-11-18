@@ -187,6 +187,29 @@ filters. The same audio decoded at 45.45 Bd instead of 50 gives `6 78 MOTLYMV20U
 setting is what carries it, and the mark/space polarity in `RttyDecoder_demodulator()` is correct -
 an inversion there would have produced letters that are not in the DWD message set at all.
 
+## Receiving a DWD teletype station on the radio
+
+Nothing needs adding to the firmware; the path exists and was traced end to end, because it is not
+obvious and there is **no menu item for it** - there are zero `MENU_RTY_*` rows, which is by design,
+since digi parameters are front-panel only in this radio (PSK speed works the same way).
+
+1. Mode button into RTTY.
+2. **Encoder 2 is `SFT`** (shift) and cycles all six values via `change_and_limit_int(..., 0,
+   RTTY_SHIFT_NUM-1)` in `ui_driver.c`. DWD needs **450**.
+3. **Encoder 1 is `BD`** (baud). DWD needs **50**.
+4. Tune so the pair sits on the modem's filters: for a +/-225 Hz emission on 14467.3 kHz that is
+   14466.160 kHz, putting the tones at 915 and 1365 Hz. On live radio the shift matters a great deal
+   (table above), so tuning is not optional here.
+
+Both settings persist: `EEPROM_RTTY_SHIFT_IDX` = word 387 and `EEPROM_RTTY_SPEED_IDX` = word 388,
+each with min/max limits, added in commit `979cfdf6`. Boot order re-applies them instead of leaving
+the compile-time 170 Hz / 45 Bd initialisers in the modem:
+`TransceiverStateInit` -> `UiDriver_Init` (which runs `UiDriver_LoadSavedConfigurationAtStartup` ->
+`UiConfiguration_LoadEepromValues`) -> `AudioDriver_Init` (which calls `Rtty_Modem_Init`). If that
+ordering ever changes, the symptom is a radio that shows the right setting on screen but demodulates
+at 170 Hz / 45 Bd until an encoder is touched - which is the same species of fault as the EEPROM
+address collision that destroyed 22 settings.
+
 Two things to keep in mind when picking a sample: NAVTEX is **512 kHz in the United States** and
 518 kHz internationally, so the receiver has to be in range of the service being tested; and for
 weather fax, remote receivers add their own AGC, squelch and noise reducer unless those are turned
