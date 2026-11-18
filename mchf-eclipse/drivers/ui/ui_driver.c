@@ -70,6 +70,9 @@
 // width of the label shown next to the forward power meter, it holds the AM carrier level, the
 // carrier to PEP ratio and the hint which way to move the carrier level, e.g. "C100% -18.1dB^"
 #define AM_CARRIER_LEVEL_LABEL_W    		(SMALL_FONT_WIDTH * 14)
+#define AM_CARRIER_LEVEL_LINE_H            13  // height of one line of the small font
+#define AM_CARRIER_PEP_WATTS_DY            25  // distance of the measured power line below the
+                                                // carrier level line, see am_carrier_level_pos()
 
 
 
@@ -4745,23 +4748,95 @@ static void UiDriver_HandleSMeter()
 
 
 /**
- * @brief x position of the AM carrier level label, next to the forward power scale of the meter
- * @return x coordinate of the label, always inside the display
+ * @brief checks a rectangle against the UI elements that use the area beside the meter
+ * @return true if something drawn there would cover one of them
  */
-static uint16_t am_carrier_level_x()
+static bool am_carrier_level_hits(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
 {
-    // prefer the space right of the meter box, some layouts have the space on the left instead
-    const uint16_t meter_end = ts.Layout->SM_IND.x + ts.Layout->SM_IND.w + 4;
+    // the temperature indicator box drawn by UiDriver_CreateTemperatureDisplay() and the transmit
+    // power box, the latter with the size of the power region of the layouts
+    const UiArea_t occupied[] =
+    {
+        { ts.Layout->TEMP_IND.x, ts.Layout->TEMP_IND.y, 109, 13 },
+        { ts.Layout->PW_IND.x,   ts.Layout->PW_IND.y,    64, 30 },
+    };
 
-    if ((meter_end + AM_CARRIER_LEVEL_LABEL_W) <= sd.Slayout->full.w)
+    for (unsigned i = 0; i < sizeof(occupied)/sizeof(occupied[0]); i++)
     {
-        return meter_end;
+        const UiArea_t* o = &occupied[i];
+        if ((x < o->x + o->w) && (o->x < x + w) && (y < o->y + o->h) && (o->y < y + h))
+        {
+            return true;
+        }
     }
-    if (ts.Layout->SM_IND.x >= AM_CARRIER_LEVEL_LABEL_W)
+    return false;
+}
+
+/**
+ * @brief position of the AM carrier level readout, which is drawn beside the meter and must not
+ *        cover the temperature display or the transmit power indicator: in the 320x240 layout the
+ *        temperature occupies the space left of the meter, in the 480x320 layouts the power box
+ *        sits in the space right of it
+ * @param x set to the left column of the readout
+ * @param y set to the first line of the readout
+ * @param watts_line set to false when only the first line fits
+ * @return false when the readout fits nowhere, it is better hidden than drawn over other elements
+ */
+static bool am_carrier_level_pos(uint16_t* x, uint16_t* y, bool* watts_line)
+{
+    const uint16_t band_top = ts.Layout->SM_IND.y;
+    const uint16_t band_bottom = ts.Layout->SM_IND.y + ts.Layout->SM_IND.h;
+
+    // prefer the space right of the meter box, some layouts have the space on the left instead
+    const uint16_t candidates_x[] =
     {
-        return ts.Layout->SM_IND.x - AM_CARRIER_LEVEL_LABEL_W;
+        (uint16_t)(ts.Layout->SM_IND.x + ts.Layout->SM_IND.w + 4),
+        (ts.Layout->SM_IND.x > AM_CARRIER_LEVEL_LABEL_W) ?
+                (uint16_t)(ts.Layout->SM_IND.x - AM_CARRIER_LEVEL_LABEL_W) : 0
+    };
+    // the plain position beside the meter first, then the ones moved below the two elements that
+    // can occupy the same area
+    const uint16_t candidates_y[] =
+    {
+        (uint16_t)(band_top + 5),
+        (uint16_t)(ts.Layout->TEMP_IND.y + 15),
+        (uint16_t)(ts.Layout->PW_IND.y + 32)
+    };
+
+    for (unsigned xi = 0; xi < sizeof(candidates_x)/sizeof(candidates_x[0]); xi++)
+    {
+        const uint16_t cx = candidates_x[xi];
+
+        if ((uint32_t)cx + AM_CARRIER_LEVEL_LABEL_W > sd.Slayout->full.w)
+        {
+            continue;               // no room on the screen
+        }
+        for (unsigned yi = 0; yi < sizeof(candidates_y)/sizeof(candidates_y[0]); yi++)
+        {
+            uint16_t cy = candidates_y[yi];
+
+            if (cy < band_top)
+            {
+                cy = band_top;      // never above the meter
+            }
+            if (cy + AM_CARRIER_LEVEL_LINE_H > band_bottom)
+            {
+                continue;           // would leave the band of the meter
+            }
+            if (am_carrier_level_hits(cx, cy, AM_CARRIER_LEVEL_LABEL_W, AM_CARRIER_LEVEL_LINE_H))
+            {
+                continue;
+            }
+            *x = cx;
+            *y = cy;
+            *watts_line =
+                    (cy + AM_CARRIER_PEP_WATTS_DY + AM_CARRIER_LEVEL_LINE_H <= band_bottom)
+                    && !am_carrier_level_hits(cx, cy + AM_CARRIER_PEP_WATTS_DY,
+                                              AM_CARRIER_LEVEL_LABEL_W, AM_CARRIER_LEVEL_LINE_H);
+            return true;
+        }
     }
-    return ts.Layout->SM_IND.x;
+    return false;
 }
 
 // AM carrier to PEP measurement: during one transmission the lowest forward power is the
@@ -4792,9 +4867,6 @@ static struct
 // widths so a shorter value overwrites the whole field of the previous one
 #define AM_CARRIER_PEP_RATIO_CHARS    8
 #define AM_CARRIER_PEP_WATTS_CHARS   10
-
-// distance of the measured power line below the carrier level line
-#define AM_CARRIER_PEP_WATTS_DY      25
 
 // the times of the readout are configured in steps of half a second, ts.sysclock runs at 100 Hz, so
 // one step is 50 ticks
@@ -4914,8 +4986,26 @@ static void UiDriver_DisplayAmCarrierPep()
 
     const bool am_tx = (ts.txrx_mode == TRX_MODE_TX) && (ts.dmod_mode == DEMOD_AM);
 
-    const uint16_t x = am_carrier_level_x();
-    const uint16_t y = ts.Layout->SM_IND.y + 5;
+    // where the readout may be drawn; once it is on screen it has to be erased at exactly the
+    // position it was drawn at, also when the calculation no longer finds room
+    static uint16_t drawn_x;
+    static uint16_t drawn_y;
+    static bool     drawn_watts;
+
+    uint16_t x;
+    uint16_t y;
+    bool     watts_line;
+
+    if (!am_carrier_level_pos(&x, &y, &watts_line))
+    {
+        if (!label_shown)
+        {
+            return;                     // nothing on screen, nothing can be shown
+        }
+        x = drawn_x;
+        y = drawn_y;
+        watts_line = drawn_watts;
+    }
 
     if (!am_tx)
     {
@@ -4923,9 +5013,12 @@ static void UiDriver_DisplayAmCarrierPep()
 
         if (label_shown && ((int32_t)(ts.sysclock - hold_until) >= 0))
         {
-            // the hold time is over, remove both lines
+            // the hold time is over, remove the lines that were drawn
             UiLcdHy28_PrintText(x, y, "              ", Black, Black, 4);
-            UiLcdHy28_PrintText(x, y + AM_CARRIER_PEP_WATTS_DY, "          ", Black, Black, 4);
+            if (watts_line)
+            {
+                UiLcdHy28_PrintText(x, y + AM_CARRIER_PEP_WATTS_DY, "          ", Black, Black, 4);
+            }
             label_shown = false;
             held_dimmed = false;
         }
@@ -4936,7 +5029,10 @@ static void UiDriver_DisplayAmCarrierPep()
             UiLcdHy28_PrintText(x, y, level_txt, AM_CARRIER_PEP_HELD_COLOUR, Black, 4);
             UiLcdHy28_PrintText(x + (AM_CARRIER_LEVEL_CHARS * SMALL_FONT_WIDTH), y, ratio_txt,
                                 AM_CARRIER_PEP_HELD_COLOUR, Black, 4);
-            UiLcdHy28_PrintText(x, y + AM_CARRIER_PEP_WATTS_DY, watts_txt, AM_CARRIER_PEP_HELD_COLOUR, Black, 4);
+            if (watts_line)
+            {
+                UiLcdHy28_PrintText(x, y + AM_CARRIER_PEP_WATTS_DY, watts_txt, AM_CARRIER_PEP_HELD_COLOUR, Black, 4);
+            }
             held_dimmed = true;
         }
 
@@ -5050,12 +5146,18 @@ static void UiDriver_DisplayAmCarrierPep()
 
     UiLcdHy28_PrintText(x, y, level_txt, Cyan, Black, 4);
     UiLcdHy28_PrintText(x + (AM_CARRIER_LEVEL_CHARS * SMALL_FONT_WIDTH), y, ratio_txt, ratio_colour, Black, 4);
-    UiLcdHy28_PrintText(x, y + AM_CARRIER_PEP_WATTS_DY, watts_txt, watts_colour, Black, 4);
+    if (watts_line)
+    {
+        UiLcdHy28_PrintText(x, y + AM_CARRIER_PEP_WATTS_DY, watts_txt, watts_colour, Black, 4);
+    }
 
     // the measurement is current, keep it readable for the configured time after the operator unkeys
     hold_until = ts.sysclock + ((uint32_t)ts.am_carrier_pep_hold * AM_CARRIER_PEP_HALF_SECOND_TICKS);
     label_shown = true;
     held_dimmed = false;
+    drawn_x = x;
+    drawn_y = y;
+    drawn_watts = watts_line;
 }
 
 
