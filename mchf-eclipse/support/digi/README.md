@@ -92,6 +92,51 @@ usable on air.
   capturing I/Q or audio some other way. That is the highest value thing to solve before porting
   this into the firmware, because everything above is a synthetic channel.
 
+## Future source of real test samples: public WebSDR receivers
+
+For scoring decoders against live propagation instead of only synthetic channels, two shared
+public receivers cover MF and shortwave and can be driven programmatically:
+
+```
+http://na5b.com:8901/                    NA5B, Texas       (US NAVTEX is 512 kHz, not 518!)
+http://websdr.ewi.utwente.nl:8901/       Twente, NL        (in range of European 518 kHz stations)
+```
+
+Both are HTML5 clients (`websdr-base.js` + `websdr-sound.js`) whose audio arrives over a WebSocket
+on the same port, so the interface is readable straight out of the client script:
+
+```
+socket   ws://<host>:<port>/~~stream?v=11        binary frames, server -> client
+tuning   text frame:  GET /~~param?f=<Hz>&band=<x>&lo=<Hz>&hi=<Hz>&mode=<n>&name=<who>
+```
+
+`lo`/`hi` are the audio passband edges (1400..2000 Hz is already the right shape for SITOR/NAVTEX
+or weather-fax tones). `name` is shown to the receiver's operator, so fill something honest in.
+These are shared receivers with a limited number of user slots: short sessions only.
+
+What is proven here and what is not:
+
+* the WebSocket upgrade works: a hand-rolled HTTP/1.1 upgrade on `/~~stream?v=11` returned
+  `101 Switching Protocols` and streamed ~97 kB of payload in eight seconds, including sample-rate,
+  gain, **S-meter (`0xF0..0xFF`: `10*(256*(b&15)+next)` dBm)** and **true receive frequency
+  (`0x85`)** announcements, the last two useful on their own for measurement work;
+* the Python `websockets` library fails on that URL with "did not receive a valid HTTP response",
+  so a library error is not evidence the server has no audio API;
+* the sample payload itself is WebSDR's lossy DPCM (bit-sliced deltas through a 20-tap lossy
+  integrator; `0x80` = 128 table-coded absolute samples, `0x84` = 128 zeros, `0x90..0xDF` and
+  `<0x80` = delta blocks with `Ut = 14 - (b>>4)`). A faithful port has to reproduce JS ToInt32
+  semantics at every shift and mask (`p` is an `Int16Array`, `qt`/`Kt` are float arrays, and
+  `S*Ot + Ot/2` stays float until `>> 4`). **That port is unfinished and unvalidated**; nothing in
+  this repository decodes it yet;
+* until it does, the practical way to get a WAV from these receivers is the browser: tune by hand
+  and use the client's own recorder, which already holds PCM in memory
+  (`soundapplet.rec_start()` ... `soundapplet.rec_finish()` -> `{wavdata, len, sr}`).
+
+Two things to keep in mind when picking a sample: NAVTEX is **512 kHz in the United States** and
+518 kHz internationally, so the receiver has to be in range of the service being tested; and for
+weather fax, remote receivers add their own AGC, squelch and noise reducer unless those are turned
+off, which is exactly the distortion the bench should be shown rather than hiding it.
+
 ## Where this goes next
 
 1. Envelope sync capture for fax, graded by the skew case that currently exposes the gap.
