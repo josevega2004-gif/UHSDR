@@ -240,6 +240,75 @@ static void wefax_table(void)
 }
 
 /* ------------------------------------------------------------------ *
+ *  decoding a recorded file: the input path any real feed will use
+ * ------------------------------------------------------------------ */
+static uint32_t rd32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+
+// 16 bit PCM WAV, mono or stereo, any sample rate: resampled to the 12 kHz the demodulator is
+// pinned at, and gain trimmed from the file peak so a quiet recording still reaches the modems
+// threshold. This is the hook for real audio (a WebSDR capture, another receivers file export,
+// or an on-air recording), which is the whole reason the bench exists.
+static float decode_wav(const char* path, const char* expected, char* got, size_t got_sz, uint16_t shift)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) { printf("cannot open %s\n", path); return -1.0f; }
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t* buf = malloc((size_t)sz);
+    if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); printf("short read\n"); return -1.0f; }
+    fclose(f);
+
+    uint32_t rate = 0, ch = 1, i = 12; const uint8_t* data = 0; uint32_t dlen = 0;
+    while (i + 8 <= (size_t)sz)
+    {
+        uint32_t clen = rd32(buf + i + 4);
+        if (!memcmp(buf + i, "fmt ", 4)) { ch = rd16(buf + i + 10); rate = rd32(buf + i + 12); }  /* fmt data: tag,channels,rate,...,bits */
+        else if (!memcmp(buf + i, "data", 4)) { data = buf + i + 8; dlen = clen; }
+        else break;
+        i += 8 + clen + (clen & 1);
+    }
+    if (!data || !rate || !dlen) { free(buf); printf("not a 16 bit PCM WAV with a data chunk\n"); return -1.0f; }
+
+    size_t frames = (size_t)dlen / (2 * ch);
+    float peak = 0.0f;
+    for (size_t k = 0; k < frames; k++)
+    {
+        float v = (float)(int16_t)rd16(data + k * 2 * ch) / 32768.0f;
+        if (fabsf(v) > peak) peak = fabsf(v);
+    }
+    float gain = peak > 0.0f ? 0.7f / peak : 1.0f;
+
+    rtty_ctrl_config.speed_idx = RTTY_SPEED_45;
+    for (int k = 0; k < RTTY_SHIFT_NUM; k++)
+    {
+        if (rtty_shifts[k].value == (float32_t)shift) rtty_ctrl_config.shift_idx = (rtty_shift_t)k;
+    }
+    Rtty_Modem_Init(12000);
+    Bench_TextReset();
+
+    size_t out_n = (size_t)((double)frames * 12000.0 / (double)rate);
+    for (size_t k = 0; k < out_n; k++)
+    {
+        double src = (double)k * (double)rate / 12000.0;
+        size_t a = (size_t)src;
+        double fr = src - (double)a;
+        if (a + 1 >= frames) a = frames > 1 ? frames - 2 : 0;
+        float s0 = (float)(int16_t)rd16(data + a * 2 * ch) / 32768.0f;
+        float s1 = (float)(int16_t)rd16(data + (a + 1) * 2 * ch) / 32768.0f;
+        Rtty_Demodulator_ProcessSample((float32_t)((s0 + (float)fr * (s1 - s0)) * gain));
+    }
+    free(buf);
+
+    snprintf(got, got_sz, "%s", norm_baudot(Bench_TextGet(), 1));
+    printf("file      : %s\n", path);
+    printf("format    : %u Hz, %u channel(s), %.1f s, gain %.1f dB\n",
+           rate, ch, (double)frames / (double)rate, 20.0 * log10(gain));
+    printf("decoded   : %s\n", got);
+    if (expected && *expected) return score_aligned(norm_baudot(expected, 0), got);
+    return -1.0f;
+}
+
+/* ------------------------------------------------------------------ *
  *  self checks
  * ------------------------------------------------------------------ */
 static int failures;
@@ -331,6 +400,31 @@ static int selftest(void)
         check(corr > 0.5f, "fax: the chart is still recognisable at 8 dB with fading");
         free(x); free(truth); free(grey);
     }
+    {
+        // the recorded file input path, which is how any real feed (WebSDR capture, another
+        // receiver, an on air recording) reaches the firmware demodulator
+        char got[8192];
+        char msg[] = "DE UHSDR FILE PATH TEST";
+        size_t n = 60000;
+        static float32_t rec[60000];
+        rtty_ctrl_config.speed_idx = RTTY_SPEED_45;
+        rtty_ctrl_config.shift_idx = RTTY_SHIFT_170;
+        Rtty_Modem_Init(48000);
+        char feed[128];
+        snprintf(feed, sizeof(feed), "%s", msg);
+        strncat(feed, "\004", sizeof(feed) - strlen(feed) - 1);
+        Bench_TxFeed(feed);
+        Rtty_Modulator_StartTX();
+        for (size_t k = 0; k < n; k++)
+        {
+            float acc = 0.0f;
+            for (int q = 0; q < 4; q++) acc += (float32_t)Rtty_Modulator_GenSample() / 32768.0f;
+            rec[k] = acc * 0.25f;
+        }
+        check(Bench_WavWrite("rtty_roundtrip.wav", rec, n, 12000), "the bench can write a 12 kHz RTTY recording");
+        float cer_file = decode_wav("rtty_roundtrip.wav", msg, got, sizeof(got), 170);
+        check(cer_file == 0.0f, "a recorded WAV comes back through the file input with zero errors");
+    }
     printf("%s\n", failures ? "SELF CHECKS FAILED" : "all self checks passed");
     return failures ? 1 : 0;
 }
@@ -341,6 +435,15 @@ int main(int argc, char** argv)
     if (!strcmp(what, "test")) return selftest();
     if (!strcmp(what, "rtty")) { rtty_table(); return 0; }
     if (!strcmp(what, "wefax")) { wefax_table(); return 0; }
-    fprintf(stderr, "usage: digi_bench [test|rtty|wefax]\n");
+    if (!strcmp(what, "rtty-wav") && argc > 2)
+    {
+        char got[8192];
+        uint16_t shift = argc > 3 ? (uint16_t)atoi(argv[3]) : 170;
+        const char* expect = argc > 4 ? argv[4] : "";
+        float cer = decode_wav(argv[2], expect, got, sizeof(got), shift);
+        if (cer >= 0.0f) printf("CER       : %.1f%% (after aligning the lead in)\n", cer);
+        return 0;
+    }
+    fprintf(stderr, "usage: digi_bench [test|rtty|wefax|rtty-wav <file.wav> [shift] [expected text]]\n");
     return 2;
 }

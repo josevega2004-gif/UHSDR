@@ -189,8 +189,8 @@ bool Bench_WavWrite(const char* path, const float32_t* x, size_t n, uint32_t rat
     FILE* f = fopen(path, "wb");
     if (!f) return false;
     uint32_t data = (uint32_t) n * 2;
-    put32(f, 0x46464952u); put32(f, 36 + data); put32(f, 0x4556414au);
-    put32(f, 0x20746361u); put32(f, 16); put16(f, 1); put16(f, 1);
+    put32(f, 0x46464952u); put32(f, 36 + data); put32(f, 0x45564157u);   /* "WAVE" */
+    put32(f, 0x20746D66u);   /* "fmt " */ put32(f, 16); put16(f, 1); put16(f, 1);
     put32(f, rate); put32(f, rate * 2); put16(f, 2); put16(f, 16);
     put32(f, 0x61746164u); put32(f, data);
     for (size_t i = 0; i < n; i++)

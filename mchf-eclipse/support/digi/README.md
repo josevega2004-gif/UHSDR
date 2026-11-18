@@ -6,7 +6,16 @@ Grades the radio's own modems on a PC. Nothing in this directory is compiled int
 make -C support/digi test     # self checks, non zero exit on regression   (also: make digi-bench)
 make -C support/digi rtty     # RTTY character error rate, modem looped back on itself
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
+./digi_bench rtty-wav <file.wav> [shift] ["expected text"]
+                            # decode a recorded file with the firmware demodulator
 ```
+
+`rtty-wav` takes any 16 bit PCM WAV, any sample rate, mono or stereo: it resamples to the 12 kHz
+the demodulator is pinned at and trims gain from the file peak, so a quiet recording still reaches
+its thresholds. **Note for real signals**: `rtty.c` filters are built around a mark of 915 Hz, while
+amateur RTTY puts mark and space at 2125/2295 Hz, so a live ham RTTY recording has to be tuned (or
+spectrally translated) so the pair lands at 915/1085 Hz audio. NAVTEX style pairs at 1615/1785 Hz
+are outside the filter bank as well, which is a real limit on reusing this modem for that service.
 
 ## What is real and what is scaffolding
 
