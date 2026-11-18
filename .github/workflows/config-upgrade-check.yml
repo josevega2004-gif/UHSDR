@@ -6,6 +6,8 @@ on:
     paths:
       - "mchf-eclipse/drivers/ui/ui_configuration.c"
       - "mchf-eclipse/drivers/ui/ui_configuration.h"
+      - "mchf-eclipse/drivers/ui/menu/ui_menu.c"
+      - "mchf-eclipse/drivers/audio/audio_agc.h"
       - "mchf-eclipse/drivers/ui/radio_management.h"
       - "mchf-eclipse/drivers/audio/audio_driver.h"
       - "mchf-eclipse/Makefile"
@@ -15,6 +17,8 @@ on:
     paths:
       - "mchf-eclipse/drivers/ui/ui_configuration.c"
       - "mchf-eclipse/drivers/ui/ui_configuration.h"
+      - "mchf-eclipse/drivers/ui/menu/ui_menu.c"
+      - "mchf-eclipse/drivers/audio/audio_agc.h"
       - "mchf-eclipse/drivers/ui/radio_management.h"
       - "mchf-eclipse/drivers/audio/audio_driver.h"
       - "mchf-eclipse/Makefile"

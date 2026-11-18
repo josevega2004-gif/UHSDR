@@ -401,6 +401,7 @@ HOSTPYTHON ?= python3
 .PHONY: config-upgrade-check
 config-upgrade-check:  
 	# check which values a configuration stored by an older build receives as defaults, see support/config_upgrade
+	# also checks that every WDSP AGC value the menu can change is stored and survives a save/load cycle
 	# run from the mchf-eclipse directory, the paths rely on the default ROOTLOC of this makefile
 	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/gen_config_upgrade.py
 	@$(HOSTCC) -O2 -Wall -o $(ROOTLOC)/support/config_upgrade/config_upgrade $(ROOTLOC)/support/config_upgrade/config_upgrade.c

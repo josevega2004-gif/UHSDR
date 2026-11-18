@@ -104,17 +104,16 @@ void AudioAgc_AgcWdsp_Init()
     // agc_wdsp_conf.tau_decay[2] = 500;
     // agc_wdsp_conf.tau_decay[3] = 250;
     // agc_wdsp_conf.tau_decay[4] = 50;
+    // agc_wdsp_conf.tau_decay[5] = 1;    // this is the OFF-Mode
     // agc_wdsp_conf.thresh = 20;
     // agc_wdsp_conf.tau_hang_decay = 500;
+    // agc_wdsp_conf.hang_time = 500;
+    // agc_wdsp_conf.hang_thresh = 45;
 
-    // these are not stored in volatile memory
-    // so let us initialize them here.
-    agc_wdsp_conf.hang_time = 500;
-    agc_wdsp_conf.hang_thresh = 45;
+    // these are runtime only state, they are not stored
     agc_wdsp_conf.action = 0;
     agc_wdsp_conf.switch_mode = 1;
     agc_wdsp_conf.hang_action = 0;
-    agc_wdsp_conf.tau_decay[5] = 1; // this is the OFF-Mode
 }
 
 /**
@@ -235,6 +234,12 @@ loadWcpAGC(a);
     //    tau_hang_decay = 0.100;          // tau_hang_decay
 
     //calculate internal parameters
+    //
+    // The presets below belong to an AGC mode and are applied once when the mode is switched.
+    // They deliberately do NOT touch the hang time: that is an operator setting of its own
+    // (menu "AGC WDSP Hang time", stored in agc_wdsp_conf.hang_time) and overwriting it here made
+    // the stored value take effect only after the next setup call, which looked exactly like a
+    // setting that was not saved.
     if(agc_wdsp_conf.switch_mode)
     {
         switch (agc_wdsp_conf.mode)
@@ -242,31 +247,26 @@ loadWcpAGC(a);
         case 5: //agcOFF
             break;
         case 1: //agcLONG
-            agc_wdsp.hangtime = 2.000;
             //      agc_wdsp_conf.tau_decay = 2000;
             //      hang_thresh = 1.0;
             //      agc_wdsp_conf.hang_enable = 1;
             break;
         case 2: //agcSLOW
-            agc_wdsp.hangtime = 1.000;
             //      hang_thresh = 1.0;
             //      agc_wdsp_conf.tau_decay = 500;
             //      agc_wdsp_conf.hang_enable = 1;
             break;
         case 3: //agcMED
             //      hang_thresh = 1.0;
-            agc_wdsp.hangtime = 0.250;
             //      agc_wdsp_conf.tau_decay = 250;
             break;
         case 4: //agcFAST
             //      hang_thresh = 1.0;
-            agc_wdsp.hangtime = 0.100;
             //      agc_wdsp_conf.tau_decay = 50;
             break;
         case 0: //agcFrank --> very long
             //      agc_wdsp_conf.hang_enable = 0;
             //      hang_thresh = 0.300; // from which level on should hang be enabled
-            agc_wdsp.hangtime = 3.000; // hang time, if enabled
             agc_wdsp.tau_hang_backmult = 0.500; // time constant exponential averager
             //      agc_wdsp_conf.tau_decay = 4000; // time constant decay long
             agc_wdsp.tau_fast_decay = 0.05;          // tau_fast_decay

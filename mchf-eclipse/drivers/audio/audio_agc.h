@@ -35,6 +35,24 @@ typedef struct
     int tau_hang_decay;
 } agc_wdsp_params_t;
 
+// The factory defaults of the WDSP AGC.  Both the configuration table in ui_configuration.c and the
+// menu items that offer "restore default" use these, so that a menu reset and a configuration reset
+// cannot present the operator with two different defaults for the same parameter any more.
+#define AGC_WDSP_MODE_DEFAULT               2       // agcMED
+#define AGC_WDSP_SLOPE_DEFAULT              70      // dB
+#define AGC_WDSP_HANG_ENABLE_DEFAULT        0
+#define AGC_WDSP_THRESH_DEFAULT             20      // dB, the knee the AGC starts acting at
+#define AGC_WDSP_HANG_THRESH_DEFAULT        45      // dB
+#define AGC_WDSP_HANG_TIME_DEFAULT          500     // ms
+#define AGC_WDSP_TAU_HANG_DECAY_DEFAULT     500     // ms
+// the decay time constant belonging to each AGC mode, index is agc_wdsp_conf.mode
+#define AGC_WDSP_TAU_DECAY_0_DEFAULT        4000    // very LONG
+#define AGC_WDSP_TAU_DECAY_1_DEFAULT        2000    // LONG
+#define AGC_WDSP_TAU_DECAY_2_DEFAULT        500     // SLOW
+#define AGC_WDSP_TAU_DECAY_3_DEFAULT        250     // MED
+#define AGC_WDSP_TAU_DECAY_4_DEFAULT        50      // FAST
+#define AGC_WDSP_TAU_DECAY_5_DEFAULT        1       // AGC OFF
+
 
 extern agc_wdsp_params_t agc_wdsp_conf;
 

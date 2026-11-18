@@ -1140,7 +1140,7 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
         var_change = UiDriverMenuItemChangeUInt8(var, mode, &agc_wdsp_conf.mode,
                                               0, //
                                               5,
-                                              2,
+                                              AGC_WDSP_MODE_DEFAULT,
                                               1
                                              );
         switch(agc_wdsp_conf.mode) {
@@ -1182,7 +1182,7 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
         var_change = UiDriverMenuItemChangeUInt8(var, mode, &agc_wdsp_conf.slope,
                                             0,
                                             200,
-                                            40,
+                                            AGC_WDSP_SLOPE_DEFAULT,
                                             10
                                            );
         if(var_change)
@@ -1196,7 +1196,7 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
         var_change = UiDriverMenuItemChangeInt(var, mode, &agc_wdsp_conf.thresh,
                                             -20,
                                             120,
-                                            40,
+                                            AGC_WDSP_THRESH_DEFAULT,
                                             1
                                            );
         if(var_change)
@@ -1210,7 +1210,7 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
         var_change = UiDriverMenuItemChangeInt(var, mode, &agc_wdsp_conf.hang_thresh,
                                             -20,
                                             120,
-                                            40,
+                                            AGC_WDSP_HANG_THRESH_DEFAULT,
                                             1
                                            );
         if(var_change)
@@ -1222,7 +1222,7 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
 
     case MENU_AGC_WDSP_TAU_DECAY:      //
        var_change = UiDriverMenuItemChangeInt(var, mode, &agc_wdsp_conf.tau_decay[agc_wdsp_conf.mode],
-                                           100,
+                                           50,
                                            5000,
                                            1000,
                                            100
@@ -1238,7 +1238,7 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
        var_change = UiDriverMenuItemChangeInt(var, mode, &agc_wdsp_conf.tau_hang_decay,
                                            100,
                                            5000,
-                                           1000,
+                                           AGC_WDSP_TAU_HANG_DECAY_DEFAULT,
                                            100
                                           );
        if(var_change)
@@ -1270,7 +1270,7 @@ void UiMenu_UpdateItem(uint16_t select, MenuProcessingMode_t mode, int pos, int 
         var_change = UiDriverMenuItemChangeInt(var, mode, &agc_wdsp_conf.hang_time,
                                             10,
                                             5000,
-                                            250,
+                                            AGC_WDSP_HANG_TIME_DEFAULT,
                                             10
                                            );
         if(var_change)

@@ -486,8 +486,12 @@ extern uint32_t fm_tone_burst_freq[FM_TONE_BURST_MAX+1];
 #define	LMS_NOTCH_DELAYBUF_SIZE_MAX	512
 //
 #define	DSP_NOTCH_NUMTAPS_MAX		64//128
-#define	DSP_NOTCH_NUMTAPS_MIN		64
-#define	DSP_NOTCH_NUMTAPS_DEFAULT	64//96
+// The operator may choose the notch order. The coefficient and state buffers are sized for
+// DSP_NOTCH_NUMTAPS_MAX (LMS2_NOTCH_STATE_ARRAY_SIZE below) and the decorrelation buffer is fixed
+// at DSP_NOTCH_BUFLEN_MAX, which is larger than any allowed order, so every value in this range is
+// valid. Fewer taps cost less CPU, more taps notch narrower and deeper.
+#define	DSP_NOTCH_NUMTAPS_MIN		16
+#define	DSP_NOTCH_NUMTAPS_DEFAULT	64//96	// unchanged: a fresh configuration keeps the old behaviour
 //
 #define	DSP_NOTCH_BUFLEN_MIN		128//64//48		// minimum length of decorrelation buffer for the notch filter FIR
 #define	DSP_NOTCH_BUFLEN_MAX		128//192	// maximum decorrelation buffer length for the notch filter FIR

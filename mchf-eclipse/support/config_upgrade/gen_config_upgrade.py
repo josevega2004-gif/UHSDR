@@ -2,15 +2,18 @@
 #
 # Configuration storage upgrade check for the mcHF / UHSDR firmware
 #
-# Reads the value ids, defaults and ranges of the AM configuration values straight from the
-# firmware sources and generates config_upgrade.c, a host program that replays the configuration
-# load path over configurations stored by older builds. It shows which values an existing
-# configuration receives as defaults and which are loaded from storage.
+# Reads the value ids, defaults and ranges of the AM configuration values and of the WDSP AGC
+# parameters straight from the firmware sources and generates config_upgrade.c, a host program that
+# replays the configuration load path over configurations stored by older builds. It shows which
+# values an existing configuration receives as defaults and which are loaded from storage, and it
+# checks that every AGC value the operator can change in the menu is stored, survives a save/load
+# round trip and keeps the range the menu offers.
 #
 # Usage:  ./gen_config_upgrade.py && gcc -O2 -Wall -o config_upgrade config_upgrade.c && ./config_upgrade
 #
 # Rerun after adding, removing or renumbering configuration values (ui_configuration.h and the
-# ConfigEntry table in ui_configuration.c).
+# ConfigEntry table in ui_configuration.c), after changing an AGC menu item range or after changing
+# the AGC parameter struct in audio_agc.h.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -29,6 +32,7 @@
 import re
 import sys
 
+import os
 from pathlib import Path
 
 # the firmware sources are two directories above this script (support/config_upgrade)
@@ -38,8 +42,136 @@ cfg_h = open(root+'drivers/ui/ui_configuration.h', encoding='utf-8', errors='sur
 cfg_c = open(root+'drivers/ui/ui_configuration.c', encoding='utf-8', errors='surrogateescape').read()
 aud_h = open(root+'drivers/audio/audio_driver.h', encoding='utf-8', errors='surrogateescape').read()
 rm_h  = open(root+'drivers/ui/radio_management.h', encoding='utf-8', errors='surrogateescape').read()
+agc_h = open(root+'drivers/audio/audio_agc.h', encoding='utf-8', errors='surrogateescape').read()
+menu_c = open(root+'drivers/ui/menu/ui_menu.c', encoding='utf-8', errors='surrogateescape').read()
+
+def strip_comments(text):
+    text = re.sub(r'//.*', '', text)
+    return re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+
+def call_arguments(text, name_pattern):
+    """arguments of every call of name_pattern in text, found by matching the brackets instead of
+       by a regex over the argument list: one greedy match would otherwise swallow the calls that
+       follow it and silently reduce the number of items that are checked"""
+    calls = []
+    for m in re.finditer(name_pattern, text):
+        i = text.index('(', m.start())
+        depth = 0
+        end = i
+        while end < len(text):
+            if text[end] == '(':
+                depth += 1
+            elif text[end] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            end += 1
+        inner = text[i + 1:end]
+        args = []
+        depth = 0
+        cur = ''
+        for ch in inner:
+            if ch in '([':
+                depth += 1
+            elif ch in ')]':
+                depth -= 1
+            if ch == ',' and depth == 0:
+                args.append(cur.strip())
+                cur = ''
+            else:
+                cur += ch
+        args.append(cur.strip())
+        calls.append(args)
+    return calls
+
 
 def defines(text):
+    """integer #define constants; hex and parenthesised values included, but only when the whole
+       body is one number (an expression is handled by define_exprs below)"""
+    out = {}
+    for m in re.finditer(r'^\s*#define\s+(\w+)\s+\(?\s*(-?\d+|0[xX][0-9a-fA-F]+)\s*\)?\s*(?://.*)?$', text, re.M):
+        out[m.group(1)] = int(m.group(2), 0)
+    return out
+
+def define_exprs(text):
+    """#define constants whose body is a small arithmetic expression, e.g. (1 << 3) or (0x0f|0x10)"""
+    out = {}
+    for m in re.finditer(r'^\s*#define\s+(\w+)\s+(\(?[^{}\n]*\)?)\s*(?://.*)?$', text, re.M):
+        name, body = m.group(1), m.group(2).strip()
+        if not body or ',' in body or not re.fullmatch(r'[\w\s()\+\-*/%<>|&^~]+', body):
+            continue
+        if re.search(r'\b(defined|if|else|return|sizeof)\b', body):
+            continue
+        out.setdefault(name, body)
+    return out
+
+def enum_values(text):
+    """names of the enums in a header with their values, as far as they can be worked out here"""
+    out = {}
+    for body in re.findall(r'enum[^{;{}]*\{([^{}]*)\}', text, re.S):
+        body = re.sub(r'/\*.*?\*/', '', body, flags=re.S)
+        nxt = 0
+        for item in [i.strip() for i in body.split(',') if i.strip()]:
+            m = re.match(r'(\w+)\s*(?:=\s*(.+))?$', item, re.S)
+            if not m:
+                nxt += 1
+                continue
+            out.setdefault(m.group(1), m.group(2) if m.group(2) else str(nxt))
+            try:
+                nxt = int(m.group(2)) + 1 if m.group(2) else nxt + 1
+            except Exception:
+                nxt = nxt + 1
+    return out
+
+CONST_HEADERS = ('drivers/ui/ui_configuration.h', 'drivers/audio/audio_driver.h',
+                 'hardware/uhsdr_board.h', 'drivers/ui/radio_management.h',
+                 'drivers/audio/cw/cw_decoder.h', 'drivers/audio/audio_management.h',
+                 'drivers/ui/menu/ui_menu_internal.h', 'drivers/audio/audio_agc.h')
+
+const_exprs = {}
+for header in CONST_HEADERS:
+    try:
+        text = open(root + header, encoding='utf-8', errors='surrogateescape').read()
+    except OSError:
+        continue
+    text = strip_comments(text)
+    const_exprs.update(define_exprs(text))
+    const_exprs.update(enum_values(text))
+
+def resolve(expr, _seen=None):
+    """value of a constant as the compiler would see it, None when it cannot be worked out here"""
+    expr = expr.strip()
+    expr = re.sub(r'\bCONFIG_UINT8x2_COMBINE\s*\(\s*([^,()]+)\s*,\s*([^,()]+)\s*\)', r'(\1 << 8 | \2)', expr)
+    if re.fullmatch(r'-?\d+', expr):
+        return int(expr)
+    _seen = _seen or set()
+    if expr in _seen:
+        return None
+    _seen = _seen | {expr}
+    if re.fullmatch(r'\w+', expr) and expr not in vals:
+        if expr not in const_exprs:
+            return None
+        v = resolve(const_exprs[expr], _seen)
+        if v is not None:
+            vals[expr] = v
+        return v
+    m = re.fullmatch(r'\(?(\w+)\)?\s*([*+-/|&^]|<<|>>)\s*\(?(\w+)\)?', expr)   # NAME op NAME or NAME op 10
+    if m:
+        a = resolve(m.group(1), _seen)
+        btok = m.group(3)
+        b = int(btok, 0) if re.fullmatch(r'-?\d+', btok) else resolve(btok, _seen)
+        if a is None or b is None:
+            return None
+        try:
+            return {'*': a * b, '+': a + b, '-': a - b, '/': a // b, '|': a | b, '&': a & b,
+                    '^': a ^ b, '<<': a << b, '>>': a >> b}[m.group(2)]
+        except ZeroDivisionError:
+            return None
+    try:
+        return int(eval(expr, {'__builtins__': {}}, dict(vals)))
+    except Exception:
+        return None
+
     return {m.group(1): int(m.group(2))
             for m in re.finditer(r'^#define\s+(\w+)\s+\(?\s*(-?\d+)\s*\)?', text, re.M)}
 
@@ -94,16 +226,539 @@ for var, idname, eid, d, lo, hi in entries:
     if var not in demo_values:
         sys.exit("add a demo value for '%s' (%s) to demo_values in gen_config_upgrade.py" % (var, idname))
 
+
+
 # a hypothetical early build of the current (post renumbering) layout which stored 375 entries.
 # Real configurations from the previous layout hold 432 entries and are not identified through
 # the stored entry count at all, the firmware recognizes them by the missing layout marker and
 # reads them through the address translation of UiConfiguration_LayoutMigrationRequired.
 upstream_first_unused = 375
 
+# ---------------------------------------------------------------------------------------------
+# the WDSP AGC parameters
+#
+# Every value the operator can change in the AGC menu has to have an entry in the ConfigEntry
+# table, otherwise it silently returns to its initial value at the next power cycle. The hang time
+# and the hang threshold of the AGC spent years without one, so this is checked here rather than
+# trusted.
+
+agc_struct = re.search(r'typedef struct\s*\{(.*?)\}\s*agc_wdsp_params_t', agc_h, re.S)
+if not agc_struct:
+    sys.exit('the agc_wdsp_params_t struct was not found in audio_agc.h, update gen_config_upgrade.py')
+agc_fields = {}       # field name -> (declared c type, number of array elements)
+for m in re.finditer(r'(uint8_t|int32_t|int|float32_t)\s+(\w+)\s*(\[(\d+)\])?\s*;', agc_struct.group(1)):
+    ctype, name, _, dim = m.groups()
+    agc_fields[name] = (ctype, int(dim) if dim else 1)
+
+agc_stored_types = {  # the ConfigEntry type which matches the declared type of the parameter
+    'uint8_t':  'ConfigEntry_UInt8',
+    'int':      'ConfigEntry_Int32_16',
+    'int32_t':  'ConfigEntry_Int32_16',
+}
+agc_c_types = { 'ConfigEntry_UInt8': 'ST_UINT8', 'ConfigEntry_Int32_16': 'ST_INT32_16' }
+
+def num(t):
+    """value of a constant used in an AGC row: a number, an EEPROM id or a named constant such as
+       AGC_WDSP_THRESH_DEFAULT of audio_agc.h"""
+    v = resolve(t)
+    if v is None:
+        sys.exit('cannot work out the value of %r used by an AGC row of the ConfigEntry table' % t)
+    return v
+
+agc_stored = {}
+for m in re.finditer(r'\{\s*(ConfigEntry_\w+)(?:\s*\|\s*\w+)?\s*,\s*(EEPROM_\w+)\s*,\s*&agc_wdsp_conf\.(\w+)(\[(\d+)\])?\s*,\s*(-?\w+)\s*,\s*(-?\w+)\s*,\s*(-?\w+)\s*\}', cfg_c):
+    ctype, idname, field, _, index, d, lo, hi = m.groups()
+    key = field if index is None else '%s[%s]' % (field, index)
+    if key in agc_stored:
+        sys.exit('agc_wdsp_conf.%s appears twice in the ConfigEntry table' % key)
+    agc_stored[key] = {'key': key, 'field': field, 'ctype': ctype, 'idname': idname, 'id': vals[idname],
+                       'def': num(d), 'min': num(lo), 'max': num(hi)}
+if not agc_stored:
+    sys.exit('no &agc_wdsp_conf. entry matched the ConfigEntry table in ui_configuration.c, '
+             'the table layout may have changed, update the regex in gen_config_upgrade.py')
+
+# the array elements an AGC menu item can reach: tau_decay[] is indexed by the AGC mode, so every
+# element of the array is editable and has to be stored
+agc_menu = {}
+menu_src = strip_comments(menu_c)
+for args in call_arguments(menu_src, r'UiDriverMenuItemChange\w+'):
+    if len(args) < 7 or not args[2].startswith('&agc_wdsp_conf.'):
+        continue
+    field = args[2][len('&agc_wdsp_conf.'):].strip()
+    lo, hi, dflt = args[3], args[4], args[5]
+    array = re.match(r'^(\w+)\[.*\]$', field)
+    if array:
+        dim = agc_fields[array.group(1)][1]
+        keys = ['%s[%d]' % (array.group(1), i) for i in range(dim)]
+    else:
+        keys = [field]
+    for key in keys:
+        if key in agc_menu:
+            sys.exit('agc_wdsp_conf.%s is changed by more than one AGC menu item, the check cannot '
+                     'tell their ranges apart' % key)
+        agc_menu[key] = (num(lo), num(hi), num(dflt))
+if not agc_menu:
+    sys.exit('no AGC menu item matched ui_menu.c, update the regex in gen_config_upgrade.py')
+
+for key, (lo, hi, dflt) in sorted(agc_menu.items()):
+    stored = agc_stored.get(key)
+    if stored is None:
+        sys.exit('the AGC menu changes agc_wdsp_conf.%s in the range %d..%d but there is no entry for '
+                 'it in the ConfigEntry table of ui_configuration.c, the value is lost at power off'
+                 % (key, lo, hi))
+    if lo < stored['min'] or hi > stored['max']:
+        sys.exit('the AGC menu offers agc_wdsp_conf.%s in the range %d..%d but only %d..%d is stored, '
+                 'a value outside the stored range is reset to its default at the next start'
+                 % (key, lo, hi, stored['min'], stored['max']))
+    if not (stored['min'] <= dflt <= stored['max']):
+        sys.exit('the default of the AGC menu item for agc_wdsp_conf.%s is %d, outside the stored '
+                 'range %d..%d' % (key, dflt, stored['min'], stored['max']))
+
+for key, entry in sorted(agc_stored.items()):
+    if entry['id'] >= first_unused:
+        sys.exit('%s has id %d but EEPROM_FIRST_UNUSED is only %d, fix ui_configuration.h'
+                 % (entry['idname'], entry['id'], first_unused))
+    if entry['id'] >= IMAGE_SLOTS:
+        sys.exit('%s has id %d which does not fit the host image of %d slots'
+                 % (entry['idname'], entry['id'], IMAGE_SLOTS))
+    ctype = agc_fields[entry['field']][0]
+    wanted = agc_stored_types.get(ctype)
+    if wanted is None:
+        sys.exit('agc_wdsp_conf.%s has the type %s, teach gen_config_upgrade.py how that is stored'
+                 % (key, ctype))
+    if entry['ctype'] != wanted:
+        sys.exit('agc_wdsp_conf.%s is a %s but its entry uses %s, values of that type are not '
+                 'written back the way they are read' % (key, ctype, entry['ctype']))
+    if ctype in ('int', 'int32_t') and not (-32768 <= entry['min'] and entry['max'] <= 32767):
+        sys.exit('agc_wdsp_conf.%s range %d..%d does not fit the single 16 bit slot of %s'
+                 % (key, entry['min'], entry['max'], entry['ctype']))
+
+# parameters the firmware keeps in the same struct but which are runtime only state, they are
+# derived on every start and must not gain a storage entry by accident
+for key in ('action', 'switch_mode', 'hang_action'):
+    if key in agc_stored:
+        sys.exit('agc_wdsp_conf.%s is runtime only state and should not be stored' % key)
+
+# ---------------------------------------------------------------------------------------------
+# the whole configuration table, not only the subsystems above
+#
+# Three defects of one family turned up while checking the AGC values: a menu item whose value has
+# no entry at all, an entry whose stored range is narrower than the range the menu offers (such a
+# value is silently reset at the next start), and an entry whose default lies outside its own
+# stored range. All three are silent, so they are checked for every row of the table instead of
+# only for the ones somebody remembered.
+
+
+def table_rows(text):
+    """rows of the ConfigEntry table together with the #if branch they are compiled from"""
+    rows = []
+    stack = []
+    for line in text.splitlines():
+        s = line.strip()
+        m = re.match(r'#\s*(ifdef|ifndef|if|else|elif|endif)\b(.*)', s)
+        if m:
+            keyword, rest = m.group(1), m.group(2).strip()
+            if keyword == 'ifdef':
+                stack.append('defined(%s)' % rest)
+            elif keyword == 'ifndef':
+                stack.append('!defined(%s)' % rest)
+            elif keyword == 'if':
+                stack.append(rest)
+            elif keyword in ('else', 'elif') and stack:
+                stack[-1] = '!' + stack[-1]
+            elif keyword == 'endif' and stack:
+                stack.pop()
+            continue
+        m = re.match(r'\{\s*(ConfigEntry_\w+)(?:\s*\|\s*\w+)?\s*,\s*(EEPROM_\w+)\s*,\s*&([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+?)\s*\}', s)
+        if m:
+            rows.append((tuple(stack), ) + m.groups())
+    return rows
+
+# the switches of the default firmware configuration: the board feature switches of
+# hardware/uhsdr_board_config.h are already in const_exprs, what is still missing are the -D
+# options the Makefile uses when nothing else is given, they decide which board the rows below
+# belong to.
+build_flags = set()
+
+# The feature switches that decide which rows of the table are compiled are spread over the
+# hardware configuration and the driver headers.  Without them a branch such as
+# #ifdef USE_LMS_AUTONOTCH cannot be judged and the rows it protects silently drop out of every
+# comparison below, which is exactly how the pinned DSP notch parameters escaped this check once.
+# A name that is defined nowhere in the tree is not defined for anybody, that branch is off.
+macro_defs = set()
+for dirpath, _dirs, files in os.walk(root):
+    if any(part in dirpath for part in ('/support/', '/basesw/', '/build/', '/.git')):
+        continue
+    for fn in files:
+        if not fn.endswith(('.h', '.c')):
+            continue
+        try:
+            text = open(os.path.join(dirpath, fn), encoding='utf-8', errors='surrogateescape').read()
+        except OSError:
+            continue
+        macro_defs.update(re.findall(r'^\s*#define\s+(\w+)', strip_comments(text), re.M))
+try:
+    mk = open(root + 'Makefile', encoding='utf-8', errors='surrogateescape').read()
+    for m in re.finditer(r'-D(\w+)', mk[mk.index('ifndef CONFIGFLAGS'):mk.index('endif', mk.index('ifndef CONFIGFLAGS'))]):
+        build_flags.add(m.group(1))
+    for m in re.finditer(r'-D(\w+)(?=\\|\n)', mk[mk.index('MACHFLAGS_F4 :='):mk.index('BASECFLAGS_F4')]):
+        build_flags.add(m.group(1))
+except Exception:
+    pass
+
+def branch_active(cond):
+    """is a #if branch of the table compiled in this configuration? None when we cannot tell"""
+    for c in cond:
+        m = re.fullmatch(r'defined\((\w+)\)', c)
+        if m:
+            name = m.group(1)
+            if name in build_flags or name in macro_defs or name in vals or name in const_exprs:
+                continue      # defined for this configuration, the branch is compiled
+            return False      # defined nowhere in the tree, the branch is dead code
+        m = re.fullmatch(r'!defined\((\w+)\)', c)
+        if m:
+            name = m.group(1)
+            if name in build_flags or name in macro_defs or name in vals or name in const_exprs:
+                return False      # defined for this configuration, the negated branch is out
+            continue
+        v = resolve(c)
+        if v is None:
+            return None
+        if not v:
+            return False
+    return True
+
+def active_only(text):
+    """the source with the lines a #if branch does not compile here blanked out, line numbers kept
+
+    The menu has blocks behind #ifdef OBSOLETE_NR and #if 0 whose calls would otherwise be compared
+    against the configuration table, checking values the firmware does not even contain."""
+    out = []
+    stack = []
+    for line in text.splitlines(True):
+        m = re.match(r'\s*#\s*(ifdef|ifndef|if|else|elif|endif)\b(.*)', line)
+        if m:
+            kw, rest = m.group(1), m.group(2).strip()
+            if kw == 'ifdef':
+                stack.append('defined(%s)' % rest)
+            elif kw == 'ifndef':
+                stack.append('!defined(%s)' % rest)
+            elif kw == 'if':
+                stack.append(rest)
+            elif kw in ('else', 'elif') and stack:
+                stack[-1] = '!' + stack[-1]
+            elif kw == 'endif' and stack:
+                stack.pop()
+            out.append(line)
+            continue
+        out.append(line if not stack or branch_active(stack) else '\n')
+    return ''.join(out)
+
+table_body = cfg_c[cfg_c.index('ConfigEntryInfo[]'):]
+table_body = table_body[:table_body.index('\n};')]
+all_rows = table_rows(table_body)
+if len(all_rows) < 100:
+    sys.exit('only %d rows of the ConfigEntry table were parsed, the layout of the table may have '
+             'changed, update table_rows() in gen_config_upgrade.py' % len(all_rows))
+
+# the rows that this board configuration actually compiles, that is the set the firmware reads and
+# writes with. A branch that cannot be judged is an error: silently leaving rows out is how a
+# configuration defect used to pass this check unnoticed.
+table = []
+skipped_branch = 0
+dropped_guards = set()
+for row in all_rows:
+    active = branch_active(row[0])
+    if not active:
+        skipped_branch += 1
+        dropped_guards.update(row[0])
+        continue
+    table.append(row)
+
+# Every row that a #if branch removes from this list also removes itself from every comparison
+# below, so a surprising drop here has to be noticed instead of quietly weakening the check.
+# Rows are left out either by a #if branch or because their values come from a macro the parser
+# does not expand; both are expected to stay a small part of the table, so a large fall here means
+# the check has quietly stopped looking at the configuration.
+MAX_NOT_COMPARED = 20
+if len(all_rows) - len(table) > MAX_NOT_COMPARED:
+    sys.exit('%d of the %d parsed table rows are not compared (%d behind a branch: %s). A row that '
+             'is not compared is a setting that is not checked.'
+             % (len(all_rows) - len(table), len(all_rows), skipped_branch,
+                ', '.join(sorted(dropped_guards)) or 'none'))
+
+unresolved = 0
+for cond, ctype, idname, var, d, lo, hi in table:
+    if idname not in vals:
+        sys.exit('%s (&%s) uses an id that is not defined in ui_configuration.h' % (idname, var))
+    if vals[idname] >= first_unused:
+        sys.exit('%s (&%s) has id %d but EEPROM_FIRST_UNUSED is only %d'
+                 % (idname, var, vals[idname], first_unused))
+    dv, mn, mx = resolve(d), resolve(lo), resolve(hi)
+    if None in (dv, mn, mx):
+        unresolved += 1
+        continue
+    if not (mn <= dv <= mx):
+        sys.exit('%s (&%s) has default %d outside its stored range %d..%d, a value in the middle of '
+                 'the range the menu offers is replaced by the default at the next start'
+                 % (idname, var, dv, mn, mx))
+
+# one id must not be claimed by two rows of the same configuration: the second one silently
+# overwrites what the first one read and wrote. Rows of different #if branches are not part of the
+# same configuration, that is what the filter above is for.
+by_id = {}
+for cond, ctype, idname, var, d, lo, hi in table:
+    by_id.setdefault(vals[idname], []).append((idname, var))
+for eid, users in sorted(by_id.items()):
+    for i in range(len(users)):
+        for j in range(i + 1, len(users)):
+            sys.exit('eeprom id %d (%s) is used twice in the ConfigEntry table of this '
+                     'configuration: &%s and &%s, one of them silently overwrites the other'
+                     % (eid, users[i][0], users[i][1], users[j][1]))
+
+# which items the menu actually offers, and where their code lives: the case bodies of items that
+# the menu structure does not list any more are dead code and must not be compared, they check
+# values the operator cannot even reach
+strc_src = active_only(strip_comments(open(root + 'drivers/ui/menu/ui_menu_structure.c',
+                               encoding='utf-8', errors='surrogateescape').read()))
+menu_items = set(re.findall(r'\{\s*MENU_\w+\s*,\s*MENU_ITEM\s*,\s*(\w+)\s*,', strc_src))
+if len(menu_items) < 100:
+    sys.exit('only %d menu items found in ui_menu_structure.c, the structure of the menu table may '
+             'have changed, update this check in gen_config_upgrade.py' % len(menu_items))
+
+menu_src_active = active_only(menu_src)
+case_start = [(m.start(), m.group(1)) for m in re.finditer(r'\n\s*case ([A-Za-z_]\w*)\s*:', menu_src_active)]
+case_blocks = {}
+for i, (pos, item) in enumerate(case_start):
+    if item in menu_items:
+        case_blocks[item] = menu_src_active[pos:case_start[i + 1][0] if i + 1 < len(case_start) else len(menu_src_active)]
+
+# a menu item may not offer a range its stored entry cannot keep
+compared = 0
+for item, block in sorted(case_blocks.items()):
+    for args in call_arguments(block, r'UiDriverMenuItemChange\w*'):
+        if len(args) < 7 or not args[2].startswith('&'):
+            continue
+        var = args[2][1:].strip()
+        lo, hi, dflt = args[3], args[4], args[5]
+        rows = [r for r in table if r[3].strip() == var]
+        if len(rows) != 1:      # arrays and the macro generated band tables stay with the subsystem
+            continue            # specific checks above
+        _c, ctype, idname, _var, d, rmin, rmax = rows[0]
+        menu_lo, menu_hi, menu_def = resolve(lo), resolve(hi), resolve(dflt)
+        stored_lo, stored_hi = resolve(rmin), resolve(rmax)
+        if None in (menu_lo, menu_hi, menu_def, stored_lo, stored_hi):
+            continue
+        compared += 1
+        if menu_lo < stored_lo or menu_hi > stored_hi:
+            sys.exit('%s (&%s, item %s): the menu offers %d..%d but only %d..%d is stored, a value '
+                     'outside the stored range is reset to its default at the next start'
+                     % (idname, var, item, menu_lo, menu_hi, stored_lo, stored_hi))
+        if not (stored_lo <= menu_def <= stored_hi):
+            sys.exit('%s (&%s, item %s): the menu restores %d as default, outside the stored range '
+                     '%d..%d' % (idname, var, item, menu_def, stored_lo, stored_hi))
+
+print('  %d rows of the %d in the table are compiled here (%d belong to a branch this '
+      'configuration does not use), %d rows have constants that cannot be resolved without a '
+      'compiler, %d menu items were compared with their stored range'
+      % (len(table), len(all_rows), skipped_branch, unresolved, compared))
+
+# ---------------------------------------------------------------------------------------------
+# every reachable menu item has to write into something the configuration table stores
+#
+# The AGC hang time and the numerical FWD/REV power meter display are the two items this firmware
+# got wrong: both edited a variable that no table row covers, so the setting was applied until the
+# next power cycle and then silently lost. New settings items fail here until somebody writes down
+# why they must not be saved, and an explanation that no longer matches the code fails too.
+
+transient_values = {        # value the menu changes -> (why it is not stored, the items that do)
+    'temp_var_u8': ('the item copies the value back into a stored variable (ts.flags1, ts.flags2, '
+                    'ts.dsp.active, ts.lcd_backlight_blanking, ts.low_power_config, ts.xverter_mode, '
+                    'ts.cw_offset_mode, df.temp_enabled, cw_decoder_config flags)',
+                    ('CONFIG_AM_TX_FILTER_DISABLE', 'CONFIG_LCD_AUTO_OFF_MODE',
+                     'CONFIG_LOW_POWER_THRESHOLD', 'CONFIG_XVTR_OFFSET_MULT',
+                     'MENU_CW_AUTO_MODE_SELECT', 'MENU_CW_DECODER_SPIKECANCEL', 'MENU_CW_OFFSET_MODE',
+                     'MENU_FM_DEV_MODE', 'MENU_LOW_POWER_SHUTDOWN', 'MENU_SPECTRUM_MODE',
+                     'MENU_TCXO_C_F', 'MENU_TCXO_MODE')),
+    'temp_var_bool': ('cw_decoder_config flag bits, stored in EEPROM_CW_DECODER_FLAGS',
+                      ('MENU_CW_DECODER_NOISECANCEL', 'MENU_CW_DECODER_SHOW_CW_LED',
+                       'MENU_CW_DECODER_SNAP_ENABLE', 'MENU_CW_DECODER_USE_3_GOERTZEL')),
+    'flag': ('local copy of the stored ts.tx_disable', ('CONFIG_TX_DISABLE',)),
+    'digital_mode': ('local copy of the stored ts.digital_mode', ('MENU_DIGITAL_MODE_SELECT',)),
+    'test': ('actions (backup, restore, reset), they store no value of their own',
+             ('CONFIG_RESET_SER_EEPROM', 'CONFIG_RESET_SER_EEPROM_SIGNATURE',
+              'MENU_BACKUP_CONFIG', 'MENU_RESTORE_CONFIG')),
+    'sm.config.alphaSplit.AttackAlpha': ('union member of the stored sm.config.alphaCombined',
+                                         ('CONFIG_SMETER_ATTACK',)),
+    'sm.config.alphaSplit.DecayAlpha': ('union member of the stored sm.config.alphaCombined',
+                                        ('CONFIG_SMETER_DECAY',)),
+    'ts.alc_decay_var': ('mirrored into the stored ts.alc_decay when compression uses the selectable '
+                         'value', ('MENU_ALC_RELEASE',)),
+    'ts.alc_tx_postfilt_gain_var': ('mirrored into the stored ts.alc_tx_postfilt_gain in the same '
+                                    'mode', ('MENU_ALC_POSTFILT_GAIN',)),
+    'rtc.Hours': ('the clock itself, the RTC backup domain keeps it', ('CONFIG_RTC_HOUR',)),
+    'rtc.Minutes': ('the clock itself, the RTC backup domain keeps it', ('CONFIG_RTC_MIN',)),
+    'rtc.Seconds': ('the clock itself, the RTC backup domain keeps it', ('CONFIG_RTC_SEC',)),
+    'ts.tune_tone_mode': ('deliberately transient, the code of the item says so',
+                          ('CONFIG_TUNE_TONE_MODE',)),
+}
+DEBUG_PREFIX = 'MENU_DEBUG_'
+
+strc_src = active_only(strip_comments(open(root + 'drivers/ui/menu/ui_menu_structure.c',
+                               encoding='utf-8', errors='surrogateescape').read()))
+menu_items = set(re.findall(r'\{\s*MENU_\w+\s*,\s*MENU_\w+\s*,\s*(\w+)\s*,', strc_src))
+if len(menu_items) < 100:
+    sys.exit('only %d menu items found in ui_menu_structure.c, the structure of the menu table may '
+             'have changed, update this check in gen_config_upgrade.py' % len(menu_items))
+
+stored_bases = {re.split(r'\[', r[3].strip())[0] for r in all_rows}
+stored_paths = {re.sub(r'\[[^\]]*\]', '', r[3].strip()) for r in all_rows}
+
+reachable = len(case_blocks)
+unsaved = {}
+for item, block in sorted(case_blocks.items()):
+    for args in call_arguments(block, r'UiDriverMenuItemChange\w*\('):
+        if len(args) < 6 or not args[2].startswith('&'):
+            continue
+        base = re.split(r'\[', args[2][1:].strip())[0]
+        if base in stored_bases:
+            continue
+        unsaved.setdefault(base, set()).add(item)
+
+for target, items in sorted(unsaved.items()):
+    if all(i.startswith(DEBUG_PREFIX) for i in items):
+        continue                        # the debug menu is transient on purpose
+    entry = transient_values.get(target)
+    if entry is None:
+        sys.exit('the menu item(s) %s change %s, which no row of the ConfigEntry table stores: the '
+                 'setting is lost at the next power off. Add an entry, or say why it must not be '
+                 'saved in transient_values of gen_config_upgrade.py' % (', '.join(sorted(items)), target))
+    if items != set(entry[1]):
+        sys.exit('transient_values explains %s for %s, but the menu changes it in %s: the exception '
+                 'is out of date' % (target, ', '.join(sorted(entry[1])), ', '.join(sorted(items))))
+for target, (reason, items) in transient_values.items():
+    if target not in unsaved:
+        sys.exit('transient_values explains %s (%s) but no menu item changes it any more, drop the '
+                 'exception' % (target, reason))
+
+print('  %d reachable menu items change a value, %d of them touch a variable the table does not '
+      'store, each one either a debug item or explained in transient_values'
+      % (reachable, len(unsaved)))
+
+# ---------------------------------------------------------------------------
+# The front panel: encoders, buttons and touch actions change values too, and that code does not
+# go through the menu at all.  Every value they adjust has to be stored as well, unless it is
+# deliberately session state, which then has to be listed in transient_panel_values with a reason.
+# radio_management.h holds the inline toggles the button actions call, so it belongs to the panel.
+drv_src = ""
+for panel_file in ('drivers/ui/ui_driver.c', 'drivers/ui/radio_management.h'):
+    drv_src += strip_comments(open(root + panel_file, encoding='utf-8', errors='surrogateescape').read())
+    drv_src += "\n"
+
+transient_panel_values = {
+    'ts.rit_value': ('RIT offset: the knob is relative and the display shows the offset of the '
+                     'current session, a stored RIT would start every QSO on an shifted receive '
+                     'frequency'),
+    'ts.vfo_mem_flag': ('which of VFO A/B is a memory, runtime state of the tuning controls, the '
+                        'toggle lives in radio_management.h'),
+    'ts.buffered_tx': ('TX audio buffering, switched for the current transmission only'),
+    'ts.mem_disp': ('spectrum reference trace display state, UiAction_MemDisp'),
+    'ts.keyer_mode.active': ('arming of the keyer macro recorder, must not survive a power cycle'),
+    'ts.frequency_lock': ('held while the operator keeps the button pressed, a lock that survived '
+                          'the power cycle could not be released from the menu'),
+}
+
+# the panel writes array elements, e.g. ts.rx_gain[RX_AUDIO_SPKR].value, so the paths of the table
+# are normalised the same way before they are compared
+stored_paths = {re.sub(r'\[[^\]]*\]', '', r[3].strip()) for r in all_rows}
+
+panel_targets = set()
+panel_unsaved = {}
+for m in re.finditer(r'change_and_limit_(?:int|uint)\(\s*([^,]+?)\s*,\s*[^,]+?\s*,\s*[^,()]+?\s*,\s*[^,()]+?\)', drv_src):
+    target = re.sub(r'\[[^\]]*\]', '', m.group(1).strip())
+    if '.' not in target:      # a local variable of a helper, not a value of the radio
+        continue
+    panel_targets.add(target)
+    if target not in stored_paths:
+        panel_unsaved.setdefault(target, set()).add('encoder')
+for m in re.finditer(r'((?:ts|ads|swrm|agc_wdsp_conf|df|sd)\.[\w.]+)\s*=\s*!\s*\1\s*;', drv_src):
+    target = re.sub(r'\[[^\]]*\]', '', m.group(1))
+    panel_targets.add(target)
+    if target not in stored_paths:
+        panel_unsaved.setdefault(target, set()).add('button')
+
+for target in sorted(panel_unsaved):
+    if target not in transient_panel_values:
+        sys.exit('the encoders/buttons change %s, which no row of the ConfigEntry table stores: the '
+                 'value is lost at the next power off. Add an entry, or say why it must stay session '
+                 'state in transient_panel_values of gen_config_upgrade.py' % target)
+for target in sorted(transient_panel_values):
+    if target not in panel_unsaved:
+        sys.exit('transient_panel_values explains %s (%s) but the front panel does not change it any '
+                 'more, drop the exception' % (target, transient_panel_values[target]))
+
+# the range the panel can produce must be inside the range that is stored, otherwise a perfectly
+# legal encoder setting is thrown away when the configuration is loaded again
+panel_rows = {re.sub(r'\[[^\]]*\]', '', r[3].strip()): r for r in all_rows}
+panel_range_problems = 0
+for m in re.finditer(r'change_and_limit_(?:int|uint)\(\s*([^,]+?)\s*,\s*[^,]+?\s*,\s*([^,()]+?)\s*,\s*([^,()]+?)\)', drv_src):
+    target, lo, hi = (t.strip() for t in m.groups())
+    target = re.sub(r'\[[^\]]*\]', '', target)
+    row = panel_rows.get(target)
+    if row is None:
+        continue
+    plo, phi, slo, shi = (resolve(x) for x in (lo, hi, row[5], row[6]))
+    if None in (plo, phi, slo, shi):
+        continue            # a limit that depends on a runtime value, e.g. ts.rx_gain[i].max
+    if plo < slo or phi > shi:
+        sys.exit('%s can be set to %d..%d by the front panel but only %d..%d is stored [%s]: the '
+                 'setting is silently discarded at the next load'
+                 % (target, plo, phi, slo, shi, row[2]))
+
+print('  %d values are changed by encoders/buttons/touch actions, %d of them are not stored and '
+      'each one is explained in transient_panel_values'
+      % (len(panel_targets), len(panel_unsaved)))
+
+# EEPROM_FIRST_UNUSED of the build which did not yet store the AGC hang time, the hang threshold
+# and the decay time constant of the AGC OFF mode. The upgrade scenario of the generated check
+# replays a configuration stored by that build.
+agc_first_unused_before = 383
+
+# The stored entry count (EEPROM_NUMBER_OF_ENTRIES) is the ceiling that UiConfiguration_Needs-
+# DefaultIndex() compares every id against: ids above it are taken to be absent from the stored
+# configuration and are loaded as defaults. number_of_entries_cur_fw is assigned nowhere else in
+# the firmware, it only ever holds what the last read left there, so the save path has to record
+# the ceiling of the firmware doing the write. If it does not, the count left behind by an older
+# firmware resets every id introduced since then on every single boot.
+write_entries = re.search(r'uint16_t\s+UiConfiguration_WriteConfigEntries\s*\(\s*\)\s*\{(.*?)\n\}',
+                          strip_comments(cfg_c), re.S)
+if not write_entries:
+    sys.exit('UiConfiguration_WriteConfigEntries() did not match, update gen_config_upgrade.py')
+save_records_entry_count = bool(re.search(
+    r'number_of_entries_cur_fw\s*=\s*EEPROM_FIRST_UNUSED\s*;', write_entries.group(1)))
+
 print('parsed from the repository:')
 for var, idname, eid, d, lo, hi in entries:
     print('  %-22s %-26s id %3d  default %3d  range %3d..%3d' % (var, idname, eid, d, lo, hi))
 print('  EEPROM_FIRST_UNUSED = %d (stored entry count of the current build)\n' % first_unused)
+print('  save path records that count: %s' % ('yes' if save_records_entry_count else
+      'NO - ids above the count of an older firmware reset on every boot'))
+print('WDSP AGC parameters:')
+for key in sorted(agc_stored, key=lambda k: agc_stored[k]['id']):
+    e = agc_stored[key]
+    menu = agc_menu.get(key)
+    print('  %-18s %-26s id %3d  %-19s default %5d  stored %6d..%-6d  menu %s'
+          % (key, e['idname'], e['id'], e['ctype'], e['def'], e['min'], e['max'],
+             '%d..%d (default %d)' % menu if menu else 'not editable'))
+for key in sorted(agc_menu):
+    menu = agc_menu[key]
+    stored = agc_stored.get(key)
+    if stored and '[' not in key and menu[2] != stored['def']:
+        sys.exit('agc_wdsp_conf.%s: the menu restores %d but the stored factory default is %d, the '
+                 'operator would get one value from the menu reset and another one from a '
+                 'configuration reset. Both have to use the AGC_WDSP_*_DEFAULT of audio_agc.h.'
+                 % (key, menu[2], stored['def']))
+
 
 L = []
 A = L.append
@@ -114,6 +769,8 @@ A('#include <stdbool.h>')
 A('#include <string.h>')
 A('')
 A('#define FIRST_UNUSED %du' % first_unused)
+A('#define PREVIOUS_FIRST_UNUSED %du' % agc_first_unused_before)
+A('#define SAVE_RECORDS_ENTRY_COUNT %d' % (1 if save_records_entry_count else 0))
 A('')
 A('typedef enum { KIND_PERCENT, KIND_SIDEBAND, KIND_HALF_SECONDS, KIND_ON_OFF, KIND_DB } kind_t;')
 A('typedef struct { const char* name; const char* idname; uint16_t id; int16_t def, min, max; kind_t kind; } entry_t;')
@@ -202,6 +859,206 @@ A('    }')
 A('    printf("\\n");')
 A('}')
 A('')
+A('/* ---------------------------------------------------------------------------------------------')
+A('   the WDSP AGC parameters, parsed from the ConfigEntry table, the AGC menu items and')
+A('   agc_wdsp_params_t */')
+A('typedef enum { ST_UINT8, ST_INT32_16 } agc_stype_t;')
+A('typedef struct')
+A('{')
+A('    const char* name;')
+A('    const char* idname;')
+A('    uint16_t id;')
+A('    agc_stype_t stype;')
+A('    int32_t def, min, max;')
+A('    int32_t menu_min, menu_max, menu_def;     /* what the AGC menu offers, menu_max < 0 if not editable */')
+A('} agc_entry_t;')
+A('static const agc_entry_t agc_entries[] =')
+A('{')
+for key in sorted(agc_stored, key=lambda k: agc_stored[k]['id']):
+    e = agc_stored[key]
+    menu = agc_menu.get(key)
+    A('    { "%s", "%s", %d, %s, %d, %d, %d, %d, %d, %d },'
+      % (key, e['idname'], e['id'], agc_c_types[e['ctype']], e['def'], e['min'], e['max'],
+         menu[0] if menu else 0, menu[1] if menu else -1, menu[2] if menu else 0))
+A('};')
+A('static const unsigned agc_entry_count = sizeof(agc_entries)/sizeof(agc_entries[0]);')
+A('')
+A('/* what the write path of UiConfiguration_WriteConfigEntryData() leaves in the 16 bit slot */')
+A('static uint16_t agc_store_bits(const agc_entry_t* e, int32_t v)')
+A('{')
+A('    return e->stype == ST_UINT8 ? (uint16_t)(uint8_t)v : (uint16_t)(int16_t)v;')
+A('}')
+A('')
+A('/* what the read path makes out of that slot: both UiReadSettingEEPROM_UInt8() and')
+A('   UiReadSettingEEPROM_Int32_16() convert to the type of the ram variable BEFORE the range check */')
+A('static int32_t agc_load_bits(const agc_entry_t* e, uint16_t raw)')
+A('{')
+A('    return e->stype == ST_UINT8 ? (int32_t)(uint8_t)raw : (int32_t)(int16_t)raw;')
+A('}')
+A('')
+A('static void agc_save(image_t* img, const agc_entry_t* e, int32_t v)')
+A('{')
+A('    img->value[e->id] = agc_store_bits(e, v);')
+A('    img->present[e->id] = true;')
+A('}')
+A('')
+A('static int32_t agc_read(const image_t* img, const agc_entry_t* e, bool load_default, store_t store)')
+A('{')
+A('    if (store == STORE_FLASH && !img->present[e->id])')
+A('    {')
+A('        return e->def;                        /* a flash slot that was never written fails to read */')
+A('    }')
+A('    const int32_t v = agc_load_bits(e, img->value[e->id]);')
+A('    if ((v < e->min) || (v > e->max) || load_default)')
+A('    {')
+A('        return e->def;')
+A('    }')
+A('    return v;')
+A('}')
+A('')
+A('static const char* agc_reason(const image_t* img, const agc_entry_t* e, int32_t force_above, store_t store)')
+A('{')
+A('    if (e->id > force_above)         return "not in the stored configuration";')
+A('    if (store == STORE_FLASH && !img->present[e->id]) return "never written, read fails";')
+A('    if (!img->present[e->id])        return "never written";')
+A('    const int32_t v = agc_load_bits(e, img->value[e->id]);')
+A('    if (v < e->min || v > e->max)    return "stored value out of range";')
+A('    return "loaded from storage";')
+A('}')
+A('')
+A('static void run_agc(const char* title, const image_t* img, uint16_t stored_count, store_t store)')
+A('{')
+A('    const int32_t force_above = needs_default_index(stored_count, store);')
+A('    printf("%s\\n  stored entry count %u, %s\\n", title, stored_count,')
+A('           store == STORE_I2C ? "serial EEPROM / RAM cache" : "flash");')
+A('    for (unsigned i = 0; i < agc_entry_count; i++)')
+A('    {')
+A('        const agc_entry_t* e = &agc_entries[i];')
+A('        const int32_t v = agc_read(img, e, e->id > force_above, store);')
+A('        char stored[16];')
+A('        if (img->present[e->id]) snprintf(stored, sizeof(stored), "%d", (int)img->value[e->id]);')
+A('        else                     snprintf(stored, sizeof(stored), "erased");')
+A('        printf("    %-18s id %3u  stored %-8s -> %6d  %s\\n", e->name, e->id, stored,')
+A('               (int)v, agc_reason(img, e, force_above, store));')
+A('    }')
+A('    printf("\\n");')
+A('}')
+A('')
+A('/* every value the AGC menu can produce has to survive a save/load cycle, on the serial EEPROM')
+A('   as well as on the flash of the boards that have no external EEPROM */')
+A('static int check_agc_roundtrip(void)')
+A('{')
+A('    int rc = 0;')
+A('    for (unsigned i = 0; i < agc_entry_count; i++)')
+A('    {')
+A('        const agc_entry_t* e = &agc_entries[i];')
+A('        const int32_t probes[] = { e->def, e->min, e->max, e->menu_min, e->menu_max, e->menu_def };')
+A('        for (unsigned p = 0; p < sizeof(probes)/sizeof(probes[0]); p++)')
+A('        {')
+A('            const int32_t want = probes[p];')
+A('            if ((want < e->min) || (want > e->max)) continue;')
+A('            if (e->menu_max < 0 && p >= 3) continue;')
+A('            if (agc_load_bits(e, agc_store_bits(e, want)) != want)')
+A('            {')
+A('                printf("CHECK FAILED: %s cannot keep %d in its storage slot\\n", e->idname, (int)want);')
+A('                rc = 1;')
+A('                continue;')
+A('            }')
+A('            for (unsigned s = 0; s < 2; s++)')
+A('            {')
+A('                image_t img;')
+A('                memset(&img, 0, sizeof(img));')
+A('                for (unsigned k = 0; k < sizeof(img.value)/sizeof(img.value[0]); k++)')
+A('                {')
+A('                    img.value[k] = 0xFFFF;')
+A('                }')
+A('                agc_save(&img, e, want);')
+A('                const int32_t got = agc_read(&img, e, false, (store_t)s);')
+A('                if (got != want)')
+A('                {')
+A('                    printf("CHECK FAILED: %s: menu value %d does not survive save/load (%s reads %d)\\n",')
+A('                           e->idname, (int)want, s ? "flash" : "i2c eeprom", (int)got);')
+A('                    rc = 1;')
+A('                }')
+A('            }')
+A('        }')
+A('        if (e->menu_max >= 0)')
+A('        {')
+A('            if ((e->menu_min < e->min) || (e->menu_max > e->max))')
+A('            {')
+A('                printf("CHECK FAILED: %s can be set to %d..%d but only %d..%d is stored\\n",')
+A('                       e->idname, (int)e->menu_min, (int)e->menu_max, (int)e->min, (int)e->max);')
+A('                rc = 1;')
+A('            }')
+A('        }')
+A('        if ((e->def < e->min) || (e->def > e->max))')
+A('        {')
+A('            printf("CHECK FAILED: %s default %d is outside its stored range %d..%d\\n",')
+A('                   e->idname, (int)e->def, (int)e->min, (int)e->max);')
+A('            rc = 1;')
+A('        }')
+A('    }')
+A('    return rc;')
+A('}')
+A('')
+A('/* The upgrade case: the configuration on the radio was written by a firmware whose entry count')
+A('   was below the id of a value that exists now. A value the operator sets after the upgrade has to')
+A('   survive the next power cycle, which means the save has to record the ceiling of the current')
+A('   firmware, not the one it read. */')
+A('static int check_upgrade_persistence(void)')
+A('{')
+A('    int rc = 0;')
+A('    for (unsigned i = 0; i < agc_entry_count; i++)')
+A('    {')
+A('        const agc_entry_t* e = &agc_entries[i];')
+A('        if (e->id < PREVIOUS_FIRST_UNUSED)')
+A('        {')
+A('            continue;                 /* the older firmware knew this one already */')
+A('        }')
+A('        const int32_t want = e->menu_max >= 0 ? e->menu_max : e->max;')
+A('        if (want < e->min || want > e->max || agc_load_bits(e, agc_store_bits(e, want)) != want)')
+A('        {')
+A('            continue;')
+A('        }')
+A('        image_t img;')
+A('        memset(&img, 0, sizeof(img));')
+A('        for (unsigned k = 0; k < sizeof(img.value)/sizeof(img.value[0]); k++)')
+A('        {')
+A('            img.value[k] = 0xFFFF;')
+A('        }')
+A('        uint16_t count = PREVIOUS_FIRST_UNUSED;')
+A('')
+A('        /* first boot after the upgrade: the id did not exist, the default is expected */')
+A('        if (agc_read(&img, e, e->id > needs_default_index(count, STORE_I2C), STORE_I2C) != e->def)')
+A('        {')
+A('            printf("CHECK FAILED: %s: a value unknown to the older firmware does not come up as default\\n", e->idname);')
+A('            rc = 1;')
+A('        }')
+A('')
+A('        /* the operator sets it, the firmware saves */')
+A('        agc_save(&img, e, want);')
+A('        if (SAVE_RECORDS_ENTRY_COUNT)')
+A('        {')
+A('            count = FIRST_UNUSED;')
+A('        }')
+A('')
+A('        /* the next boot has to find it */')
+A('        const int32_t got = agc_read(&img, e, e->id > needs_default_index(count, STORE_I2C),')
+A('                                      STORE_I2C);')
+A('        if (got != want)')
+A('        {')
+A('            printf("CHECK FAILED: %s (id %u) set after an upgrade is lost on the next boot\\n", e->idname, e->id);')
+A('            printf("           the stored entry count stayed %u while EEPROM_FIRST_UNUSED is %u,\\n",')
+A('                   (unsigned)count, FIRST_UNUSED);')
+A('            printf("           so the load resets the value back to its default.\\n");')
+A('            printf("           UiConfiguration_WriteConfigEntries() has to assign\\n");')
+A('            printf("           number_of_entries_cur_fw = EEPROM_FIRST_UNUSED before saving.\\n");')
+A('            rc = 1;')
+A('        }')
+A('    }')
+A('    return rc;')
+A('}')
+A('')
 A('int main(void)')
 A('{')
 A('    image_t img;')
@@ -231,8 +1088,36 @@ A('    run("current build, everything stored", &img, FIRST_UNUSED, STORE_I2C, fa
 A('    run("current build on flash, warning delay never written", &before_warn, FIRST_UNUSED, STORE_FLASH, false);')
 A('    run("factory reset of the current build", &img, FIRST_UNUSED, STORE_I2C, true);')
 A('')
+A('    /* ---------------------------------------------------------------------------------------------')
+A('       the AGC values */')
+A('    image_t agc_all;')
+A('    memset(&agc_all, 0, sizeof(agc_all));')
+A('    for (unsigned i = 0; i < sizeof(agc_all.value)/sizeof(agc_all.value[0]); i++)')
+A('    {')
+A('        agc_all.value[i] = 0xFFFF;')
+A('    }')
+A('    for (unsigned i = 0; i < agc_entry_count; i++)')
+A('    {')
+A('        const agc_entry_t* e = &agc_entries[i];')
+A('        /* a stored value that differs from the default, so that the check below can tell the')
+A('           two apart: the highest value of the range the menu offers */')
+A('        agc_save(&agc_all, e, e->menu_max >= 0 ? e->menu_max : e->max);')
+A('    }')
+A('    image_t agc_before_hang_values = agc_all;')
+for key in sorted(agc_stored, key=lambda k: agc_stored[k]['id']):
+    e = agc_stored[key]
+    if e['id'] >= agc_first_unused_before:
+        A('    erase(&agc_before_hang_values, %d);   /* %s */' % (e['id'], key))
+A('    run_agc("AGC, configuration stored before the hang and OFF mode values existed",')
+A('            &agc_before_hang_values, %du, STORE_I2C);' % agc_first_unused_before)
+A('    run_agc("AGC, current build, everything stored", &agc_all, FIRST_UNUSED, STORE_I2C);')
+A('    run_agc("AGC, current build on flash", &agc_all, FIRST_UNUSED, STORE_FLASH);')
+A('')
 A('    /* the self checks which make this program fail, so that CI catches a broken configuration */')
 A('    int rc = 0;')
+A('')
+A('    rc |= check_agc_roundtrip();')
+A('    rc |= check_upgrade_persistence();')
 A('    if (entry_count == 0)')
 A('    {')
 A('        printf("CHECK FAILED: no entries parsed, the generator matched nothing\\n");')

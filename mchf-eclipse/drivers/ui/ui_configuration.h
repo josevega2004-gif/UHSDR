@@ -621,7 +621,16 @@ uint16_t    UiConfiguration_SaveEepromValues(void);
 #define EEPROM_AM_PEP_DIM                           380     // draw the held AM carrier to PEP readout dimmed
 #define EEPROM_AM_PEP_TARGET                        381     // carrier to PEP ratio of a correctly set carrier, in half dB
 #define EEPROM_AM_PEP_WARN                          382     // delay before a clearly out of range ratio starts to blink, in half seconds
-#define EEPROM_FIRST_UNUSED                         383		// change this if new value ids are introduced, must be correct at any time
+// the WDSP AGC parameters which were added after the AGC block above had to be numbered at the end
+#define EEPROM_AGC_WDSP_HANG_TIME                   383     // hang AGC hold off time in ms
+#define EEPROM_AGC_WDSP_HANG_THRESH                 384     // hang AGC threshold in dB
+#define EEPROM_AGC_WDSP_TAU_DECAY_5                 385     // decay time constant of the AGC OFF mode
+#define EEPROM_PWR_METER_DISP                       386     // show the numerical FWD/REV power metering
+// the digi mode parameters which the encoder changes and which were never stored at all
+#define EEPROM_RTTY_SHIFT_IDX                       387     // RTTY shift, changed by Encoder 2 in RTTY
+#define EEPROM_RTTY_SPEED_IDX                       388     // RTTY speed, changed by Encoder 1 in RTTY
+#define EEPROM_PSK_SPEED_IDX                        389     // PSK31 speed, changed by Encoder 1 in BPSK
+#define EEPROM_FIRST_UNUSED                         390		// change this if new value ids are introduced, must be correct at any time
 // the CI configuration upgrade check (make config-upgrade-check) fails if an entry id is not
 // below this number, so a missing bump here cannot pass unnoticed
 
