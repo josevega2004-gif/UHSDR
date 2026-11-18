@@ -1,37 +1,16 @@
+# Runs on every push and pull request, with no paths: filter. This guard parses nine files
+# (ui_configuration.c and .h, ui_menu.c, ui_menu_structure.c, audio_driver.h, radio_management.h,
+# audio_agc.h, audio_filter.h and the Makefile), and gen_config_upgrade.py also walks the tree and
+# opens headers by computed name, so a hand kept include list is always a subset of the truth. A
+# previous version of this filter omitted ui_menu_structure.c and audio_filter.h, which meant that
+# editing the menu table, the very place a duplicate or missing EEPROM id shows up, ran neither
+# check. Both jobs together take about four seconds, so the filter buys nothing either.
 name: Host checks, configuration storage and digital modes
 
 on:
   push:
     branches: [active-devel]
-    paths:
-      - "mchf-eclipse/drivers/ui/ui_configuration.c"
-      - "mchf-eclipse/drivers/ui/ui_configuration.h"
-      - "mchf-eclipse/drivers/ui/menu/ui_menu.c"
-      - "mchf-eclipse/drivers/audio/audio_agc.h"
-      - "mchf-eclipse/drivers/ui/radio_management.h"
-      - "mchf-eclipse/drivers/audio/audio_driver.h"
-      - "mchf-eclipse/Makefile"
-      - "mchf-eclipse/support/config_upgrade/**"
-      - "mchf-eclipse/support/digi/**"
-      - "mchf-eclipse/drivers/audio/rtty.c"
-      - "mchf-eclipse/drivers/audio/rtty.h"
-      - "mchf-eclipse/drivers/audio/softdds/softdds.h"
-      - ".github/workflows/config-upgrade-check.yml"
   pull_request:
-    paths:
-      - "mchf-eclipse/drivers/ui/ui_configuration.c"
-      - "mchf-eclipse/drivers/ui/ui_configuration.h"
-      - "mchf-eclipse/drivers/ui/menu/ui_menu.c"
-      - "mchf-eclipse/drivers/audio/audio_agc.h"
-      - "mchf-eclipse/drivers/ui/radio_management.h"
-      - "mchf-eclipse/drivers/audio/audio_driver.h"
-      - "mchf-eclipse/Makefile"
-      - "mchf-eclipse/support/config_upgrade/**"
-      - "mchf-eclipse/support/digi/**"
-      - "mchf-eclipse/drivers/audio/rtty.c"
-      - "mchf-eclipse/drivers/audio/rtty.h"
-      - "mchf-eclipse/drivers/audio/softdds/softdds.h"
-      - ".github/workflows/config-upgrade-check.yml"
 
 jobs:
   config-upgrade-check:
