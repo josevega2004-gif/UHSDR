@@ -508,8 +508,19 @@ uint16_t    UiConfiguration_SaveEepromValues(void);
 
 #define EEPROM_METER_COLOUR_UP				295
 #define EEPROM_METER_COLOUR_DOWN			296
-#define EEPROM_FILTER_PATH_MAP_BASE			297 //
-#define EEPROM_FILTER_PATH_MAP_END (329 + FILTER_MODE_MAX*FILTER_PATH_MEM_MAX)   // this is currently 5*5 = 25
+/* The filter path memories are the one configuration value that occupies more than a single word:
+ * FILTER_PATH_MEM_MAX slots for each of FILTER_MODE_MAX modes, 25 words in all. This block used to
+ * start at 297, right in the middle of the single value ids, and 22 of them (299..321, among them
+ * the I2C bus speeds, the receive IQ autocorrection and the WDSP AGC threshold) shared a word with
+ * one of the filter slots. UiConfiguration_SaveEepromValues() writes the table first and the filter
+ * map afterwards, so the filter slot won and the setting was destroyed on every save. It now lives
+ * above the highest single value id; EEPROM_FILTER_PATH_MAP_LEGACY_BASE is kept so that memories
+ * stored at the old address are still read once. See the CI check in
+ * support/config_upgrade (make config-upgrade-check), which fails on any such overlap. */
+#define EEPROM_FILTER_PATH_MAP_WORDS			25	// FILTER_MODE_MAX * FILTER_PATH_MEM_MAX, asserted in ui_configuration.c
+#define EEPROM_FILTER_PATH_MAP_BASE			391	// own block, clear of the single value ids
+#define EEPROM_FILTER_PATH_MAP_END			(EEPROM_FILTER_PATH_MAP_BASE + EEPROM_FILTER_PATH_MAP_WORDS - 1)
+#define EEPROM_FILTER_PATH_MAP_LEGACY_BASE	297	// the address of the previous layout, read only
 //#define EEPROM_SPECTRUM_LIGHT_ENABLE		298
 #define EEPROM_MANUAL_NOTCH					299
 #define EEPROM_MANUAL_PEAK					300
@@ -630,7 +641,9 @@ uint16_t    UiConfiguration_SaveEepromValues(void);
 #define EEPROM_RTTY_SHIFT_IDX                       387     // RTTY shift, changed by Encoder 2 in RTTY
 #define EEPROM_RTTY_SPEED_IDX                       388     // RTTY speed, changed by Encoder 1 in RTTY
 #define EEPROM_PSK_SPEED_IDX                        389     // PSK31 speed, changed by Encoder 1 in BPSK
-#define EEPROM_FIRST_UNUSED                         390		// change this if new value ids are introduced, must be correct at any time
+/* 390 was the first free word; the filter path memories moved here from 297, where they overlapped
+ * the single value ids, so the number of entries the stored configuration covers grows with it. */
+#define EEPROM_FIRST_UNUSED                         416		// change this if new value ids are introduced, must be correct at any time
 // the CI configuration upgrade check (make config-upgrade-check) fails if an entry id is not
 // below this number, so a missing bump here cannot pass unnoticed
 

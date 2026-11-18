@@ -724,6 +724,169 @@ print('  %d values are changed by encoders/buttons/touch actions, %d of them are
 # replays a configuration stored by that build.
 agc_first_unused_before = 383
 
+# ---------------------------------------------------------------------------
+# The EEPROM address map: one stored value per word.
+#
+# Every configuration value owns one 16 bit word of the store, addressed by its id, and the filter
+# path memories own a block of 25. Two values on the same word destroy each other: whichever was
+# written last is what the next boot finds, and from the operator's point of view that looks exactly
+# like a setting which was never saved. The filter path map sat at 297 and so covered the ids of 22
+# single value settings - among them the two I2C bus speeds, the receive IQ autocorrection and the
+# WDSP AGC threshold - and because UiConfiguration_SaveEepromValues() writes the table first and the
+# filter map afterwards, the map won. That is what this check keeps from ever happening again.
+
+def expand_def_macros(text, marker, what):
+    """text with the invocations of every #define whose body contains marker replaced by that body
+
+    The ConfigEntry table and the menu build whole groups of rows/cases with argument macros, so a
+    line based parser does not see them at all. Without this expansion the per band IQ calibration
+    and power factor rows - and the words they occupy - are invisible to the checks below."""
+    defs = {}
+    def grab(m):
+        name, params, rest = m.group(1), m.group(2), m.group(3)
+        if marker not in rest:
+            return m.group(0)
+        defs[name] = (params, rest)
+        return '\n'
+    text = re.sub(r'(?m)^#define\s+(\w+)\(([^)]*)\)((?:[^\n]*\\\n)*[^\n]*)', grab, text)
+    for name, (params, rest) in sorted(defs.items()):
+        clean = '\n'.join(l.rstrip().rstrip('\\').strip() for l in rest.splitlines())
+        names = [p.strip() for p in params.split(',')]
+        def sub(mo):
+            args = [a.strip() for a in mo.group(1).split(',')]
+            out = clean
+            for i, p in enumerate(names):
+                v = args[i] if i < len(args) else ''
+                out = out.replace('##%s##' % p, v)
+                out = re.sub(r'##\s*' + re.escape(p) + r'\b', v, out)
+            return out
+        text, n = re.subn(r'(?m)^[ \t]*%s\(([^)]*)\)[ \t]*,?[ \t]*$' % re.escape(name), sub, text)
+        if n == 0:
+            sys.exit('the %s macro %s is defined but never invoked, drop it or update '
+                     'expand_def_macros() in gen_config_upgrade.py' % (what, name))
+    return text, set(defs)
+
+clean_cfg_c = strip_comments(cfg_c)
+tbl_start = clean_cfg_c.index('ConfigEntryInfo[]')
+tbl_end = clean_cfg_c.index('\n};', tbl_start)
+macro_starts = [m.start() for m in re.finditer(r'(?m)^#define\s+\w+\([^)]*\)[^\n]*ConfigEntry_', clean_cfg_c)
+                if m.start() < tbl_start]
+map_body = clean_cfg_c[min(macro_starts) if macro_starts else tbl_start:tbl_end]
+map_body, row_macros = expand_def_macros(map_body, 'ConfigEntry_', 'ConfigEntry row')
+map_rows = [r for r in table_rows(map_body) if branch_active(r[0])]
+if len(map_rows) < len(table):
+    sys.exit('the expanded ConfigEntry table has %d compiled rows, the plain parse found %d: the '
+             'expansion cannot be trusted, update gen_config_upgrade.py'
+             % (len(map_rows), len(table)))
+
+# word counts of the values that occupy more than one word, taken from the code that writes them so
+# that changing the loop bound without moving the block fails here
+MAX_BANDS = resolve('MAX_BANDS')
+FPM = resolve('FILTER_PATH_MEM_MAX')
+m = re.search(r'FILTER_MODE_CW\s*=\s*0,([^}]*)FILTER_MODE_MAX',
+              open(root + 'drivers/audio/audio_filter.h', encoding='utf-8',
+                   errors='surrogateescape').read(), re.S)
+if not (m and MAX_BANDS and FPM):
+    sys.exit('MAX_BANDS / FILTER_PATH_MEM_MAX / FILTER_MODE_MAX could not be resolved, the address '
+             'map check cannot run, update gen_config_upgrade.py')
+FMM = 1 + len([x for x in m.group(1).split(',') if x.strip()])
+
+def hdr_define(name):
+    g = re.search(r'(?m)^\s*#define\s+%s\s+((?:0[xX])?[0-9A-Fa-f]+)\s*(?://|$)' % re.escape(name),
+                  strip_comments(cfg_h))
+    if not g:
+        sys.exit('%s is not a plain numeric #define of ui_configuration.h, the address map check '
+                 'cannot run' % name)
+    return int(g.group(1), 0)
+
+filter_words = hdr_define('EEPROM_FILTER_PATH_MAP_WORDS')
+if filter_words != FMM * FPM:
+    sys.exit('EEPROM_FILTER_PATH_MAP_WORDS is %d but the firmware writes %d x %d = %d filter path '
+             'memories: the block is too small and would run into the next ids'
+             % (filter_words, FMM, FPM, FMM * FPM))
+# the firmware asserts the same thing at compile time, make sure nobody deletes it
+if not re.search(r'UiConfiguration_FilterMapWordsFit', clean_cfg_c):
+    sys.exit('the compile time check UiConfiguration_FilterMapWordsFit is gone from '
+             'ui_configuration.c, EEPROM_FILTER_PATH_MAP_WORDS could drift from the loop bounds')
+
+bulk_blocks = []            # (base, words, who, the code that proves it)
+if not re.search(r'EEPROM_FILTER_PATH_MAP_BASE\s*\+\s*idx\s*\*\s*FILTER_PATH_MEM_MAX\s*\+\s*mem_idx',
+                 clean_cfg_c):
+    sys.exit('the filter path map is no longer written as base+idx*FILTER_PATH_MEM_MAX+mem_idx, '
+             'update the address map of gen_config_upgrade.py')
+bulk_blocks.append((hdr_define('EEPROM_FILTER_PATH_MAP_BASE'), filter_words,
+                    'filter path memories (%d modes x %d slots)' % (FMM, FPM)))
+
+band_bases = ('EEPROM_BAND0_MODE_A', 'EEPROM_BAND0_FREQ_HIGH_A', 'EEPROM_BAND0_FREQ_LOW_A',
+              'EEPROM_BAND0_MODE_B', 'EEPROM_BAND0_FREQ_HIGH_B', 'EEPROM_BAND0_FREQ_LOW_B')
+for b in band_bases:
+    if not re.search(r'UiWriteSettingsBandMode\s*\([^)]*\b%s\b' % b, clean_cfg_c) and \
+       not re.search(r'UiReadSettingsBandMode\s*\([^)]*\b%s\b' % b, clean_cfg_c) and \
+       not re.search(r'BandMemBlockBase\s*\(\s*%s\s*\)' % b, clean_cfg_c):
+        sys.exit('%s is no longer used as a per band memory base, update the address map of '
+                 'gen_config_upgrade.py' % b)
+    bulk_blocks.append((hdr_define(b), MAX_BANDS, '%s (%d band slots)' % (b, MAX_BANDS)))
+
+# values the firmware writes outside the ConfigEntry table, one word each
+single_direct = ['EEPROM_BAND_MODE', 'EEPROM_FREQ_HIGH', 'EEPROM_FREQ_LOW',
+                 'EEPROM_XVERTER_OFFSET_HIGH', 'EEPROM_XVERTER_OFFSET_LOW',
+                 'EEPROM_XVERTER_OFFSET_TX_HIGH', 'EEPROM_XVERTER_OFFSET_TX_LOW',
+                 'EEPROM_CONFIG_LAYOUT_VERSION']
+for n in single_direct:
+    if not re.search(r'\b%s\b' % n, clean_cfg_c):
+        sys.exit('%s is not used in ui_configuration.c any more, drop it from the address map of '
+                 'gen_config_upgrade.py' % n)
+    bulk_blocks.append((hdr_define(n), 1, '%s (written outside the table)' % n))
+
+# the keyer macro memory lives in its own byte area below the variables, make sure it stayed there
+if hdr_define('EEPROM_KEYER_MEMORY_ADDRESS') < first_unused:
+    sys.exit('EEPROM_KEYER_MEMORY_ADDRESS %d is inside the configuration ids (< %d), it would '
+             'overwrite them' % (hdr_define('EEPROM_KEYER_MEMORY_ADDRESS'), first_unused))
+
+owners = {}                 # word -> list of (who, idname)
+for cond, ctype, idname, var, d, lo, hi in map_rows:
+    if idname not in vals:
+        continue
+    span = 2 if ctype == 'ConfigEntry_Int32' else 1
+    for w in range(vals[idname], vals[idname] + span):
+        owners.setdefault(w, []).append(('table row %s (&%s)' % (idname, var.strip()), idname))
+for base, words, who in bulk_blocks:
+    for w in range(base, base + words):
+        owners.setdefault(w, []).append((who, who))
+
+clashes = {w: o for w, o in owners.items() if len(o) > 1}
+if clashes:
+    lines = []
+    for w in sorted(clashes)[:40]:
+        lines.append('    word %3d: %s' % (w, '  <->  '.join(sorted({o[0] for o in clashes[w]}))))
+    sys.exit('%d EEPROM word(s) are claimed by more than one stored value:\n%s\n'
+             'The value written last destroys the other one at every save, which the operator sees '
+             'as a setting that is never remembered. Give one of them a free word and raise '
+             'EEPROM_FIRST_UNUSED if that means the address range grows.'
+             % (len(clashes), '\n'.join(lines)))
+
+print('  EEPROM address map: %d table rows (after expanding %d row macros) and %d multi word '
+      'blocks, %d words claimed, none twice'
+      % (len(map_rows), len(row_macros), len(bulk_blocks), len(owners)))
+
+# the map is replayed by the generated program as well, so that the order in which the firmware
+# writes it is part of the check and not only the addresses: writing the table first and a block
+# that covers it afterwards is what destroyed the settings
+rt_rows = []                          # (word, idname) of every row of the compiled table
+for cond, ctype, idname, var, d, lo, hi in map_rows:
+    if idname not in vals:
+        continue
+    if vals[idname] >= IMAGE_SLOTS:
+        sys.exit('%s has id %d which does not fit the host image of %d slots' % (idname, vals[idname], IMAGE_SLOTS))
+    if vals[idname] >= first_unused:
+        sys.exit('%s has id %d but EEPROM_FIRST_UNUSED is only %d, so the load of a configuration '
+                 'stored by an older firmware resets it to its default on every boot'
+                 % (idname, vals[idname], first_unused))
+    span = 2 if ctype == 'ConfigEntry_Int32' else 1
+    for w in range(vals[idname], vals[idname] + span):
+        rt_rows.append((w, idname))
+rt_blocks = [(base, words, who) for base, words, who in bulk_blocks if words > 1]
+
 # The stored entry count (EEPROM_NUMBER_OF_ENTRIES) is the ceiling that UiConfiguration_Needs-
 # DefaultIndex() compares every id against: ids above it are taken to be absent from the stored
 # configuration and are loaded as defaults. number_of_entries_cur_fw is assigned nowhere else in
@@ -1059,6 +1222,66 @@ A('    }')
 A('    return rc;')
 A('}')
 A('')
+A('/* ---------------------------------------------------------------------------------------------')
+A('   the EEPROM address map of this build, replayed in the order in which the firmware writes it.')
+A('   UiConfiguration_SaveEepromValues() writes the whole ConfigEntry table first and the multi word')
+A('   blocks afterwards, so a word that a block covers never keeps the value of the row that claims')
+A('   it. That is what destroyed the I2C bus speeds, the WDSP AGC threshold and the receive IQ')
+A('   autocorrection: the filter path memories owned their words. Every row has to still own its')
+A('   words once the save order above ran through.')
+A('*/')
+A('typedef struct { uint16_t word; const char* idname; } map_row_t;')
+A('static const map_row_t map_rows_rt[] = {')
+for w, idname in sorted(set(rt_rows)):
+    A('    { %d, "%s" },' % (w, idname))
+A('};')
+A('static const unsigned map_row_count = sizeof(map_rows_rt)/sizeof(map_rows_rt[0]);')
+A('')
+A('typedef struct { uint16_t base; uint16_t words; const char* name; } map_block_t;')
+A('static const map_block_t map_blocks_rt[] = {')
+for base, words, who in rt_blocks:
+    A('    { %d, %d, "%s" },' % (base, words, who))
+A('};')
+A('static const unsigned map_block_count = sizeof(map_blocks_rt)/sizeof(map_blocks_rt[0]);')
+A('')
+A('static int check_save_order(void)')
+A('{')
+A('    int owner[%d];        /* >= 0: index into map_rows_rt, < 0: -(block + 1) */' % IMAGE_SLOTS)
+A('    for (unsigned i = 0; i < %d; i++) owner[i] = -1000;' % IMAGE_SLOTS)
+A('    for (unsigned i = 0; i < map_row_count; i++) owner[map_rows_rt[i].word] = (int)i;')
+A('    for (unsigned b = 0; b < map_block_count; b++)')
+A('    {')
+A('        for (unsigned k = 0; k < map_blocks_rt[b].words; k++)')
+A('        {')
+A('            owner[map_blocks_rt[b].base + k] = -((int)b + 1);')
+A('        }')
+A('    }')
+A('    int rc = 0;')
+A('    int shown = 0;')
+A('    for (unsigned i = 0; i < map_row_count; i++)')
+A('    {')
+A('        const int o = owner[map_rows_rt[i].word];')
+A('        if (o == (int)i)')
+A('        {')
+A('            continue;')
+A('        }')
+A('        if (shown++ < 10)')
+A('        {')
+A('            printf("CHECK FAILED: after a save the row %s no longer owns word %u, %s wrote it "')
+A('                   "last, the setting is destroyed on every power off\\n",')
+A('                   map_rows_rt[i].idname, map_rows_rt[i].word,')
+A('                   o < 0 ? map_blocks_rt[-o - 1].name : "another table row");')
+A('        }')
+A('        rc = 1;')
+A('    }')
+A('    if (rc == 0)')
+A('    {')
+A('        printf("save order: %d table words and %d multi word blocks, every table row still owns "')
+A('               "its words after the save\\n\\n", map_row_count, map_block_count);')
+A('    }')
+A('    return rc;')
+A('}')
+A('')
 A('int main(void)')
 A('{')
 A('    image_t img;')
@@ -1118,6 +1341,7 @@ A('    int rc = 0;')
 A('')
 A('    rc |= check_agc_roundtrip();')
 A('    rc |= check_upgrade_persistence();')
+A('    rc |= check_save_order();')
 A('    if (entry_count == 0)')
 A('    {')
 A('        printf("CHECK FAILED: no entries parsed, the generator matched nothing\\n");')

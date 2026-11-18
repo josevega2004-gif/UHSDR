@@ -35,6 +35,14 @@
     #error "Too many eeprom variables defined in ui_configuration.h (MAX_VAR_ADDR > NB_OF_VAR ). Please change maximum number of vars in eeprom.h"
 #endif
 
+/* The filter path memories are the only multi word configuration value, and the word count they need
+ * follows from the mode and slot counts. If either grows, EEPROM_FILTER_PATH_MAP_WORDS and
+ * EEPROM_FIRST_UNUSED have to grow with it, otherwise the block silently runs into the next ids. */
+typedef char UiConfiguration_FilterMapWordsFit[
+    (EEPROM_FILTER_PATH_MAP_WORDS == FILTER_MODE_MAX * FILTER_PATH_MEM_MAX) ? 1 : -1];
+typedef char UiConfiguration_FilterMapInsideAddressRange[
+    (EEPROM_FILTER_PATH_MAP_END < EEPROM_FIRST_UNUSED) ? 1 : -1];
+
 
 static int32_t UiConfiguration_CompareConfigBuildVersions(uint major, uint32_t minor, uint32_t release);
 
@@ -825,10 +833,39 @@ static uint16_t UiWriteSettingEEPROM_Filter()
     return retval;
 }
 
+/**
+ * Did the filter path memories already move to their own block?
+ *
+ * The block used to start at EEPROM_FILTER_PATH_MAP_LEGACY_BASE, where its 25 words covered the ids
+ * of 22 single value settings. As long as the new block holds nothing that was ever written, those
+ * memories are still read from the legacy address, which lets a radio keep what it has. Every path
+ * index is smaller than AUDIO_FILTER_PATH_NUM, so an erased (or never written) word cannot be
+ * confused with a stored value.
+ *
+ * @return true if no word of the current block was ever written
+ */
+static bool UiConfiguration_FilterMapNotStoredYet()
+{
+    for (uint16_t offset = 0; offset < EEPROM_FILTER_PATH_MAP_WORDS; offset++)
+    {
+        uint16_t value = 0xffff;      // a read that does not return a value counts as "not stored"
+        if (ConfigStorage_ReadVariable(EEPROM_FILTER_PATH_MAP_BASE + offset, &value) == HAL_OK
+                && value != 0xffff)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void UiReadSettingEEPROM_Filter(bool load_default)
 {
     int idx, mem_idx;
-    const uint16_t base = UiConfiguration_LayoutAddress(EEPROM_FILTER_PATH_MAP_BASE);
+    uint16_t base = UiConfiguration_LayoutAddress(EEPROM_FILTER_PATH_MAP_BASE);
+    if (base == EEPROM_FILTER_PATH_MAP_BASE && !load_default && UiConfiguration_FilterMapNotStoredYet())
+    {
+        base = EEPROM_FILTER_PATH_MAP_LEGACY_BASE;  // the memories of a configuration stored before the block moved
+    }
     for (idx = 0; idx < FILTER_MODE_MAX; idx++)
     {
         for (mem_idx = 0; mem_idx < FILTER_PATH_MEM_MAX; mem_idx++)
