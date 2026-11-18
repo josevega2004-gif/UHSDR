@@ -398,6 +398,13 @@ gcc-version:
 HOSTCC ?= gcc
 HOSTPYTHON ?= python3
 
+.PHONY: digi-bench
+digi-bench:
+	# run the digital mode host bench, see support/digi: the RTTY modem of drivers/audio/rtty.c is
+	# looped back on the host (its own transmitter feeds its own receiver through a modelled HF
+	# channel) and a synthetic weather fax broadcast is decoded by the reference demodulator
+	@$(MAKE) -C $(ROOTLOC)/support/digi test
+
 .PHONY: config-upgrade-check
 config-upgrade-check:  
 	# check which values a configuration stored by an older build receives as defaults, see support/config_upgrade

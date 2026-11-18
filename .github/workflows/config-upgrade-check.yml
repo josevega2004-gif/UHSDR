@@ -1,4 +1,4 @@
-name: Configuration storage upgrade check
+name: Host checks, configuration storage and digital modes
 
 on:
   push:
@@ -12,6 +12,10 @@ on:
       - "mchf-eclipse/drivers/audio/audio_driver.h"
       - "mchf-eclipse/Makefile"
       - "mchf-eclipse/support/config_upgrade/**"
+      - "mchf-eclipse/support/digi/**"
+      - "mchf-eclipse/drivers/audio/rtty.c"
+      - "mchf-eclipse/drivers/audio/rtty.h"
+      - "mchf-eclipse/drivers/audio/softdds/softdds.h"
       - ".github/workflows/config-upgrade-check.yml"
   pull_request:
     paths:
@@ -23,6 +27,10 @@ on:
       - "mchf-eclipse/drivers/audio/audio_driver.h"
       - "mchf-eclipse/Makefile"
       - "mchf-eclipse/support/config_upgrade/**"
+      - "mchf-eclipse/support/digi/**"
+      - "mchf-eclipse/drivers/audio/rtty.c"
+      - "mchf-eclipse/drivers/audio/rtty.h"
+      - "mchf-eclipse/drivers/audio/softdds/softdds.h"
       - ".github/workflows/config-upgrade-check.yml"
 
 jobs:
@@ -41,3 +49,15 @@ jobs:
             echo "::error::config_upgrade.c does not match the firmware sources, run make config-upgrade-check and commit the regenerated file"
             exit 1
           }
+
+  # The RTTY modem of drivers/audio/rtty.c is compiled for the host and looped back on itself, and
+  # a synthetic HF weather fax broadcast is decoded by the reference demodulator. Thresholds, not
+  # just a build: see support/digi/README.md.
+  digi-bench:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the digital mode host bench
+        working-directory: mchf-eclipse
+        run: make digi-bench
