@@ -5,6 +5,7 @@ Grades the radio's own modems on a PC. Nothing in this directory is compiled int
 ```
 make -C support/digi test     # self checks, non zero exit on regression   (also: make digi-bench)
 make -C support/digi rtty     # RTTY character error rate, modem looped back on itself
+make -C support/digi rtty-long  # the same matrix, eight copies of the message (one character 0.26 %)
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
 ./digi_bench rtty-tune     # how much tuning error the demodulator survives, in Hz and ppm
 ./digi_bench rtty-wav <file.wav> [shift] ["expected text"]
@@ -101,6 +102,15 @@ CER is measured after aligning away the lead-in junk, so it describes the modem 
 | reference error: 1 and 3 ppm on 20 m (14 and 42 Hz), 2 ppm on 10 m (56 Hz), 1 ppm on 6 m (50 Hz) | 0.0 |
 | reference error: 1 ppm on 20 m on the 450 Hz / 50 Bd signal (14 Hz) | 0.0 |
 | reference error: 56 Hz (4 ppm at 14 MHz) at 10 dB, at 7 dB and under 0.5 Hz / 6 dB QSB | 0.0 |
+
+The message is 48 characters, so one wrong character is 2.1 % and a "0.0" row only says *under
+2.1 %*. Every row prints `wrong/total` for that reason, and `make -C support/digi rtty-long` sends
+eight copies of the text - 392 characters with the spaces between them - through the same cases and
+the same limits: a clean row is then under 0.26 %, which separates a decoder that is exactly right
+from one that is quietly worse. Measured, every row that is clean at 48 characters is clean at 392,
+so the loopback has no residual errors left to find; the fast fading row is skipped there because
+its rate says how long the signal was exposed to fading (58.3 % at 48 characters, 94.9 % at 392 with
+the same decoder), not how well it decodes.
 
 That reframes "a better RTTY decoder": SNR handling is not the weak point, **dynamic range is** -
 under fast fading, and under a strong signal next door. The demodulator has no input level control
@@ -335,8 +345,8 @@ off, which is exactly the distortion the bench should be shown rather than hidin
 3. RTTY: chase the fast-fading failure with the numbers in front of us.
 4. Only then decide about FT8 RX, where the RAM question is per board rather than per mode.
 
-CI: the `digi-checks` job in `.github/workflows/config-upgrade-check.yml` runs five steps - the
+CI: the `digi-checks` job in `.github/workflows/config-upgrade-check.yml` runs six steps - the
 filter design check (`support/digi/design_rtty_filters.py`), `make digi-bench` (the self checks),
-the RTTY shift, SNR and reference error character error rate matrix, the tuning error sweep, and the
-weather fax table. `make digi-bench` is also available on its own; it is one of the five, not the
-whole job.
+the RTTY shift, SNR and reference error character error rate matrix, that matrix again with the long
+message, the tuning error sweep, and the weather fax table. `make digi-bench` is also available on
+its own; it is one of the six, not the whole job.

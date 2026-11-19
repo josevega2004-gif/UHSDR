@@ -21,7 +21,9 @@
 #define RATE            12000.0f          // Rtty_Modem_Init() pins the demodulator at 12 kHz
 #define TXRATE          48000.0f          // the modulator is fed at 4x that: one bit is
                                           // oneBitSampleCount * 4 calls to GenSample()
-#define MAX_SAMP        200000
+#define MAX_SAMP        1200000           // room for the long message mode: 424 characters, 45 Bd
+// the text every matrix row sends. rtty-long sends eight copies of it: see rtty_table()
+#define RTTY_TABLE_MSG  "DE UHSDR BENCH RTTY 12345 TEST 45 BAUD 170 SHIFT"
 
 
 // from drivers/audio/rtty.c
@@ -93,12 +95,20 @@ typedef struct
     float       rf_hz;       // the RF frequency ppm is measured at; a ppm is not a fixed number of
                              // audio Hz, it is ppm * rf_hz of them: 1 ppm is 3.5 Hz on 80 m,
                              // 14 Hz on 20 m, 28 Hz on 10 m and 50 Hz on 6 m
+    bool        short_only;  // the rate says how long the signal was on, not how well it decodes:
+                             // the long message is exposed to six times as much fading, so this
+                             // row is pinned in the short matrix and skipped in the long one
 } rtty_case_t;
 
 // The demodulator emits one or two characters of junk while it locks on, which is a property of
 // the modem but not what the CER is meant to measure, so the score is taken from the best
 // alignment of the received text against the expected one and the skipped lead-in is reported.
 static int lead_in_junk;
+// what the last score was measured on: the length of the expected text and how many of its
+// characters the decoder got wrong. One character is 2.1 % of the 48 character message, so 0.0 %
+// says "under one character wrong", not "clean".
+static int cer_chars;
+static int cer_wrong;
 
 // A band pass at freq with the constant peak gain form of the RBJ cookbook, so |H(freq)| is 1 and
 // subtracting g of its output attenuates a tone sitting exactly there by exactly g, in the audio
@@ -124,19 +134,32 @@ static void weaken_tone(float32_t* x, size_t n, float freq, float width, float d
 static float score_aligned(const char* expected, const char* got)
 {
     float best = 100.0f;
+    const size_t need = strlen(expected);
+    size_t best_wrong = need;               // a total failure counts every character, not none
     int best_skip = 0;
     for (int skip = 0; skip < 12 && got[skip]; skip++)
     {
-        float cer = Bench_Cer(expected, got + skip);
-        if (cer < best) { best = cer; best_skip = skip; }
+        size_t wrong = Bench_Levenshtein(expected, got + skip);
+        float cer = need ? 100.0f * (float) wrong / (float) need : 0.0f;
+        if (cer < best) { best = cer; best_skip = skip; best_wrong = wrong; }
     }
     lead_in_junk = best_skip;
+    cer_chars = (int) need;
+    cer_wrong = (int) best_wrong;
     return best;
 }
 
-static float rtty_run(const rtty_case_t* c, const char* msg, char* got, size_t got_sz, int* eot)
+// until_eot says how the transmission is bounded: false runs for 13.3 s, room for the 48 character
+// matrix message, and true runs until the modulator has sent its EOT, which is what the long
+// message needs because its length is a property of the caller and not of the text. It is a
+// parameter rather than something measured off msg, so a mode that sends more characters gets the
+// bound it asks for.
+static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, char* got,
+                      size_t got_sz, int* eot)
 {
-    size_t n  = 160000;                                  // received samples: 13.3 s, room for the message and EOT
+    // 13.3 s of received samples is room for the short message and its EOT; the long one is bounded
+    // by the EOT itself, with MAX_SAMP as the ceiling that keeps the buffer honest
+    size_t n = until_eot ? (size_t) MAX_SAMP : 160000;
     // a reference error slides mark and space together: the shift a transmitter sends does not
     // change, the pair just lands somewhere else in the receiver's filter bank
     const float tune = c->ppm * 1e-6f * c->rf_hz;
@@ -153,7 +176,7 @@ static float rtty_run(const rtty_case_t* c, const char* msg, char* got, size_t g
     Rtty_BenchResetDecoder();
     Rtty_Modem_Init((uint32_t) TXRATE);
     Rtty_BenchOffsetTx(tune, (uint32_t) TXRATE);
-    char feed[256];
+    char feed[640];
     snprintf(feed, sizeof(feed), "%s", msg);
     strncat(feed, "\004", sizeof(feed) - strlen(feed) - 1);
     Bench_TxFeed(feed);
@@ -162,14 +185,25 @@ static float rtty_run(const rtty_case_t* c, const char* msg, char* got, size_t g
     Rtty_Modulator_StartTX();
 
     static float32_t buf[(size_t) MAX_SAMP];
-    for (size_t i = 0; i < n; i++)
+    size_t used = 0;
+    while (used < n)
     {
         // four transmit samples per received sample, averaged: a 4:1 decimation with a filter
         // that is more than wide enough for tones below 2 kHz
         float acc = 0.0f;
         for (int k = 0; k < 4; k++) acc += (float32_t) Rtty_Modulator_GenSample() / 32768.0f;
-        buf[i] = acc * 0.25f;
+        buf[used++] = acc * 0.25f;
+        if (until_eot && Bench_TxOffRequested()) break;
     }
+    // 0.2 s of idle after the EOT: the demodulator needs the trailing tone to finish the last
+    // character it has already got the bits for
+    for (size_t tail = 0; until_eot && tail < 2400 && used < (size_t) MAX_SAMP; tail++)
+    {
+        float acc = 0.0f;
+        for (int k = 0; k < 4; k++) acc += (float32_t) Rtty_Modulator_GenSample() / 32768.0f;
+        buf[used++] = acc * 0.25f;
+    }
+    n = used;
     *eot = Bench_TxOffRequested() ? 1 : 0;
 
     // a station whose mark tone is the weak one: take the 915 Hz tone's own 20 Hz wide band out of
@@ -202,9 +236,8 @@ static float rtty_run(const rtty_case_t* c, const char* msg, char* got, size_t g
     return score_aligned(norm_baudot(msg, 0), got);
 }
 
-static int rtty_table(void)
+static int rtty_table(const char* msg, bool long_mode)
 {
-    const char* msg = "DE UHSDR BENCH RTTY 12345 TEST 45 BAUD 170 SHIFT";
     // The .max_cer field is the character error rate each case has to stay within. All but the fast
     // fading case decode without a single wrong character, so a few characters of slack leave room
     // for libm and rounding differences between build hosts while still failing on a demodulator
@@ -231,7 +264,7 @@ static int rtty_table(void)
         { .label = "qsb 10 170",   .shift = 170, .snr_db = 10.0f, .qsb_rate = 0.5f,
           .qsb_depth = 6.0f, .max_cer = 5.0f },
         { .label = "qsb fast 10",  .shift = 170, .snr_db = 10.0f, .qsb_rate = 2.0f,
-          .qsb_depth = 10.0f, .max_cer = 70.0f },
+          .qsb_depth = 10.0f, .max_cer = 70.0f, .short_only = true },
         // the real services: DWD DDH/DDK are F1B 50 Baud with +/-225 Hz (450 Hz total) on
         // 4583/7646/10100.8/11039/14467.3 kHz and +/-42.5 Hz (85 Hz) on 147.3 kHz, per the DWD
         // table on http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts.
@@ -267,14 +300,26 @@ static int rtty_table(void)
     const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
 
     printf("RTTY loopback of drivers/audio/rtty.c (per case: 45.45 or 50 Bd, 1.5 stop bits, tx 48 kHz -> rx 12 kHz)\n");
-    printf("%-16s %7s %6s  %s\n", "case", "CER %", "lead", "decoded");
+    printf("%-16s %7s %8s %6s  %s\n", "case", "CER %", "err/len", "lead", "decoded");
     char got[8192];
     int failures = 0;
     for (size_t i = 0; i < n_cases; i++)
     {
+        if (long_mode && cases[i].short_only)
+        {
+            // its rate is a function of how long the signal is on, so a longer message measures a
+            // different thing rather than measuring this one better: 94.9 % here against 58.3 %
+            // in the short matrix, with the same decoder
+            printf("%-16s skipped: how much it loses depends on how long the signal is on\n",
+                   cases[i].label);
+            continue;
+        }
         int eot = 0;
-        float cer = rtty_run(&cases[i], msg, got, sizeof(got), &eot);
-        printf("%-16s %7.1f %6d  %s%s\n", cases[i].label, cer, lead_in_junk, got,
+        float cer = rtty_run(&cases[i], msg, long_mode, got, sizeof(got), &eot);
+        char counted[32];
+        snprintf(counted, sizeof(counted), "%d/%d", cer_wrong, cer_chars);
+        printf("%-16s %7.1f %8s %6d  %.64s%s%s\n", cases[i].label, cer, counted, lead_in_junk,
+               got, strlen(got) > 64 ? " ..." : "",
                eot ? "" : "   [transmission cut off before EOT]");
         if (cer > cases[i].max_cer)
         {
@@ -371,7 +416,7 @@ static int rtty_tune(void)
         for (int k = 0; k < 3; k++)
         {
             int eot = 0;
-            cer[k] = rtty_run(&cases[k], msg, got, sizeof(got), &eot);
+            cer[k] = rtty_run(&cases[k], msg, false, got, sizeof(got), &eot);
             pinned[k] = fabsf(fabsf(offsets[i]) - floor_hz[k]) < 0.01f;
             printf(" %10.1f%s", (double) cer[k], pinned[k] ? "*" : " ");
         }
@@ -413,7 +458,7 @@ static int rtty_tune(void)
         for (int k = 0; k < 3; k++)
         {
             int eot = 0;
-            cer_weak[k] = rtty_run(&weak[k], msg, got, sizeof(got), &eot);
+            cer_weak[k] = rtty_run(&weak[k], msg, false, got, sizeof(got), &eot);
             printf(" %10.1f ", (double) cer_weak[k]);
         }
         printf("\n");
@@ -757,7 +802,7 @@ static int selftest(void)
         rtty_case_t c = { .label = "probe", .shift = 170, .snr_db = 100.0f, .max_cer = 5.0f };
         int eot = 0;
         char got[8192];
-        float cer = rtty_run(&c, "DE UHSDR BENCH TEST ONE", got, sizeof(got), &eot);
+        float cer = rtty_run(&c, "DE UHSDR BENCH TEST ONE", false, got, sizeof(got), &eot);
         check(cer == 0.0f, "clean RTTY loopback decodes with zero character errors");
         printf("     (lead-in junk before lock: %d characters)\n", lead_in_junk);
         check(strstr(got, "UHSDR") != NULL, "the call sign survives the loopback");
@@ -767,7 +812,7 @@ static int selftest(void)
         rtty_case_t c = { .label = "snr", .shift = 170, .snr_db = 15.0f, .max_cer = 5.0f };
         int eot = 0;
         char got[8192];
-        float cer = rtty_run(&c, "DE UHSDR BENCH TEST TWO", got, sizeof(got), &eot);
+        float cer = rtty_run(&c, "DE UHSDR BENCH TEST TWO", false, got, sizeof(got), &eot);
         check(cer <= 5.0f, "RTTY loopback stays under 5% CER at 15 dB SNR");
     }
     {
@@ -897,7 +942,21 @@ int main(int argc, char** argv)
 {
     const char* what = argc > 1 ? argv[1] : "test";
     if (!strcmp(what, "test")) return selftest();
-    if (!strcmp(what, "rtty")) { return rtty_table(); }
+    if (!strcmp(what, "rtty")) { return rtty_table(RTTY_TABLE_MSG, false); }
+    if (!strcmp(what, "rtty-long"))
+    {
+        // One character is 2.1 % of the 48 character message, so a 0.0 % row only says "under
+        // 2.1 %". Eight copies make 392 characters with the spaces between them: 0.0 % is then
+        // under 0.26 %, and a row that is partly wrong reports a rate instead of a count of one or
+        // two characters.
+        char msg[512];
+        msg[0] = 0;
+        for (int i = 0; i < 8 && strlen(msg) + strlen(RTTY_TABLE_MSG) + 2 < sizeof(msg); i++)
+        {
+            strncat(msg, RTTY_TABLE_MSG " ", sizeof(msg) - strlen(msg) - 1);
+        }
+        return rtty_table(msg, true);
+    }
     if (!strcmp(what, "rtty-tune")) { return rtty_tune(); }
     if (!strcmp(what, "wefax")) return wefax_table();
     if (!strcmp(what, "rtty-wav") && argc > 2)
@@ -911,6 +970,6 @@ int main(int argc, char** argv)
         if (cer >= 0.0f) printf("CER       : %.1f%% (after aligning the lead in)\n", cer);
         return 0;
     }
-    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-tune|wefax|rtty-wav <file.wav> [shift] [expected text] [45|50 baud]]\n");
+    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-tune|wefax|rtty-wav <file.wav> [shift] [expected text] [45|50 baud]]\n");
     return 2;
 }

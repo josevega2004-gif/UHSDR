@@ -3,6 +3,7 @@
 #   make test    self checks (used by CI)
 #   make rtty    RTTY shift/SNR character error rate matrix (used by CI, fails above the per case
 #                limit), firmware modem looped back on itself
+#   make rtty-long  the same matrix with eight copies of the message: 0.26 % is one character
 #   make wefax   synthetic HF weather fax broadcast through the reference demodulator
 #   make rtty-tune  how many Hz of tuning error the demodulator survives, and what that is in ppm
 #
@@ -29,6 +30,9 @@ test: digi_bench
 
 rtty: digi_bench
 	@./digi_bench rtty
+
+rtty-long: digi_bench
+	@./digi_bench rtty-long
 
 wefax: digi_bench
 	@./digi_bench wefax

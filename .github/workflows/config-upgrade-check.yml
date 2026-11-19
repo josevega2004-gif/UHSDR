@@ -88,6 +88,13 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi rtty
 
+      # the matrix above sends 48 characters, where one wrong character is 2.1 %: 0.0 % there only
+      # means "under 2.1 %". This sends the same text eight times through the same cases, so a clean
+      # row is under three tenths of a percent and a partly wrong one reports a rate worth reading.
+      - name: Run the RTTY matrix with a long message
+        working-directory: mchf-eclipse
+        run: make -C support/digi rtty-long
+
       # a received signal can be several ppm off, and the modem has no AFC: the pair simply sits
       # away from the fixed 915 Hz / 915 + shift filters. This walks it off in Hz, prints the ppm
       # each offset means on 3.5/14/28/50 MHz, and fails if the asserted window has shrunk.
