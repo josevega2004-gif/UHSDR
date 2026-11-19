@@ -1133,10 +1133,12 @@ if len(set(markers)) != len(markers):
              'map shapes. A radio holding the older shape would be read through the newer addresses.'
              % ', '.join('0x%x' % m for m in sorted({m for m in markers if markers.count(m) > 1})))
 
-def read_layout_map(name, marker):
+def read_layout_map(name, marker, lenient=False):
     """the "word owner" lines of one recorded layout, from the file next to this script"""
     path = Path(__file__).resolve().parent / name
     if not path.exists():
+        if lenient:
+            return {}          # the recorder is about to write this record, see below
         sys.exit('the layout record %s of marker 0x%X is missing. Restore it, or append the pair '
                  '(0x%X, %s) to LAYOUT_HISTORY with the map that build wrote.'
                  % (name, marker, marker, name))
@@ -1174,7 +1176,8 @@ if BASELINE_LAYOUT_FIRST_UNUSED != first_unused:
              'reported, a word stored above the baseline would be skipped without a word.'
              % (BASELINE_LAYOUT_FIRST_UNUSED, first_unused, first_unused))
 
-recorded = {marker: read_layout_map(name, marker) for marker, name in LAYOUT_HISTORY}
+recorded = {marker: read_layout_map(name, marker, lenient=RECORD_LAYOUT and marker == current_magic)
+            for marker, name in LAYOUT_HISTORY}
 current_map = dict(layout_map)
 
 # two markers for one map shape mean a bump without a map change: every radio holding the older
