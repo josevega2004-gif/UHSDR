@@ -6,16 +6,21 @@ one mutation at a time to the working tree, runs the generator against it, and c
 
   1. a stored value moves to another word      -> the check fails, the recorder refuses to record it
   2. the marker moves, the map does not        -> the check fails
-  3. the parser learns about a stored word     -> the check passes and says what to run, and
-                                                 "make layout-record" writes the record and then has
-                                                 nothing left to do
+  3. the parser learns about a stored word     -> the check passes, "make layout-record" writes the
+                                                 record, and a second run leaves it untouched
   4. the parser loses a stored word            -> the check fails
   5. the record does not parse                 -> the check fails
 
+An assertion may look at the exit code and at the data a verdict has to name: the settings that
+moved, the marker that was recorded, the record that did not parse. It may not look at the wording:
+the sentences are there to be rewritten, the verdicts are not, and a needle on a phrase turns every
+improvement of a message into a failing matrix. A traceback is never a verdict either: the generator
+reports through sys.exit(), so a crash has to fail a case that expects a failure rather than pass it.
+
 The five cases were run by hand after every change to the guard; this is that matrix, scripted.
 
-Every mutation is undone with "git checkout --" before the next case, and again in a finally that
-also runs on Ctrl-C or SIGTERM, so an interrupted run is no way to leave the tree mutated. That works
+Every mutation is undone with "git checkout --" before the next case, and again in a finally that also
+runs on Ctrl-C or SIGTERM, so an interrupted run is no way to leave the tree mutated. That works
 because the checkout is required to be clean: it refuses to start while any of the files it rewrites
 differs from HEAD, and HEAD is then the only thing those files have to match.
 """
@@ -68,6 +73,12 @@ def git(*args):
     return subprocess.run(['git', '-C', str(ROOT), *args], capture_output=True, text=True)
 
 
+def checkout_command():
+    """the command that puts the files this test rewrites back, usable from any directory"""
+    return 'git -C %s checkout -- %s' % (shlex.quote(str(ROOT)),
+                                         ' '.join(shlex.quote(path) for path in REL))
+
+
 def uncommitted():
     """what git reports for the files this test rewrites, empty when a run cannot lose work"""
     try:
@@ -87,7 +98,10 @@ def uncommitted():
 
 def restore():
     """put the files this test rewrites back the way HEAD has them"""
-    git('checkout', '--', *REL)
+    done = git('checkout', '--', *REL)
+    if done.returncode != 0:
+        sys.exit('could not put the files this test rewrites back to HEAD:\n%s\nRun\n  %s'
+                 % ((done.stderr.strip() or done.stdout.strip()), checkout_command()))
 
 
 def refuse_if_dirty():
@@ -100,19 +114,15 @@ def refuse_if_dirty():
     if not dirty:
         return
     names = [line[3:].strip().strip('"') for line in dirty]
-    # -C and absolute paths, so the two commands work from wherever the refusal is read
     sys.exit('refusing to run: this self-test rewrites these files in place and they already '
              'differ from HEAD:\n%s\n'
              'If a previous run was interrupted, put them back with\n'
-             '  git -C %s checkout -- %s\n'
+             '  %s\n'
              'Otherwise commit or stash that work first, for example\n'
              '  git -C %s stash push -u -- %s\n'
              'and run "make layout-guard-selftest" again.'
-             % ('\n'.join('  ' + line for line in dirty),
-                shlex.quote(str(ROOT)),
-                ' '.join(shlex.quote(path) for path in REL),
-                shlex.quote(str(ROOT)),
-                ' '.join(shlex.quote(name) for name in names)))
+             % ('\n'.join('  ' + line for line in dirty), checkout_command(),
+                shlex.quote(str(ROOT)), ' '.join(shlex.quote(name) for name in names)))
 
 
 # before the marker and the record are looked up, not after: a killed run can leave either of them
@@ -122,20 +132,37 @@ MARKER, RECORD_NAME, KNOWN_MARKERS = layout_record_of_this_build()
 RECORD = ROOT / 'support/config_upgrade' / RECORD_NAME
 
 
+def record_owners():
+    """the settings a record lists, the data any verdict about the map has to name"""
+    return {line.split(None, 1)[1] for line in RECORD.read_text(encoding='utf-8').splitlines()
+            if line.strip() and not line.startswith('#')}
+
+
 def run(*args):
     proc = subprocess.run([sys.executable, str(GEN), *args], cwd=str(ROOT),
                           capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def expect(name, result, want_rc, *needles):
+def expect(name, result, want_rc, *needles, any_of=()):
+    """one assertion: the exit code, and the data the verdict has to name"""
     rc, out = result
+    crashed = 'Traceback (most recent call last)' in out
     missing = [n for n in needles if n not in out]
-    if rc == want_rc and not missing:
+    unnamed = bool(any_of) and not any(n in out for n in any_of)
+    if rc == want_rc and not crashed and not missing and not unnamed:
         print('  ok    %s' % name)
         return
-    print('  FAIL  %s: exit %d, expected %d%s'
-          % (name, rc, want_rc, ', missing %s' % ', '.join(repr(m) for m in missing) if missing else ''))
+    why = []
+    if rc != want_rc:
+        why.append('exit %d, expected %d' % (rc, want_rc))
+    if crashed:
+        why.append('the generator crashed instead of reporting a verdict')
+    if missing:
+        why.append('does not name %s' % ', '.join(repr(m) for m in missing))
+    if unnamed:
+        why.append('names none of the settings the record lists')
+    print('  FAIL  %s: %s' % (name, '; '.join(why)))
     for line in out.strip().splitlines()[-6:]:
         print('        | ' + line)
     failures.append(name)
@@ -143,19 +170,22 @@ def expect(name, result, want_rc, *needles):
 
 def case_renumbering():
     """two stored values trading words: the change no radio in the field survives"""
+    # both have to be words the record lists, or the swap is a stored value landing on a word the
+    # record does not have - a disappearance, which the next case covers on its own
+    stored = record_owners()
     text = HEADER.read_text(encoding='utf-8')
-    rows = [m for m in re.finditer(r'(?m)^#define\s+(EEPROM_\w+)\s+(\d+)\s*$', text)
-            if int(m.group(2)) < 416]
-    (name_a, id_a), (name_b, id_b) = rows[0].groups(), rows[1].groups()
+    rows = [(m.group(1), m.group(2)) for m in
+            re.finditer(r'(?m)^#define\s+(EEPROM_\w+)\s+(\d+)\s*$', text)
+            if m.group(1) in stored]
+    (name_a, id_a), (name_b, id_b) = rows[0], rows[1]
+    assert id_a != id_b, 'the first two stored words are the same word, this case needs two'
     text = re.sub(r'(?m)^#define\s+%s\s+%s\s*$' % (name_a, id_a),
                   '#define %s %s' % (name_a, id_b), text)
     text = re.sub(r'(?m)^#define\s+%s\s+%s\s*$' % (name_b, id_b),
                   '#define %s %s' % (name_b, id_a), text)
     HEADER.write_text(text, encoding='utf-8')
-    expect('%s and %s trade words' % (name_a, name_b), run(), FAILS,
-           'the map of the words below', 'move the values back')
-    expect('the recorder refuses to record a renumbering', run('--record-layout'), FAILS,
-           'refusing to record the layout map')
+    expect('%s and %s trade words' % (name_a, name_b), run(), FAILS, name_a, name_b)
+    expect('the recorder refuses to record a renumbering', run('--record-layout'), FAILS, name_a)
 
 
 def case_marker_bumped():
@@ -166,10 +196,9 @@ def case_marker_bumped():
     text = HEADER.read_text(encoding='utf-8')
     new = re.sub(r'(#define\s+CONFIG_LAYOUT_VERSION_MAGIC\s+)(0x[0-9A-Fa-f]+|\d+)',
                  lambda m: m.group(1) + '0x%X' % bumped, text)
-    assert new != text
+    assert new != text, 'the marker define this case rewrites is gone, update this case'
     HEADER.write_text(new, encoding='utf-8')
-    expect('marker bumped, map untouched', run(), FAILS,
-           'exactly the one recorded for marker 0x%X' % MARKER)
+    expect('marker bumped, map untouched', run(), FAILS, '0x%X' % MARKER)
 
 
 def case_parser_addition():
@@ -179,12 +208,13 @@ def case_parser_addition():
     word, owner = rows[-1].split(None, 1)
     RECORD.write_text(text.replace(rows[-1] + '\n', ''), encoding='utf-8')
 
-    expect('a stored word the record does not know', run(), 0,
-           'make layout-record', '%s %s' % (word, owner))
-    expect('the recorder writes it down', run('--record-layout'), 0, 'now records')
-    # the recorder only says this when the file it would write is already there, word for word
-    expect('the word is back and the recorder has nothing left to do', run('--record-layout'), 0,
-           'nothing to do')
+    expect('a stored word the record does not know', run(), 0, '%s %s' % (word, owner))
+    expect('the recorder writes it down', run('--record-layout'), 0, RECORD_NAME)
+    written = RECORD.read_bytes()
+    expect('the recorder runs again without complaining', run('--record-layout'), 0)
+    if RECORD.read_bytes() != written:
+        print('  FAIL  the recorder rewrote the record although it already matched')
+        failures.append('record left untouched')
 
 
 def case_parser_regression():
@@ -195,16 +225,17 @@ def case_parser_regression():
                 "        elif ch == ')':\n"
                 "            depth -= 1\n"
                 "        if ch == ',' and depth == 0:\n")
-    assert source.count(brackets) == 1
+    assert source.count(brackets) == 1, \
+        'the parser fragment this case removes is gone, update this case'
     GEN.write_text(source.replace(brackets, "        if ch == ',':\n"), encoding='utf-8')
-    expect('the parser drops a word the record has', run(), FAILS, 'nothing is stored there any more')
+    expect('the parser drops a word the record has', run(), FAILS, any_of=record_owners())
 
 
 def case_broken_record():
     """a record that does not parse compares nothing, which is worse than saying nothing"""
     RECORD.write_text(RECORD.read_text(encoding='utf-8') + 'this line is not a word owner line\n',
                       encoding='utf-8')
-    expect('a record with a line it cannot read', run(), FAILS, 'is not a "word owner" line')
+    expect('a record with a line it cannot read', run(), FAILS, RECORD_NAME)
 
 
 CASES = (
@@ -223,7 +254,11 @@ def main():
     try:
         for title, case in CASES:
             print(title)
-            case()
+            try:
+                case()
+            except Exception as err:        # a case that breaks is a failure, not a traceback
+                print('  FAIL  the case itself raised: %s' % err)
+                failures.append(title)
             restore()
     finally:
         restore()
