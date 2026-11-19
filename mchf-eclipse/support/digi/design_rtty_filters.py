@@ -44,9 +44,6 @@ GAIN = re.compile(r'\.gain\s*=\s*([-+0-9.eE]+)')
 COEFFS = re.compile(r'\.coeffs\s*=\s*\{([^}]*)\}')
 FREQ = re.compile(r'\.freq\s*=\s*(\d+)')
 
-# the stored block has to be the one design() produces, character for character: a tolerance would
-# let the table drift away from its design in small steps that each look harmless
-
 
 def _mul(p, q):
     out = [0.0] * (len(p) + len(q) - 1)
@@ -125,22 +122,23 @@ def main(argv):
 
     for name, label, gain, coeffs, edge_lo, edge_hi, stored in found:
         want_coeffs, want_gain = design(edge_lo, edge_hi)
-        deviation = max(abs(a - b) for a, b in zip(coeffs, want_coeffs))
         centre = 0.5 * (edge_lo + edge_hi)
-        expected = block(name, centre, want_gain, want_coeffs, edge_lo, edge_hi).rstrip('\n')
 
         notes = []
-        if stored != expected:
+        if len(coeffs) != 4:
+            # block() and the comparison both need four taps, so say this instead of indexing
+            notes.append('%d coefficients, a fourth order denominator has 4' % len(coeffs))
+        elif stored != block(name, centre, want_gain, want_coeffs, edge_lo,
+                             edge_hi).rstrip('\n'):
             notes.append('not the block the design produces (largest coefficient difference %.1e, '
-                         'gain %.9e against %.9e)' % (deviation, gain, want_gain))
+                         'gain %.9e against %.9e)'
+                         % (max(abs(a - b) for a, b in zip(coeffs, want_coeffs)), gain, want_gain))
         if label != centre:
             notes.append('label %d Hz but the documented band %d..%d Hz has its centre at %d'
                          % (label, edge_lo, edge_hi, centre))
-        if len(coeffs) != 4:
-            notes.append('%d coefficients, a fourth order denominator has 4' % len(coeffs))
 
         if notes:
-            failures.append((name, notes, design(edge_lo, edge_hi)))
+            failures.append((name, notes))
 
         if emit:
             # paste output only, the status lines would end up in the comment of rtty.c
@@ -156,7 +154,7 @@ def main(argv):
         if failures:
             print('\n%d filter(s) in rtty.c do not match their design, the blocks above are the ones '
                   'to paste:\n    %s'
-                  % (len(failures), '\n    '.join('%s: %s' % (n, '; '.join(x)) for n, x, _ in failures)),
+                  % (len(failures), '\n    '.join('%s: %s' % (n, '; '.join(x)) for n, x in failures)),
                   file=sys.stderr)
         return 1 if failures else 0
 

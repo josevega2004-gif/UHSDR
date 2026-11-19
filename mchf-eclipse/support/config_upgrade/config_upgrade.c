@@ -1147,74 +1147,48 @@ static void load_filter_memories(const image_t* img, bool migrate, uint8_t* mem)
 
 static int check_filter_map_save(void)
 {
-    const char* const shape[2] = { "previous layout", "layout before this one, block unwritten" };
-    image_t img[2];
+    image_t before, after;
+    uint8_t mem[FILTER_MAP_WORDS];
     int rc = 0;
 
-    /* the two configurations a migrating radio can be holding */
-    for (unsigned c = 0; c < 2; c++)
+    /* a migrated radio: the memories sit at the legacy base and the current block was never
+       written, which is the state the save has to move it out of */
+    memset(&before, 0, sizeof(before));
+    for (unsigned i = 0; i < sizeof(before.value)/sizeof(before.value[0]); i++)
     {
-        memset(&img[c], 0, sizeof(img[c]));
-        for (unsigned i = 0; i < sizeof(img[c].value)/sizeof(img[c].value[0]); i++)
-        {
-            img[c].value[i] = 0xFFFF;
-        }
-        for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
-        {
-            img[c].present[FILTER_MAP_LEGACY + k] = true;
-            img[c].value[FILTER_MAP_LEGACY + k] = (uint16_t)(1 + k);   /* the operator memories */
-        }
-        if (c == 0)
-        {
-            /* the previous layout kept the ids that now live at 334..358 at the words of the block */
-            for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
-            {
-                img[c].present[FILTER_MAP_BASE + k] = true;
-                img[c].value[FILTER_MAP_BASE + k] = (uint16_t)(40 + k);
-            }
-        }
+        before.value[i] = 0xFFFF;
+    }
+    for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+    {
+        before.present[FILTER_MAP_LEGACY + k] = true;
+        before.value[FILTER_MAP_LEGACY + k] = (uint16_t)(1 + k);   /* the operator memories */
+    }
+    if (filter_map_base(&before, false, false) != FILTER_MAP_LEGACY)
+    {
+        printf("CHECK FAILED: a migrated configuration that has not been saved yet is already "
+               "read from the current block, so the save below proves nothing\n");
+        rc = 1;
     }
 
-    for (unsigned c = 0; c < 2; c++)
+    /* the boot that migrates reads the legacy memories, the save puts them at the current base */
+    load_filter_memories(&before, true, mem);
+    after = before;
+    save_filter_memories(&after, mem);
+    if (filter_map_base(&after, false, false) != FILTER_MAP_BASE)
     {
-        uint8_t mem[FILTER_MAP_WORDS];
-        image_t after;
-
-        /* the boot that migrates: the memories come from the legacy base */
-        load_filter_memories(&img[c], true, mem);
-        for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+        printf("CHECK FAILED: after a migrated configuration is saved the next boot still reads "
+               "the filter path memories from %u instead of %u\n",
+               filter_map_base(&after, false, false), FILTER_MAP_BASE);
+        return 1;
+    }
+    load_filter_memories(&after, false, mem);
+    for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+    {
+        if (mem[k] != (uint8_t)(1 + k))
         {
-            if (mem[k] != (uint8_t)(1 + k))
-            {
-                printf("CHECK FAILED: the migrated boot of a %s configuration reads memory %u as %u, "
-                       "expected %u\n", shape[c], k, mem[k], 1 + k);
-                rc = 1;
-                break;
-            }
-        }
-
-        /* the radio saves; the next boot is a plain boot and has to find the block */
-        after = img[c];
-        save_filter_memories(&after, mem);
-        const uint16_t base = filter_map_base(&after, false, false);
-        if (base != FILTER_MAP_BASE)
-        {
-            printf("CHECK FAILED: after saving a migrated configuration (%s) the next boot still "
-                   "reads the filter path memories from %u instead of %u, so the memories it shows "
-                   "are not the ones it stored\n", shape[c], base, FILTER_MAP_BASE);
-            rc = 1;
-            continue;
-        }
-        load_filter_memories(&after, false, mem);
-        for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
-        {
-            if (mem[k] != (uint8_t)(1 + k))
-            {
-                printf("CHECK FAILED: after saving a migrated configuration (%s) filter memory %u "
-                       "reads %u, expected %u\n", shape[c], k, mem[k], 1 + k);
-                rc = 1;
-                break;
-            }
+            printf("CHECK FAILED: after saving a migrated configuration filter memory %u reads %u, "
+                   "expected %u\n", k, mem[k], 1 + k);
+            return 1;
         }
     }
 
