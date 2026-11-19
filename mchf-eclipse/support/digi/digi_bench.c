@@ -451,24 +451,73 @@ static int rtty_tune(void)
 /* ------------------------------------------------------------------ *
  *  weather fax
  * ------------------------------------------------------------------ */
-static void wefax_table(void)
+// one synthesised broadcast plus what it has to score. The correlation window is a range rather
+// than a floor because the bands differ: eight of the nine recover the picture upright at
+// 0.972..0.975, while the swapped polarity case is inverted by design and lands at -0.945.
+typedef struct
 {
-    static const wefax_cfg_t cases[] =
+    const char* name;
+    float    snr_db;
+    float    qsb_rate_hz;
+    float    qsb_depth_db;
+    float    skew_ppm;
+    bool     invert;
+    bool     steer_right;
+    uint32_t rows;
+    float    corr_min;
+    float    corr_max;
+    float    ppm;             // every tone moved by ppm * rf_hz, the same rigid reference error the
+    float    rf_hz;           // RTTY rows carry: 14 Hz per ppm on 20 m, 50 Hz on 6 m
+    float    mean_min;        // the decoded grey mean the case has to land in; equal bounds = not
+    float    mean_max;        // pinned, which is every row whose tones are where the bins are
+} wefax_case_t;
+
+static int wefax_table(void)
+{
+    // .corr_min and .corr_max are the correlation window each case has to land in. 0.95 leaves
+    // room for libm and rounding differences between build hosts but not for a demodulator change
+    // that costs picture; the swapped case says the polarity is inverted, which is the behaviour the
+    // printout below documents, so a fix that silently flips it is a change and has to say so here.
+    //
+    // .mean_min and .mean_max are the decoded grey mean, and only the offset rows pin it: Pearson
+    // divides the constant grey bias an offset causes out of the correlation, so those rows would
+    // pass at any offset at all if the correlation were all they had to score. Their windows sit
+    // around the level each one really decodes (199.5 with the tones where the bins are, and the ppm
+    // numbers in the printout for the rest), which is twice as far from the clean level as the
+    // measured spread between hosts, and far inside what a 250 Hz error decodes to (183.4).
+    static const wefax_case_t cases[] =
     {
-        { "clean",              100.0f, 0,    0,    0,    false, false, 12 },
-        { "snr 20",              20.0f, 0,    0,    0,    false, false, 12 },
-        { "snr 12",              12.0f, 0,    0,    0,    false, false, 12 },
-        { "snr 12 slow qsb",     12.0f, 0.4f, 6.0f, 0,   false, false, 12 },
-        { "snr 12 fast qsb",     12.0f, 2.0f, 10.0f, 0,  false, false, 12 },
-        { "snr 12 + skew",       12.0f, 0,    0,    20000, false, false, 12 },
-        { "snr 12 black/white swapped", 12.0f, 0,    0,   0,    true,  false, 12 },
-        { "snr 12 reversed scan",12.0f, 0,    0,   0,    false, true,  12 },
-        { "snr 8 qsb skew",       8.0f,   0.4f, 6.0f, 3000, false, false, 12 },
+        { .name = "clean", .snr_db = 100.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
+        { .name = "snr 20", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
+        { .name = "snr 12", .snr_db = 12.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
+        { .name = "snr 12 fast qsb", .snr_db = 12.0f, .qsb_rate_hz = 2.0f, .qsb_depth_db = 10.0f,
+          .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
+        { .name = "snr 12 + skew", .snr_db = 12.0f, .skew_ppm = 20000, .rows = 12,
+          .corr_min = 0.95f, .corr_max = 1.00f },
+        { .name = "snr 12 black/white swapped", .snr_db = 12.0f, .invert = true, .rows = 12,
+          .corr_min = -1.00f, .corr_max = -0.90f },
+        { .name = "snr 12 reversed scan", .snr_db = 12.0f, .steer_right = true, .rows = 12,
+          .corr_min = 0.95f, .corr_max = 1.00f },
+        { .name = "snr 8 qsb skew", .snr_db = 8.0f, .qsb_rate_hz = 0.4f, .qsb_depth_db = 6.0f,
+          .skew_ppm = 3000, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
+        // the same rigid reference error the RTTY rows carry: every tone of the emission moves by
+        // ppm * rf_hz while the demodulator's bins stay at 1857/1500/2300 Hz. The sync tip is the
+        // narrow one, so a tuning error attacks the line capture before it attacks the picture, and
+        // the grey level it decodes to is what these rows pin.
+        { .name = "20m 1ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f,
+          .ppm = 1.0f, .rf_hz = 14e6f, .mean_min = 200.5f, .mean_max = 203.5f },
+        { .name = "20m 5ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f,
+          .ppm = 5.0f, .rf_hz = 14e6f, .mean_min = 206.0f, .mean_max = 210.0f },
+        { .name = "10m 2ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f,
+          .ppm = 2.0f, .rf_hz = 28e6f, .mean_min = 205.0f, .mean_max = 209.0f },
+        { .name = "50m 1ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f,
+          .ppm = 1.0f, .rf_hz = 50e6f, .mean_min = 204.5f, .mean_max = 208.0f },
     };
     size_t n = sizeof(cases) / sizeof(cases[0]);
+    int failures = 0;
 
     printf("HF weather fax, 120 lines/min at 12 kHz, sync 1857 Hz, black 1500 / white 2300 Hz\n");
-    printf("%-28s %6s %8s %8s %8s\n", "case", "lines", "skewRMS", "corr", "mean");
+    printf("%-28s %6s %8s %8s %8s %7s\n", "case", "lines", "skewRMS", "corr", "mean", "off Hz");
     for (size_t i = 0; i < n; i++)
     {
         size_t samples = (size_t) cases[i].rows * WEFAX_SAMPLES_PER_LINE;
@@ -476,8 +525,15 @@ static void wefax_table(void)
         uint8_t* truth = malloc((size_t) cases[i].rows * WEFAX_IMG_COLS);
         uint8_t* grey = malloc((size_t) cases[i].rows * WEFAX_IMG_COLS);
         wefax_result_t res;
+        const float tune_hz = cases[i].ppm * 1e-6f * cases[i].rf_hz;
+        wefax_cfg_t cfg = { .name = cases[i].name, .snr_db = cases[i].snr_db,
+                            .qsb_rate_hz = cases[i].qsb_rate_hz,
+                            .qsb_depth_db = cases[i].qsb_depth_db,
+                            .skew_ppm = cases[i].skew_ppm, .invert = cases[i].invert,
+                            .steer_right = cases[i].steer_right, .rows = cases[i].rows,
+                            .tune_hz = tune_hz };
 
-        Bench_WefaxGenerate(x, truth, &cases[i]);
+        Bench_WefaxGenerate(x, truth, &cfg);
         if (cases[i].snr_db < 90.0f)
         {
             Bench_RngSeed(0xF00Du);
@@ -490,8 +546,28 @@ static void wefax_table(void)
         float corr = pearson(truth, grey, cmp);
         res.grey_corr = corr;
 
-        printf("%-28s %3u/%-2u %8.1f %8.3f %8.1f\n", cases[i].name,
-               res.lines_found, res.lines_expected, res.row_rms_error, corr, res.mean_level);
+        printf("%-28s %3u/%-2u %8.1f %8.3f %8.1f %7.1f\n", cases[i].name,
+               res.lines_found, res.lines_expected, res.row_rms_error, corr, res.mean_level,
+               (double) tune_hz);
+        if (res.lines_found < cases[i].rows)
+        {
+            printf("FAIL  %-28s found %u of the %u lines it transmitted\n",
+                   cases[i].name, res.lines_found, cases[i].rows);
+            failures++;
+        }
+        if (corr < cases[i].corr_min || corr > cases[i].corr_max)
+        {
+            printf("FAIL  %-28s correlation %.3f is outside %.2f..%.2f for this case\n",
+                   cases[i].name, corr, cases[i].corr_min, cases[i].corr_max);
+            failures++;
+        }
+        if (cases[i].mean_max > cases[i].mean_min &&
+            (res.mean_level < cases[i].mean_min || res.mean_level > cases[i].mean_max))
+        {
+            printf("FAIL  %-28s decoded grey mean %.1f is outside %.1f..%.1f for this case\n",
+                   cases[i].name, res.mean_level, cases[i].mean_min, cases[i].mean_max);
+            failures++;
+        }
 
         if (i == 1)                     // leave one readable broadcast behind for inspection
         {
@@ -501,12 +577,24 @@ static void wefax_table(void)
         }
         free(x); free(truth); free(grey);
     }
-    printf("\nblack/white swapped gives a correlation of about -0.95: the demodulator recovers the\n"
+    printf("\nThe offset rows move every tone of the emission while the bins stay where they are. Their\n"
+           "correlation barely changes because Pearson removes the constant grey bias an offset\n"
+           "causes, so those rows pin the mean and not only the correlation: 199.5 clean against\n"
+           "208.2 at 70 Hz, about 3 %% of the 800 Hz tone spacing, and 183.4 at 250 Hz off (5 ppm on\n"
+           "6 m), where two of twelve sync tips are no longer found and the picture is gone at\n"
+           "correlation 0.339. That case is not a row here because it would have to pass before it\n"
+           "could be pinned, but every pinned window is far inside it.\n"
+           "\nBlack/white swapped gives a correlation of about -0.95: the demodulator recovers the\n"
            "picture but with the polarity upside down, which is why a station parameter is needed.\n"
            "The reversed scan case scores normally by construction: the reference decoder has no\n"
            "phasing reference, so it reproduces whatever was scanned, which is exactly what a real\n"
            "operator fixes with the steer control.\n");
     printf("files: wefax_snr20.wav (listen), wefax_truth.pgm, wefax_decoded.pgm\n");
+    if (failures == 0)
+    {
+        printf("\nall %zu cases recovered every line inside their correlation window\n", n);
+    }
+    return failures ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -683,7 +771,7 @@ static int selftest(void)
         check(cer <= 5.0f, "RTTY loopback stays under 5% CER at 15 dB SNR");
     }
     {
-        wefax_cfg_t cfg = { "selftest", 20.0f, 0, 0, 0, false, false, 12 };
+        wefax_cfg_t cfg = { .name = "selftest", .snr_db = 20.0f, .rows = 12 };
         size_t samples = (size_t) cfg.rows * WEFAX_SAMPLES_PER_LINE;
         float32_t* x = malloc(samples * sizeof(float32_t));
         uint8_t* truth = malloc((size_t) cfg.rows * WEFAX_IMG_COLS);
@@ -811,7 +899,7 @@ int main(int argc, char** argv)
     if (!strcmp(what, "test")) return selftest();
     if (!strcmp(what, "rtty")) { return rtty_table(); }
     if (!strcmp(what, "rtty-tune")) { return rtty_tune(); }
-    if (!strcmp(what, "wefax")) { wefax_table(); return 0; }
+    if (!strcmp(what, "wefax")) return wefax_table();
     if (!strcmp(what, "rtty-wav") && argc > 2)
     {
         char got[8192];

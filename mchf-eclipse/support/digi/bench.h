@@ -45,6 +45,8 @@ typedef struct
     bool     invert;          // black and white tones swapped (some stations do)
     bool     steer_right;     // scan direction reversed
     uint32_t rows;
+    float    tune_hz;         // every tone moved by this much: a tuning or reference error, which
+                              // is ppm * rf_hz in Hz (14 Hz per ppm on 20 m, 50 on 6 m)
 } wefax_cfg_t;
 
 // synthesise one broadcast: samples (WEFAX_SAMPLES_PER_LINE * rows long) plus the ground truth

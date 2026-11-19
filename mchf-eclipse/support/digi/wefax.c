@@ -62,6 +62,10 @@ static void tone(float32_t* out, size_t from, size_t len, float freq, float amp,
 void Bench_WefaxGenerate(float32_t* out, uint8_t* truth, const wefax_cfg_t* cfg)
 {
     size_t total = (size_t) cfg->rows * WEFAX_SAMPLES_PER_LINE;
+    // a reference or tuning error moves every tone of the emission by the same number of Hz:
+    // the sync tip and both picture tones. The demodulator below keeps its bins at the nominal
+    // frequencies, which is the point - it has no more frequency tracking than the RTTY modem.
+    const float tune = cfg->tune_hz;
     memset(out, 0, total * sizeof(float32_t));
 
     Bench_RngSeed(0x5eed1234u);
@@ -75,7 +79,7 @@ void Bench_WefaxGenerate(float32_t* out, uint8_t* truth, const wefax_cfg_t* cfg)
         size_t base = (size_t) row * WEFAX_SAMPLES_PER_LINE + (size_t) (skew > 0 ? skew : 0);
         if (base + WEFAX_SAMPLES_PER_LINE > total) base = total > WEFAX_SAMPLES_PER_LINE ? total - WEFAX_SAMPLES_PER_LINE : 0;
 
-        tone(out, base, WEFAX_SYNC_SAMPLES, WEFAX_F_SYNC, 0.9f, total);
+        tone(out, base, WEFAX_SYNC_SAMPLES, WEFAX_F_SYNC + tune, 0.9f, total);
 
         for (uint32_t col = 0; col < WEFAX_IMG_COLS; col++)
         {
@@ -83,10 +87,10 @@ void Bench_WefaxGenerate(float32_t* out, uint8_t* truth, const wefax_cfg_t* cfg)
             uint8_t grey = chart_grey(row, src, cfg->rows);
             if (truth) truth[row * WEFAX_IMG_COLS + col] = grey;
             size_t at = base + WEFAX_SYNC_SAMPLES + (size_t) col * WEFAX_PIX_SAMPLES;
-            tone(out, at, WEFAX_PIX_SAMPLES, grey_to_freq(grey, cfg->invert), 0.75f, total);
+            tone(out, at, WEFAX_PIX_SAMPLES, grey_to_freq(grey, cfg->invert) + tune, 0.75f, total);
         }
         tone(out, base + WEFAX_SYNC_SAMPLES + (size_t) WEFAX_IMG_COLS * WEFAX_PIX_SAMPLES,
-             WEFAX_GAP_SAMPLES, grey_to_freq(255.0f, cfg->invert), 0.75f, total);
+             WEFAX_GAP_SAMPLES, grey_to_freq(255.0f, cfg->invert) + tune, 0.75f, total);
     }
 }
 

@@ -189,13 +189,28 @@ pixel slot, so no filter bank has to be tuned; per sample that is a handful of m
 | case | lines | chart correlation |
 |---|---|---|
 | clean / 20 dB / 12 dB | 12/12 | 0.975 / 0.974 / 0.973 |
-| 12 dB + 0.4 Hz QSB, + 2 Hz QSB, + skew | 12/12 | 0.973 |
+| 12 dB + 2 Hz QSB, + skew | 12/12 | 0.973 |
 | 8 dB with QSB and skew | 12/12 | 0.972 |
 | black and white swapped | 12/12 | **-0.945** |
+| 1 ppm on 20 m (14 Hz off), 5 ppm on 20 m (70 Hz) | 12/12 | 0.975 / 0.976 |
+| 2 ppm on 10 m (56 Hz), 1 ppm on 6 m (50 Hz) | 12/12 | 0.976 |
 
 The negative correlation is the useful number: the picture is recovered perfectly with the polarity
 upside down, which is why a station parameter (or an automatic decision) is required before this is
 usable on air.
+
+A frequency error is applied to the fax generator the same way it is to the RTTY pair: every tone
+of the emission moves by ppm x band while the demodulator's bins stay at 1857/1500/2300 Hz. Unlike
+RTTY, the correlation barely reacts - Pearson removes the constant grey bias the offset causes, so
+a band that is 5 ppm off still correlates at 0.976. The mean column is where it shows: 199.5 clean
+against 208.2 at 70 Hz, about 3 % of the 800 Hz tone spacing. Correlation alone would therefore pass
+those rows at every offset, and the wrong reason is worse than no assertion: the four ppm rows pin
+the decoded grey mean as well (200.5..203.5 at 14 Hz, 205..209 at 56 Hz, 204.5..208 at 50 Hz,
+206..210 at 70 Hz), so an offset that stopped moving the tone, or that moved it much further,
+fails here. At 250 Hz off (5 ppm on 6 m) two of twelve sync tips are no longer found and the picture
+is gone at mean 183.4, correlation 0.339, which is not a row because it would have to pass before
+it could be pinned. The fax tones are 800 Hz apart and the sync window is 5 ms, so it weathers a
+few ppm on HF and shares the 6 m limit with RTTY.
 
 ### Known gaps, all of them measured
 
@@ -320,4 +335,8 @@ off, which is exactly the distortion the bench should be shown rather than hidin
 3. RTTY: chase the fast-fading failure with the numbers in front of us.
 4. Only then decide about FT8 RX, where the RAM question is per board rather than per mode.
 
-CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs `make digi-bench`.
+CI: the `digi-checks` job in `.github/workflows/config-upgrade-check.yml` runs five steps - the
+filter design check (`support/digi/design_rtty_filters.py`), `make digi-bench` (the self checks),
+the RTTY shift, SNR and reference error character error rate matrix, the tuning error sweep, and the
+weather fax table. `make digi-bench` is also available on its own; it is one of the five, not the
+whole job.
