@@ -4,6 +4,7 @@
 #   make rtty    RTTY shift/SNR character error rate matrix (used by CI, fails above the per case
 #                limit), firmware modem looped back on itself
 #   make wefax   synthetic HF weather fax broadcast through the reference demodulator
+#   make rtty-tune  how many Hz of tuning error the demodulator survives, and what that is in ppm
 #
 # drivers/audio/rtty.c is compiled from the real source. The shim/ directory replaces only the
 # headers that modem reaches outside itself, so it compiles against its own rtty.h.
@@ -31,6 +32,9 @@ rtty: digi_bench
 
 wefax: digi_bench
 	@./digi_bench wefax
+
+rtty-tune: digi_bench
+	@./digi_bench rtty-tune
 
 clean:
 	rm -f digi_bench *.wav *.pgm

@@ -87,3 +87,10 @@ jobs:
       - name: Run the RTTY shift and SNR character error rate matrix
         working-directory: mchf-eclipse
         run: make -C support/digi rtty
+
+      # a received signal can be several ppm off, and the modem has no AFC: the pair simply sits
+      # away from the fixed 915 Hz / 915 + shift filters. This walks it off in Hz, prints the ppm
+      # each offset means on 3.5/14/28/50 MHz, and fails if the asserted window has shrunk.
+      - name: Run the RTTY tuning error sweep
+        working-directory: mchf-eclipse
+        run: make -C support/digi rtty-tune

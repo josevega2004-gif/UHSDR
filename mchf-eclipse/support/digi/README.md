@@ -6,6 +6,7 @@ Grades the radio's own modems on a PC. Nothing in this directory is compiled int
 make -C support/digi test     # self checks, non zero exit on regression   (also: make digi-bench)
 make -C support/digi rtty     # RTTY character error rate, modem looped back on itself
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
+./digi_bench rtty-tune     # how much tuning error the demodulator survives, in Hz and ppm
 ./digi_bench rtty-wav <file.wav> [shift] ["expected text"]
                             # decode a recorded file with the firmware demodulator
 ```
@@ -63,9 +64,17 @@ the size of the CW lift, measured rather than guessed.
   |---|---|---|---|---|---|---|
   | live decode | fails | fails | fails | full text | **full text** | fails |
 
-  So on air the space filter's selectivity is doing real work that a two-tone synthetic signal never
-  asks of it. Consequence for this bench: the loopback CER cases **cannot** grade the shift setting,
-  and a live capture does need the tones placed on the modem's own filter frequencies.
+  So on air the space filter's selectivity is doing real work that an equal two-tone synthetic
+  signal never asks of it: with both tones at full level the 915 Hz filter keeps the right polarity
+  whatever the space filter does, so those rows decode at 0.0 % even when the receiver is given the
+  850 Hz space filter for a 170 Hz signal. One row is built to remove that. `weak mark 170` sends the
+  mark tone 30 dB below the space tone - past the 22.9 dB by which the mark filter rejects the space
+  tone - so the mark channel is inverted (it reads the space tone 22.9 dB down as louder than the
+  mark tone 30 dB down) and the decision has to come from the space filter. That row decodes at
+  0.0 % with the 170 Hz filter and at 100 % with the 850 Hz one, so it is the only loopback case that
+  grades the shift setting. Weakening the **space** tone instead grades nothing: measured, it still
+  decodes at 0.0 % with every space filter, 850 Hz included, because the mark channel keeps the
+  right polarity. A live capture, of course, still needs the tones on the modem's own frequencies.
 * Inside the ATC branch the variable names are the opposite of what they hold. `mark_mag`/`mark_env`
   carry the **space** filter output and `space_mag`/`space_env` the **915 Hz mark** output, because
   the block starts by exchanging them to cancel the naming convention of the FlDigi formula it was
@@ -84,13 +93,91 @@ CER is measured after aligning away the lead-in junk, so it describes the modem 
 | case | CER % |
 |---|---|
 | clean, 170 / 425 / 850 Hz shift | 0.0 |
-| AWGN 20, 15, 12, 10, 7 dB | 0.0 |
+| AWGN 20, 10, 7 dB | 0.0 |
 | QSB 0.4 Hz, 6 dB deep | 0.0 |
-| QSB 2 Hz, 10 dB deep | **50.0** (loses characters mid message) |
+| QSB 2 Hz, 10 dB deep | **58.3** (loses most of the message) |
+| weak mark, 30 dB below the space tone | 0.0 with the 170 Hz space filter, **100.0** with the 850 Hz one |
+| weak mark + carrier 300 Hz above the space tone at +20 dB | 0.0 (**100.0** with the 850 Hz space filter, **18.8** with the carrier at +30 dB) |
+| reference error: 1 and 3 ppm on 20 m (14 and 42 Hz), 2 ppm on 10 m (56 Hz), 1 ppm on 6 m (50 Hz) | 0.0 |
+| reference error: 1 ppm on 20 m on the 450 Hz / 50 Bd signal (14 Hz) | 0.0 |
+| reference error: 56 Hz (4 ppm at 14 MHz) at 10 dB, at 7 dB and under 0.5 Hz / 6 dB QSB | 0.0 |
 
-That reframes "a better RTTY decoder": SNR handling is not the weak point, **dynamic range under
-fast fading is**. The demodulator has no input level control of its own, so it inherits whatever
-the audio AGC is doing, and the bench reproduces the failure without a radio or an antenna.
+That reframes "a better RTTY decoder": SNR handling is not the weak point, **dynamic range is** -
+under fast fading, and under a strong signal next door. The demodulator has no input level control
+of its own, so it inherits whatever the audio AGC is doing, and the bench reproduces both failures
+without a radio or an antenna. The carrier row shows the second cliff directly: an unmodulated
+carrier 300 Hz above the space tone is harmless at +20 dB over the wanted signal and costs every
+character at +30 dB, with the weak mark tone in the same row holding the bits on the space filter
+so the cliff is the filter's rejection and not the mark channel's.
+
+## Tuning error, and what our own reference is worth
+
+The demodulator has **no automatic frequency control**. `bpfMarkConfig` is always the 915 Hz
+filter and the space filter is chosen from the shift setting alone; nothing looks at where the
+tones actually are. A frequency error is therefore not pulled in - it walks both tones away from
+the filters and only the operator's tuning brings them back. Both tones move by the same number of
+Hz, so the shift is unchanged: this is a tuning error, not a shift error.
+
+A ppm only becomes an audio figure once it is multiplied by the RF frequency:
+
+| ppm | 3.5 MHz | 14 MHz | 28 MHz | 50 MHz |
+|---|---|---|---|---|
+| 1 | 3.5 Hz | 14 Hz | 28 Hz | 50 Hz |
+| 5 | 17.5 Hz | 70 Hz | 140 Hz | 250 Hz |
+
+`make -C support/digi rtty-tune` walks the pair off the filters and prints the curve. Three offsets
+are asserted - 50 Hz with the 170 Hz shift and equal tones, 28 Hz with the mark tone 30 dB down,
+and 100 Hz with the 450 Hz shift at 50 Bd - because those sit far enough inside the measured edges
+that a libm difference between build hosts cannot move them. Measured at 20 dB SNR, CER % for a
+negative / positive error:
+
+| error | 170 Hz shift | 170 Hz, mark 30 dB down | 450 Hz / 50 Bd |
+|---|---|---|---|
+| 14 Hz | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 |
+| 50 Hz | 0.0 / 0.0 | **14.6** / 0.0 | 0.0 / 0.0 |
+| 70 Hz | 0.0 / 0.0 | **97.9** / 0.0 | 0.0 / 0.0 |
+| 85 Hz | **93.8 / 93.8** | **97.9 / 100** | 0.0 / 0.0 |
+| 100 Hz | **87.5 / 87.5** | **87.5 / 97.9** | 0.0 / 0.0 |
+| 140 Hz | 87.5 / 87.5 | 87.5 / 95.8 | **100 / 97.9** |
+
+The window is between 70 and 85 Hz with equal tones (41..50 % of the shift) and closes at 28 Hz
+(16 %) once the mark channel is out of the picture, and it ends in a cliff, not a slope. The weak
+mark column is not symmetric either: the text holds at +70 Hz and is gone at -70 Hz. The bench
+records that asymmetry; it does not yet explain it.
+
+Noise does not move that window. The same walk at 10 dB, at 7 dB and on top of 0.5 Hz / 6 dB QSB
+decodes at 0.0 % for every offset up to 70 Hz, so the tolerance is set by the filters and not by
+the SNR; `rtty-tune` prints that table and fails if the 56 Hz point stops being clean.
+
+In practice: 1 ppm on 20 m (14 Hz) is comfortable; 5 ppm on 20 m (70 Hz) is at the edge; 2.5 ppm
+on 10 m (70 Hz) is at the edge and 3 ppm is gone; on 6 m 1 ppm is 50 Hz, which still decodes with
+equal tones while the weak mark row is already at 10 % on the low side, and **2 ppm on 6 m
+(100 Hz) is past the end of the window entirely**. A calibrated radio contributes about +-10 Hz at
+14 MHz, so the budget is mostly the other station's error - but two radios each 0.7 ppm off put
+70 Hz on the pair at 6 m, which is the whole window. Tuning RTTY on 6 m therefore needs both ends
+within about 1.4 ppm of the filters, which is the same order as the references themselves.
+
+Our own side, measured rather than assumed: **warm**, with the software TCXO on and the radio nulled
+against WWV, the residual is about **+-10 Hz at 14 MHz** (+-0.7 ppm), so roughly 20 Hz on 10 m and
+36 Hz on 6 m. What it takes to get there is the part that has to be maintained, not just set: the
+Si570's uncompensated swing is -203..+24 Hz at 14 MHz (16 ppm) over 0..99 C, `soft_tcxo.c` removes it with
+a per-unit table (on by default, and its own header says the curve varies from unit to unit), and
+`ts.freq_cal` nulls what is left in 0.1 ppm steps (range +-149.9 ppm). One number cannot follow
+drift, so the calibration has to be redone.
+
+Warm-up is part of that, not a detail. The table is referenced to 43 C and its header only claims
+the curve for an Si570 and an MCP9801 that are thermally bonded, so before the two settle the
+correction is chasing a temperature the sensor has not seen yet. Near room temperature the curve
+runs about 5 Hz per C at 14 MHz (-99 Hz at 20 C against -75 Hz at 25 C), so every 6 C of sensor lag
+is a third of the 170 Hz window, and a cold radio is the opposite of a calibrated one. The +-10 Hz
+above is the warm figure; nothing here measures the first minutes, and the bench has no thermal
+model to do it.
+
+Si5351A boards get no temperature correction at all:
+`Si5351a_PrepareNextFrequency()` takes the temperature factor and discards it, so there the +-10 Hz
+holds only at the temperature it was calibrated at. The audio and symbol clocks do not enter into it
+- a ppm of the 12 kHz side clock moves a 915 Hz tone by 0.001 Hz and a 22 ms bit by 22 ns - the
+whole error is the RF reference times the band.
 
 ## Weather fax, `make -C support/digi wefax`
 
