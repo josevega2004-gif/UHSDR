@@ -20,7 +20,9 @@ one mutation at a time and checks the verdict:
   9. two rows claim one eeprom id              -> the check fails
   9. two rows store into one variable          -> the check fails
  10. the menu offers more than the row stores  -> the check fails
- 11. the whole marker bump, one edit at a time -> the check fails until all three edits are there
+ 12. the whole marker bump, one edit at a time -> the check fails until all three edits are there
+ 13. a rename committed with a marker bump    -> the check fails, naming the word and the
+                                                 sequencing, instead of the translation
 
 An assertion may look at the exit code and at the data a verdict has to name: the settings that
 were named, the marker that was recorded, the record that did not parse. It may not look at the
@@ -223,14 +225,39 @@ def case_rename():
            '%s %s' % (word, stale))
     expect('the recorder takes the name the table stores', run('--record-layout'), 0, RECORD_NAME)
     written = RECORD.read_text(encoding='utf-8')
-    if ('%s %s\n' % (word, stale)) not in written or ('%s %s\n' % (word, owner)) in written:
+    if ('%s %s' % (word, stale)) not in written:
         print('  FAIL  the record does not name the value %s' % stale)
         failures.append('the recorder did not take the new name')
-    if ('#renamed %s %s %s\n' % (word, stale, owner)) not in written:
+    if ('%s %s (was %s)\n' % (word, stale, owner)) not in written:
         print('  FAIL  the record dropped the name the value had (%s)' % owner)
         failures.append('the recorder did not keep the previous name')
     expect('the recorder runs again without complaining', run('--record-layout'), 0)
     expect('the compiled check still translates the renamed value', run_check(), 0)
+
+
+def case_rename_with_a_bump():
+    """a value renamed in the same commit as a marker bump: the new record has no suffix to follow
+
+    The record of a new marker is written from the table, so a rename that goes in with the bump
+    arrives with the new name on the word line and nothing that says the previous layout knew that
+    word by another name. The firmware still returns the value's old address, so the check used to
+    fail on the translation of a value the previous layout "did not have"; it has to name the word
+    and the sequencing that lost the suffix instead.
+    """
+    text = HEADER.read_text(encoding='utf-8')
+    match = re.search(r'(?m)^#define\s+(EEPROM_FREQ_STEP)\s+(\d+)\s*$', text)
+    assert match, 'the define this case renames is gone, update this case'
+    owner, word = match.group(1), match.group(2)
+    stale = owner + '_RENAMED'
+    for path in (HEADER, TABLE):
+        source = path.read_text(encoding='utf-8')
+        path.write_text(re.sub(r'\b%s\b' % owner, stale, source), encoding='utf-8')
+    # the record a bump writes: the new name on the same word, and no suffix
+    record = RECORD.read_text(encoding='utf-8')
+    RECORD.write_text(layout_digest.seal(record.replace('%s %s\n' % (word, owner),
+                                                        '%s %s\n' % (word, stale))),
+                      encoding='utf-8')
+    expect('a rename with no suffix to follow it', run(), FAILS, 'word %s' % word, stale)
 
 
 def case_old_layout_translation():
@@ -391,6 +418,7 @@ CASES = (
     ('10. two rows store into one variable', case_shared_variable),
     ('11. the menu offers more than the row stores', case_menu_wider_than_stored),
     ('12. the marker bump, edit by edit', case_marker_bump_procedure),
+    ('13. a rename the previous layout cannot follow', case_rename_with_a_bump),
 )
 
 

@@ -409,8 +409,8 @@ digi-bench:
 layout-record:
 	# rewrite the recorded layout map of the current CONFIG_LAYOUT_VERSION_MAGIC from the table
 	# for a change that only renamed a stored value or made one visible to the parser (the check
-	# names the value and asks for this command); a renamed value keeps the name it had in a
-	# "#renamed" line, so the translation of the previous layout still finds the value it moves,
+	# names the value and asks for this command); a renamed value keeps the name it had as a
+	# "(was <name>)" suffix on its line, so the translation of the previous layout still finds it,
 	# and a word that changed hands is refused there, that needs a new marker
 	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/gen_config_upgrade.py --record-layout
 
