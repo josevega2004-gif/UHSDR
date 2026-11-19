@@ -5,11 +5,13 @@ The guard only earns its place if it still fails on the changes it exists to cat
 one mutation at a time to the working tree, runs the generator against it, and checks the verdict:
 
   1. a stored value moves to another word      -> the check fails, the recorder refuses to record it
-  2. the marker moves, the map does not        -> the check fails
-  3. the parser learns about a stored word     -> the check passes, "make layout-record" writes the
+  2. a stored value is only renamed           -> the check passes, the recorder takes the new name,
+                                                 and the marker stays
+  3. the marker moves, the map does not        -> the check fails
+  4. the parser learns about a stored word     -> the check passes, "make layout-record" writes the
                                                  record, and a second run leaves it untouched
-  4. the parser loses a stored word            -> the check fails
-  5. the record does not parse                 -> the check fails
+  5. the parser loses a stored word            -> the check fails
+  6. the record does not parse                 -> the check fails
 
 An assertion may look at the exit code and at the data a verdict has to name: the settings that
 moved, the marker that was recorded, the record that did not parse. It may not look at the wording:
@@ -188,6 +190,29 @@ def case_renumbering():
     expect('the recorder refuses to record a renumbering', run('--record-layout'), FAILS, name_a)
 
 
+def case_rename():
+    """a stored value that only got another name: same word, same layout, no marker
+
+    The record is left naming the value the way it was called before, which is the state a rename
+    puts it in: the table has the new name and the record still has the old one.
+    """
+    text = RECORD.read_text(encoding='utf-8')
+    rows = [line for line in text.splitlines() if re.fullmatch(r'\d+ EEPROM_\w+', line)]
+    assert rows, 'the record lists no plain EEPROM_ name, this case needs one'
+    word, owner = rows[0].split()
+    stale = owner + '_BEFORE_RENAME'
+    RECORD.write_text(text.replace('%s %s\n' % (word, owner), '%s %s\n' % (word, stale)),
+                      encoding='utf-8')
+
+    expect('a stored value the record names differently', run(), 0, '%s %s' % (word, owner))
+    expect('the recorder takes the name the table stores', run('--record-layout'), 0, RECORD_NAME)
+    written = RECORD.read_text(encoding='utf-8')
+    if ('%s %s\n' % (word, stale)) in written or ('%s %s\n' % (word, owner)) not in written:
+        print('  FAIL  the recorder left the record naming the value %s' % stale)
+        failures.append('the recorder kept the stale name')
+    expect('the recorder runs again without complaining', run('--record-layout'), 0)
+
+
 def case_marker_bumped():
     """a marker without a map change pushes healthy radios through the layout migration"""
     bumped = MARKER + 1
@@ -240,10 +265,11 @@ def case_broken_record():
 
 CASES = (
     ('1. a value moves to another word', case_renumbering),
-    ('2. the marker moves, the map does not', case_marker_bumped),
-    ('3. the parser learns a stored word', case_parser_addition),
-    ('4. the parser loses a stored word', case_parser_regression),
-    ('5. the record does not parse', case_broken_record),
+    ('2. a value is only renamed', case_rename),
+    ('3. the marker moves, the map does not', case_marker_bumped),
+    ('4. the parser learns a stored word', case_parser_addition),
+    ('5. the parser loses a stored word', case_parser_regression),
+    ('6. the record does not parse', case_broken_record),
 )
 
 

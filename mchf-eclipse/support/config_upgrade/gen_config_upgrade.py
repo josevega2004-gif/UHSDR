@@ -39,8 +39,8 @@ from pathlib import Path
 root = str(Path(__file__).resolve().parents[2]) + '/'
 
 # --record-layout rewrites the LAYOUT_HISTORY entry of the marker this build writes and stops there.
-# It is the one command for a change that only made a stored word visible to the table parser, which
-# needs no new marker because nothing moved (see the layout guard below).
+# It is the one command for a change that only renamed a stored value or made one visible to the
+# table parser: neither moves a word, so neither needs a new marker (see the layout guard below).
 RECORD_LAYOUT = '--record-layout' in sys.argv[1:]
 
 cfg_h = open(root+'drivers/ui/ui_configuration.h', encoding='utf-8', errors='surrogateescape').read()
@@ -1163,8 +1163,8 @@ LAYOUT_HISTORY = [
     # learned to see later. A renumbering moves a stored value and needs a new marker; a word that
     # merely became visible leaves every recorded word where it was, and then the marker has to
     # stay, because bumping it pushes every healthy radio through the layout migration.
-    # "make layout-record" rewrites the file of the current marker from the table and refuses when a
-    # word moved or disappeared.
+    # "make layout-record" rewrites the file of the current marker from the table: it takes a
+    # renamed value with it and refuses when a word changed hands or disappeared.
     (0x5AA5, 'layout-0x5AA5.map'),
 ]
 
@@ -1213,6 +1213,14 @@ def describe(rows):
         ('\n  ... and %d more' % (len(rows) - 6) if len(rows) > 6 else '')
 
 
+def map_shape(mapping):
+    """the words a map claims, without the names at them
+
+    The name at a word is for whoever reads the file. What a radio in the field depends on is which
+    word holds a value, so a renamed value leaves the shape of the layout untouched."""
+    return frozenset(mapping)
+
+
 # the records only cover the words below the baseline, so a setting stored above it would be written
 # by the firmware and never compared with the map a radio in the field carries
 if BASELINE_LAYOUT_FIRST_UNUSED != first_unused:
@@ -1229,17 +1237,17 @@ current_map = dict(layout_map)
 # marker is pushed through the layout migration although its configuration is the same
 for i, (m1, _n1) in enumerate(LAYOUT_HISTORY):
     for m2, _n2 in LAYOUT_HISTORY[i + 1:]:
-        if recorded[m1] == recorded[m2]:
-            sys.exit('markers 0x%X and 0x%X record the same map below %d. A marker has to stand for '
+        if map_shape(recorded[m1]) == map_shape(recorded[m2]):
+            sys.exit('markers 0x%X and 0x%X claim the same words below %d. A marker has to stand for '
                      'one map shape, so two markers for one shape mean a bump without a map change, '
                      'and every radio holding the older one is pushed through the layout migration '
                      'for nothing. A marker only moves together with a real map change.'
                      % (m1, m2, BASELINE_LAYOUT_FIRST_UNUSED))
 
 if current_magic not in recorded:
-    same_shape = [m for m, mp in recorded.items() if mp == current_map]
+    same_shape = [m for m, mp in recorded.items() if map_shape(mp) == map_shape(current_map)]
     if same_shape:
-        sys.exit('the address map below %d is exactly the one recorded for marker %s, but '
+        sys.exit('the words below %d are exactly the ones recorded for marker %s, but '
                  'CONFIG_LAYOUT_VERSION_MAGIC is 0x%X. A radio carrying the recorded shape is then '
                  'read through a marker no build ever wrote, and every healthy radio is pushed '
                  'through the layout migration for nothing. Put the marker back to %s, or record a '
@@ -1262,21 +1270,41 @@ if current_magic not in recorded:
 
 rec_map = recorded[current_magic]
 records = dict(LAYOUT_HISTORY)
-moved = [(w, '%s is stored there now, the record has %s' % (current_map[w], rec_map[w]))
-         for w in sorted(current_map) if w in rec_map and current_map[w] != rec_map[w]]
+
+# What differs is judged by shape first. A value that only got another name keeps its word, its
+# range and its meaning, so it is the same layout: renaming it must neither need a marker nor push
+# a single radio through the layout migration, and "make layout-record" takes the new name.
+#
+# Two values that trade words are not that. Nothing was renamed - both names still exist before and
+# after - so the value of one is simply read at the word of the other. That is the renumbering this
+# guard exists for. Asking whether either name at a changed word still exists in the other map tells
+# the two apart, without knowing what any id is called.
+names_before = set(rec_map.values())
+names_after = set(current_map.values())
+renamed = []        # the word kept its value, only the name of that value changed
+relocated = []      # the word changed hands between two values that both still exist
+for w in sorted(set(current_map) & set(rec_map)):
+    if current_map[w] == rec_map[w]:
+        continue
+    entry = (w, '%s is stored there now, the record names %s' % (current_map[w], rec_map[w]))
+    if current_map[w] in names_before or rec_map[w] in names_after:
+        relocated.append(entry)
+    else:
+        renamed.append(entry)
 gone = [(w, 'the record has %s, nothing is stored there any more' % rec_map[w])
         for w in sorted(rec_map) if w not in current_map]
 added = [(w, '%s is stored there' % current_map[w]) for w in sorted(current_map)
          if w not in rec_map]
 
 if RECORD_LAYOUT:
-    if moved or gone:
+    if relocated or gone:
         sys.exit('refusing to record the layout map: %d word(s) below %d moved or disappeared.\n%s\n'
                  'A renumbering is not a record to refresh. It needs a new '
                  'CONFIG_LAYOUT_VERSION_MAGIC and a migration that still recognises the marker the '
                  'previous build wrote, otherwise every radio holding the old layout is read '
                  'through the wrong addresses.'
-                 % (len(moved) + len(gone), BASELINE_LAYOUT_FIRST_UNUSED, describe(moved + gone)))
+                 % (len(relocated) + len(gone), BASELINE_LAYOUT_FIRST_UNUSED,
+                    describe(relocated + gone)))
     path = Path(__file__).resolve().parent / records[current_magic]
     text = layout_file_text(current_magic, layout_map)
     if path.exists() and path.read_text(encoding='utf-8') == text:
@@ -1286,17 +1314,20 @@ if RECORD_LAYOUT:
         sys.exit(0)
     path.write_text(text, encoding='utf-8')
     print('  layout record: marker 0x%X now records %d words below %d in %s%s. Commit it together '
-          'with the change that made the word visible; the marker does not move.'
+          'with the change that made it stale; the marker does not move.'
           % (current_magic, len(current_map), BASELINE_LAYOUT_FIRST_UNUSED, records[current_magic],
+             (', renaming %s' % ', '.join('%d %s' % (w, current_map[w]) for w, _t in renamed[:3]) +
+              (' ...' if len(renamed) > 3 else '')) if renamed else
              (', including %s' % ', '.join('%d %s' % (w, current_map[w]) for w, _t in added[:3]))
              if added else ''))
     sys.exit(0)
 
-if moved or gone:
-    sys.exit('the map of the words below %d moved:\n%s\n'
+if relocated or gone:
+    sys.exit('the words below %d are not the ones the record names:\n%s\n'
              'A radio holding a configuration written under the recorded map cannot tell, so it will '
-             'be read through the wrong addresses. If the values really moved, three things have to '
-             'happen together:\n'
+             'be read through the wrong addresses. A value that was only renamed is not this: it '
+             'keeps its word and "make layout-record" takes the new name.\n'
+             'If the values really moved, three things have to happen together:\n'
              '  1. raise CONFIG_LAYOUT_VERSION_MAGIC to a value no entry of LAYOUT_HISTORY uses;\n'
              '  2. extend UiConfiguration_LayoutMigrationRequired() to still recognise the marker '
              'the previous build wrote, otherwise every healthy radio is migrated through the '
@@ -1304,8 +1335,17 @@ if moved or gone:
              '  3. append (0x%X, %s) to LAYOUT_HISTORY and run "make layout-record" with the map the '
              'firmware now writes. Raise BASELINE_LAYOUT_FIRST_UNUSED if the range grew.\n'
              'If the intent is to keep the old layout readable, move the values back.'
-             % (BASELINE_LAYOUT_FIRST_UNUSED, describe(moved + gone), current_magic,
+             % (BASELINE_LAYOUT_FIRST_UNUSED, describe(relocated + gone), current_magic,
                 'layout-0x%X.map' % current_magic))
+
+if renamed:
+    print('  layout map: %d word(s) below %d are stored by a value the record names differently '
+          '(%s). Each of them kept its word and neither name appears anywhere else in the other '
+          'map, so this is a rename: the marker stays 0x%X, run "make layout-record" and commit it '
+          'next to the rename.'
+          % (len(renamed), BASELINE_LAYOUT_FIRST_UNUSED,
+             ', '.join('%d %s' % (w, current_map[w]) for w, _t in renamed[:3]) +
+             (' ...' if len(renamed) > 3 else ''), current_magic))
 
 if added:
     print('  layout map: %d word(s) below %d are stored by the table but not by the recorded map '

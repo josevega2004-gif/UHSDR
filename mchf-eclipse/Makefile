@@ -408,16 +408,18 @@ digi-bench:
 .PHONY: layout-record
 layout-record:
 	# rewrite the recorded layout map of the current CONFIG_LAYOUT_VERSION_MAGIC from the table
-	# for a change that only made a stored word visible to the parser (the check names the word and
-	# asks for this command); it refuses when a word moved, that needs a new marker
+	# for a change that only renamed a stored value or made one visible to the parser (the check
+	# names the value and asks for this command); a word that changed hands is refused there,
+	# that needs a new marker
 	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/gen_config_upgrade.py --record-layout
 
 .PHONY: layout-guard-selftest
 layout-guard-selftest:
 	# run the layout guard through the changes it exists to catch: a value moving to another word,
-	# a marker bumped without a map change, a parser that learns a stored word, one that loses a
-	# word, and a record that does not parse. It rewrites those files in place, leaves them as it
-	# found them, and refuses to start while any of them differs from HEAD.
+	# a value that was only renamed, a marker bumped without a map change, a parser that learns a
+	# stored word, one that loses a word, and a record that does not parse. It rewrites those
+	# files in place, leaves them as it found them, and refuses to start while any of them differs
+	# from HEAD.
 	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/layout_guard_selftest.py
 
 .PHONY: config-upgrade-check
