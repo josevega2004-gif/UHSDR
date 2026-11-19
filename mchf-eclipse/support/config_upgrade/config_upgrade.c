@@ -682,6 +682,111 @@ static int check_filter_map_migration(void)
     return rc;
 }
 
+/* ---------------------------------------------------------------------------------------------
+   the migration has to finish: once a migrated radio saves, the block sits at the current base,
+   the probe finds it and the next boot reads it like any other configuration. A save that writes
+   the legacy base, or nothing, leaves the radio taking the legacy branch on every boot.
+*/
+static void save_filter_memories(image_t* img, const uint8_t* mem)
+{
+    /* mirror of UiWriteSettingEEPROM_Filter(): every memory goes to the current block */
+    for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+    {
+        img->present[FILTER_MAP_BASE + k] = true;
+        img->value[FILTER_MAP_BASE + k] = (uint16_t)mem[k];
+    }
+}
+
+static void load_filter_memories(const image_t* img, bool migrate, uint8_t* mem)
+{
+    const uint16_t base = filter_map_base(img, migrate, false);
+    for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+    {
+        mem[k] = (uint8_t)img->value[base + k];
+    }
+}
+
+static int check_filter_map_save(void)
+{
+    const char* const shape[2] = { "previous layout", "layout before this one, block unwritten" };
+    image_t img[2];
+    int rc = 0;
+
+    /* the two configurations a migrating radio can be holding */
+    for (unsigned c = 0; c < 2; c++)
+    {
+        memset(&img[c], 0, sizeof(img[c]));
+        for (unsigned i = 0; i < sizeof(img[c].value)/sizeof(img[c].value[0]); i++)
+        {
+            img[c].value[i] = 0xFFFF;
+        }
+        for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+        {
+            img[c].present[FILTER_MAP_LEGACY + k] = true;
+            img[c].value[FILTER_MAP_LEGACY + k] = (uint16_t)(1 + k);   /* the operator memories */
+        }
+        if (c == 0)
+        {
+            /* the previous layout kept the ids that now live at 334..358 at the words of the block */
+            for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+            {
+                img[c].present[FILTER_MAP_BASE + k] = true;
+                img[c].value[FILTER_MAP_BASE + k] = (uint16_t)(40 + k);
+            }
+        }
+    }
+
+    for (unsigned c = 0; c < 2; c++)
+    {
+        uint8_t mem[FILTER_MAP_WORDS];
+        image_t after;
+
+        /* the boot that migrates: the memories come from the legacy base */
+        load_filter_memories(&img[c], true, mem);
+        for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+        {
+            if (mem[k] != (uint8_t)(1 + k))
+            {
+                printf("CHECK FAILED: the migrated boot of a %s configuration reads memory %u as %u, "
+                       "expected %u\n", shape[c], k, mem[k], 1 + k);
+                rc = 1;
+                break;
+            }
+        }
+
+        /* the radio saves; the next boot is a plain boot and has to find the block */
+        after = img[c];
+        save_filter_memories(&after, mem);
+        const uint16_t base = filter_map_base(&after, false, false);
+        if (base != FILTER_MAP_BASE)
+        {
+            printf("CHECK FAILED: after saving a migrated configuration (%s) the next boot still "
+                   "reads the filter path memories from %u instead of %u, so the memories it shows "
+                   "are not the ones it stored\n", shape[c], base, FILTER_MAP_BASE);
+            rc = 1;
+            continue;
+        }
+        load_filter_memories(&after, false, mem);
+        for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+        {
+            if (mem[k] != (uint8_t)(1 + k))
+            {
+                printf("CHECK FAILED: after saving a migrated configuration (%s) filter memory %u "
+                       "reads %u, expected %u\n", shape[c], k, mem[k], 1 + k);
+                rc = 1;
+                break;
+            }
+        }
+    }
+
+    if (rc == 0)
+    {
+        printf("filter path memories: a migrated configuration is saved at %u..%u and the next boot "
+               "reads it from there\n\n", FILTER_MAP_BASE, FILTER_MAP_BASE + FILTER_MAP_WORDS - 1);
+    }
+    return rc;
+}
+
 int main(void)
 {
     image_t img;
@@ -746,6 +851,7 @@ int main(void)
     rc |= check_upgrade_persistence();
     rc |= check_save_order();
     rc |= check_filter_map_migration();
+    rc |= check_filter_map_save();
     if (entry_count == 0)
     {
         printf("CHECK FAILED: no entries parsed, the generator matched nothing\n");
