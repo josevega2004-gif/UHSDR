@@ -83,10 +83,13 @@ int16_t Rtty_Modulator_GenSample(void);
 
 #ifdef HOST_BENCH
 // the host bench (support/digi) measures the receive filter bank against the frequencies its
-// labels claim; nothing in the radio build defines HOST_BENCH
+// labels claim, and drives the modulator from a receiver that is off frequency; nothing in the
+// radio build defines HOST_BENCH
 unsigned Rtty_BenchFilterCount(void);
 uint16_t Rtty_BenchFilterLabel(unsigned idx);
 float    Rtty_BenchFilterMagnitude(unsigned idx, float hz);
+void     Rtty_BenchResetDecoder(void);
+void     Rtty_BenchOffsetTx(float hz, uint32_t output_sample_rate);
 #endif
 
 #endif

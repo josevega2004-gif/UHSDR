@@ -21,6 +21,7 @@
 #include "ui_driver.h" // only necessary because of UiDriver_TextMsgPutChar
 #include "radio_management.h" // only necessary because of RadioManagement_Request_TxOff
 #include "uhsdr_digi_buffer.h"
+#include <string.h>
 
 
 // character tables borrowed from fldigi / rtty.cxx
@@ -280,6 +281,11 @@ typedef struct {
 	int32_t DPLLOldVal;
 	int32_t DPLLBitPhase;
 
+	// the ATC envelopes and the framing search: per transmission, not per program run
+	float32_t mark_env, space_env, mark_noise, space_noise;
+	bool phaseChanged;
+	int16_t wait_for_start_state, wait_for_half;
+
 	uint8_t byteResult;
 	uint16_t byteResultp;
 
@@ -435,7 +441,6 @@ static rtty_bpf_config_t* Rtty_SpaceFilterForShift(uint16_t shift)
 
 void Rtty_Modem_Init(uint32_t output_sample_rate)
 {
-
 	// TODO: pass config as parameter and make it changeable via menu
 	rtty_mode_current_config.samplerate = 12000;
 	rtty_mode_current_config.shift = rtty_shifts[rtty_ctrl_config.shift_idx].value;
@@ -468,6 +473,20 @@ void Rtty_Modem_Init(uint32_t output_sample_rate)
    frequency its own label claims - the check that was missing when rtty_bp_12khz_1765 turned out
    to be an 1865 Hz design. The loopback decodes through the mark channel, so it did not notice.
 * ------------------------------------------------------------------------------------------- */
+
+/**
+ * Wipe the receiver state so a transmission starts from nothing.
+ *
+ * The filter histories, the ATC envelopes, the DPLL and the start bit search are state of the
+ * receiver, and without this they are state of the program instead: a case in the host bench would
+ * then be scored partly on what the case before it transmitted. Only the bench calls this - in the
+ * firmware the state lives as long as the mode does - so asking for a clean receiver here changes
+ * nothing about what the radio does.
+ */
+void Rtty_BenchResetDecoder(void)
+{
+	memset(&rttyDecoderData, 0, sizeof(rttyDecoderData));
+}
 
 unsigned Rtty_BenchFilterCount(void)
 {
@@ -522,6 +541,24 @@ float Rtty_BenchFilterMagnitude(unsigned idx, float hz)
 	}
 	return (float)sqrt(acc / wsum);
 }
+
+/**
+ * Slide both transmit tones by the same number of Hz.
+ *
+ * That is exactly what a tuning error or a reference oscillator error does to a received FSK
+ * pair: mark and space keep the spacing the transmitter sent and move together in the audio,
+ * because both are shifted by the same number of Hz at RF. The receiver has no automatic
+ * frequency control to follow them - its filters are fixed at 915 Hz and 915 + shift - so this
+ * knob is how the host bench asks how much of that error the demodulator survives.
+ *
+ * @param hz offset in the 12 kHz audio domain, positive = pair moves up
+ * @param output_sample_rate the rate Rtty_Modem_Init() was last given
+ */
+void Rtty_BenchOffsetTx(float hz, uint32_t output_sample_rate)
+{
+	softdds_setFreqDDS(&rttyDecoderData.tx_dds[0], rttyDecoderData.bpfSpaceConfig->freq + hz, output_sample_rate, 0);
+	softdds_setFreqDDS(&rttyDecoderData.tx_dds[1], rttyDecoderData.bpfMarkConfig->freq + hz, output_sample_rate, 0);
+}
 #endif
 
 float32_t decayavg(float32_t average, float32_t input, int weight)
@@ -555,7 +592,8 @@ static int RttyDecoder_demodulator(float32_t sample)
 	{   // RTTY decoding with ATC = automatic threshold correction
 		/* Not a bug, and not to be "cleaned up": the mark/space names in the FlDigi ATC formula below
 		 * are the opposite of this modem's, so this exchange cancels that. After it, space_mag and
-		 * space_env carry the 915 Hz MARK filter output and mark_mag/mark_env the space filter output.
+		 * the space envelope carry the 915 Hz MARK filter output and mark_mag and the mark
+		 * envelope the space filter output.
 		 * A dominant mark tone then drives v1 negative and the function returns 1, a dominant space
 		 * tone drives it positive and returns 0 - the same result the non-ATC branch below reaches by
 		 * inverting the mark line without any exchange. Dropping this swap would really invert mark
@@ -564,34 +602,30 @@ static int RttyDecoder_demodulator(float32_t sample)
 		float32_t helper = space_mag;
 		space_mag = mark_mag;
 		mark_mag = helper;
-		static float32_t mark_env = 0.0;
-		static float32_t space_env = 0.0;
-		static float32_t mark_noise = 0.0;
-		static float32_t space_noise = 0.0;
 		// experiment to implement an ATC (Automatic threshold correction), DD4WH, 2017_08_24
 		// everything taken from FlDigi, licensed by GNU GPLv2 or later
 		// https://github.com/ukhas/dl-fldigi/blob/master/src/cw_rtty/rtty.cxx
 		// calculate envelope of the mark and space signals
 		// uses fast attack and slow decay
-		mark_env = decayavg (mark_env, mark_mag,
-				(mark_mag > mark_env) ? rttyDecoderData.oneBitSampleCount / 4 : rttyDecoderData.oneBitSampleCount * 16);
-		space_env = decayavg (space_env, space_mag,
-				(space_mag > space_env) ? rttyDecoderData.oneBitSampleCount / 4 : rttyDecoderData.oneBitSampleCount * 16);
+		rttyDecoderData.mark_env = decayavg (rttyDecoderData.mark_env, mark_mag,
+				(mark_mag > rttyDecoderData.mark_env) ? rttyDecoderData.oneBitSampleCount / 4 : rttyDecoderData.oneBitSampleCount * 16);
+		rttyDecoderData.space_env = decayavg (rttyDecoderData.space_env, space_mag,
+				(space_mag > rttyDecoderData.space_env) ? rttyDecoderData.oneBitSampleCount / 4 : rttyDecoderData.oneBitSampleCount * 16);
 		// calculate the noise on the mark and space signals
-		mark_noise = decayavg (mark_noise, mark_mag,
-				(mark_mag < mark_noise) ? rttyDecoderData.oneBitSampleCount / 4 : rttyDecoderData.oneBitSampleCount * 48);
-		space_noise = decayavg (space_noise, space_mag,
-				(space_mag < space_noise) ? rttyDecoderData.oneBitSampleCount / 4 : rttyDecoderData.oneBitSampleCount * 48);
+		rttyDecoderData.mark_noise = decayavg (rttyDecoderData.mark_noise, mark_mag,
+				(mark_mag < rttyDecoderData.mark_noise) ? rttyDecoderData.oneBitSampleCount / 4 : rttyDecoderData.oneBitSampleCount * 48);
+		rttyDecoderData.space_noise = decayavg (rttyDecoderData.space_noise, space_mag,
+				(space_mag < rttyDecoderData.space_noise) ? rttyDecoderData.oneBitSampleCount / 4 : rttyDecoderData.oneBitSampleCount * 48);
 		// the noise floor is the lower signal of space and mark noise
-		float32_t noise_floor = (space_noise < mark_noise) ? space_noise : mark_noise;
+		float32_t noise_floor = (rttyDecoderData.space_noise < rttyDecoderData.mark_noise) ? rttyDecoderData.space_noise : rttyDecoderData.mark_noise;
 
 		// Linear ATC, section 3 of www.w7ay.net/site/Technical/ATC
 		//		v1 = space_mag - mark_mag - 0.5 * (space_env - mark_env);
 
 		// Compensating for the noise floor by using clipping
 		float32_t mclipped = 0.0, sclipped = 0.0;
-		mclipped = mark_mag > mark_env ? mark_env : mark_mag;
-		sclipped = space_mag > space_env ? space_env : space_mag;
+		mclipped = mark_mag > rttyDecoderData.mark_env ? rttyDecoderData.mark_env : mark_mag;
+		sclipped = space_mag > rttyDecoderData.space_env ? rttyDecoderData.space_env : space_mag;
 		if (mclipped < noise_floor)
 		{
 			mclipped = noise_floor;
@@ -605,19 +639,19 @@ static int RttyDecoder_demodulator(float32_t sample)
 		// however, the current implementation with ATC already works quite well with mark-only/space-only
 		/*					switch (progdefaults.rtty_cwi) {
 						case 1 : // mark only decode
-							space_env = sclipped = noise_floor;
+							rttyDecoderData.space_env = sclipped = noise_floor;
 							break;
 						case 2: // space only decode
-							mark_env = mclipped = noise_floor;
+							rttyDecoderData.mark_env = mclipped = noise_floor;
 						default : ;
 		}
 		 */
 
 		// Optimal ATC (Section 6 of of www.w7ay.net/site/Technical/ATC)
-		v1  = (mclipped - noise_floor) * (mark_env - noise_floor) -
-				(sclipped - noise_floor) * (space_env - noise_floor) -
-				0.25 *  ((mark_env - noise_floor) * (mark_env - noise_floor) -
-						(space_env - noise_floor) * (space_env - noise_floor));
+		v1  = (mclipped - noise_floor) * (rttyDecoderData.mark_env - noise_floor) -
+				(sclipped - noise_floor) * (rttyDecoderData.space_env - noise_floor) -
+				0.25 *  ((rttyDecoderData.mark_env - noise_floor) * (rttyDecoderData.mark_env - noise_floor) -
+						(rttyDecoderData.space_env - noise_floor) * (rttyDecoderData.space_env - noise_floor));
 
 		v1 = RttyDecoder_lowPass(v1, rttyDecoderData.lpfConfig, &rttyDecoderData.lpfData);
 
@@ -639,7 +673,6 @@ static int RttyDecoder_demodulator(float32_t sample)
 
 // this function returns true once at the half of a bit with the bit's value
 static bool RttyDecoder_getBitDPLL(float32_t sample, bool* val_p) {
-	static bool phaseChanged = false;
 	bool retval = false;
 
 
@@ -647,7 +680,7 @@ static bool RttyDecoder_getBitDPLL(float32_t sample, bool* val_p) {
 	{
 		*val_p = RttyDecoder_demodulator(sample);
 
-		if (!phaseChanged && *val_p != rttyDecoderData.DPLLOldVal) {
+		if (!rttyDecoderData.phaseChanged && *val_p != rttyDecoderData.DPLLOldVal) {
 			if (rttyDecoderData.DPLLBitPhase < rttyDecoderData.oneBitSampleCount/2)
 			{
 				// rttyDecoderData.DPLLBitPhase += rttyDecoderData.oneBitSampleCount/8; // early
@@ -658,7 +691,7 @@ static bool RttyDecoder_getBitDPLL(float32_t sample, bool* val_p) {
 				//rttyDecoderData.DPLLBitPhase -= rttyDecoderData.oneBitSampleCount/8; // late
 				rttyDecoderData.DPLLBitPhase -= rttyDecoderData.oneBitSampleCount/32; // late
 			}
-			phaseChanged = true;
+			rttyDecoderData.phaseChanged = true;
 		}
 		rttyDecoderData.DPLLOldVal = *val_p;
 		rttyDecoderData.DPLLBitPhase++;
@@ -677,36 +710,34 @@ static bool RttyDecoder_getBitDPLL(float32_t sample, bool* val_p) {
 static bool RttyDecoder_waitForStartBit(float32_t sample) {
 	bool retval = false;
 	int bitResult;
-	static int16_t wait_for_start_state = 0;
-	static int16_t wait_for_half = 0;
 
 	bitResult = RttyDecoder_demodulator(sample);
-	switch (wait_for_start_state)
+	switch (rttyDecoderData.wait_for_start_state)
 	{
 	case 0:
 		// waiting for a falling edge
 		if (bitResult != 0)
 		{
-			wait_for_start_state++;
+			rttyDecoderData.wait_for_start_state++;
 		}
 		break;
 	case 1:
 		if (bitResult != 1)
 		{
-			wait_for_start_state++;
+			rttyDecoderData.wait_for_start_state++;
 		}
 		break;
 	case 2:
-		wait_for_half = rttyDecoderData.oneBitSampleCount/2;
-		wait_for_start_state ++;
+		rttyDecoderData.wait_for_half = rttyDecoderData.oneBitSampleCount/2;
+		rttyDecoderData.wait_for_start_state ++;
         /* fall through */ // this is for the compiler, the following comment is for Eclipse
 		/* no break */
 	case 3:
-		wait_for_half--;
-		if (wait_for_half == 0)
+		rttyDecoderData.wait_for_half--;
+		if (rttyDecoderData.wait_for_half == 0)
 		{
 			retval = (bitResult == 0);
-			wait_for_start_state = 0;
+			rttyDecoderData.wait_for_start_state = 0;
 		}
 		break;
 	}
@@ -881,6 +912,9 @@ void Rtty_Modulator_StartTX()
 	rtty_tx.last_bit = 1;
 	rtty_tx.last_value = INT16_MIN;
 	rtty_tx.char_mode = RTTY_MODE_LETTERS;
+	// an over that ended on EOT stopped in the middle of a bit, and its remaining samples used to
+	// be handed to the first bit of the next one, shortening it by however far the last one got
+	rtty_tx.char_bit_samples = 0;
 	Rtty_Modulator_Code2Bits(RTTY_LETTER_CODE);
 }
 
