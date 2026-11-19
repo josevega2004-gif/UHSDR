@@ -1106,11 +1106,344 @@ BASELINE_LAYOUT_FIRST_UNUSED = 416
 # wrote through it. Append only. A map shape that appears under a marker already used for another
 # shape is the failure this list exists to prevent - radios carrying the old shape cannot tell.
 LAYOUT_HISTORY = [
-    # the packed UInt8x2 row (EEPROM_SMETER_ALPHAS) carries a comma inside
-    # CONFIG_UINT8x2_COMBINE(), which the old table parser could not split, so that word was missing
-    # from the map this digest is computed from. The row has always been in the table and no build
-    # ever stored it anywhere else, so only the recorded digest of that shape is corrected here.
-    (0x5AA5, 'a63f1098d0fc'),          # as of commit 0da3ca61, digest corrected on 2026-11-19
+    # One entry per (marker, map shape) pair a radio in the field can be holding: the value
+    # EEPROM_CONFIG_LAYOUT_VERSION held in that build, the digest of the id -> word map it wrote,
+    # and that map itself, one "word owner" line per claimed word below
+    # BASELINE_LAYOUT_FIRST_UNUSED. Append only.
+    #
+    # The map is what lets the checks below tell a renumbering from a word this harness only
+    # learned to see later. A renumbering moves a stored value, which no radio can survive and
+    # which needs a new marker. A word that was always stored but that the table parser used to
+    # skip (the packed UInt8x2 row was one) leaves every recorded word where it was, and then the
+    # marker must stay: bumping it would push every healthy radio through the layout migration.
+    (0x5AA5, 'a63f1098d0fc', """
+        1 EEPROM_BAND_MODE (written outside the table)
+        2 EEPROM_FREQ_HIGH (written outside the table)
+        3 EEPROM_FREQ_LOW (written outside the table)
+        4 EEPROM_FREQ_STEP
+        5 EEPROM_TX_AUDIO_SRC
+        6 EEPROM_TCXO_STATE
+        7 EEPROM_PA_BIAS
+        8 EEPROM_AUDIO_GAIN
+        9 EEPROM_RX_CODEC_GAIN
+        10 EEPROM_MAX_VOLUME
+        12 EEPROM_TX_POWER_LEVEL
+        13 EEPROM_CW_KEYER_SPEED
+        14 EEPROM_CW_KEYER_MODE
+        15 EEPROM_CW_SIDETONE_GAIN
+        16 EEPROM_MIC_BOOST
+        17 EEPROM_TX_IQ_80M_GAIN_BALANCE
+        18 EEPROM_TX_IQ_80M_PHASE_BALANCE
+        19 EEPROM_RX_IQ_80M_GAIN_BALANCE
+        20 EEPROM_RX_IQ_80M_PHASE_BALANCE
+        75 EEPROM_FREQ_CAL
+        76 EEPROM_NB_SETTING
+        78 EEPROM_MIC_GAIN
+        79 EEPROM_LINE_GAIN
+        80 EEPROM_SIDETONE_FREQ
+        81 EEPROM_SPEC_SCOPE_SPEED
+        82 EEPROM_SPECTRUM_FILTER
+        85 EEPROM_SPECTRUM_TRACE_COLOUR
+        86 EEPROM_SPECTRUM_GRID_COLOUR
+        87 EEPROM_SPECTRUM_SCALE_COLOUR
+        88 EEPROM_PADDLE_REVERSE
+        89 EEPROM_CW_RX_DELAY
+        90 EEPROM_SPECTRUM_CENTRE_LINE_COLOUR
+        91 EEPROM_DETECTOR_COUPLING_COEFF_2200M
+        92 EEPROM_DETECTOR_COUPLING_COEFF_630M
+        93 EEPROM_DETECTOR_COUPLING_COEFF_80M
+        94 EEPROM_DETECTOR_COUPLING_COEFF_40M
+        95 EEPROM_DETECTOR_COUPLING_COEFF_20M
+        96 EEPROM_DETECTOR_COUPLING_COEFF_15M
+        97 EEPROM_BAND0_5W
+        98 EEPROM_BAND1_5W
+        99 EEPROM_BAND2_5W
+        100 EEPROM_BAND3_5W
+        101 EEPROM_BAND4_5W
+        102 EEPROM_BAND5_5W
+        103 EEPROM_BAND6_5W
+        104 EEPROM_BAND7_5W
+        105 EEPROM_BAND8_5W
+        106 EEPROM_BAND9_5W
+        107 EEPROM_BAND10_5W
+        108 EEPROM_BAND11_5W
+        109 EEPROM_BAND12_5W
+        110 EEPROM_BAND13_5W
+        112 EEPROM_BAND0_FULL
+        113 EEPROM_BAND1_FULL
+        114 EEPROM_BAND2_FULL
+        115 EEPROM_BAND3_FULL
+        116 EEPROM_BAND4_FULL
+        117 EEPROM_BAND5_FULL
+        118 EEPROM_BAND6_FULL
+        119 EEPROM_BAND7_FULL
+        120 EEPROM_BAND8_FULL
+        121 EEPROM_BAND9_FULL
+        122 EEPROM_BAND10_FULL
+        123 EEPROM_BAND11_FULL
+        124 EEPROM_BAND12_FULL
+        125 EEPROM_BAND13_FULL
+        133 EEPROM_TX_IQ_10M_GAIN_BALANCE
+        134 EEPROM_TX_IQ_10M_PHASE_BALANCE
+        135 EEPROM_RX_IQ_10M_GAIN_BALANCE
+        136 EEPROM_RX_IQ_10M_PHASE_BALANCE
+        137 EEPROM_SENSOR_NULL
+        139 EEPROM_XVERTER_DISP
+        140 EEPROM_XVERTER_OFFSET_HIGH (written outside the table)
+        141 EEPROM_VFO_MEM_MODE
+        142 EEPROM_XVERTER_OFFSET_LOW (written outside the table)
+        143 EEPROM_SPECTRUM_MAGNIFY
+        146 EEPROM_AM_MODE_DISABLE
+        147 EEPROM_PA_CW_BIAS
+        148 EEPROM_SPECTRUM_DB_DIV
+        149 EEPROM_SPECTRUM_AGC_RATE
+        150 EEPROM_METER_MODE
+        151 EEPROM_ALC_DECAY_TIME
+        152 EEPROM_ALC_POSTFILT_TX_GAIN
+        153 EEPROM_STEP_SIZE_CONFIG
+        154 EEPROM_DSP_MODE
+        155 EEPROM_DSP_NR_STRENGTH
+        160 EEPROM_DSP_NOTCH_DECOR_BUFLEN
+        161 EEPROM_DSP_NOTCH_CONV_RATE
+        163 EEPROM_TX_AUDIO_COMPRESS
+        164 EEPROM_TX_IQ_80M_GAIN_BALANCE_TRANS_OFF
+        165 EEPROM_TX_DISABLE
+        166 EEPROM_FLAGS1
+        167 EEPROM_VERSION_RELEASE
+        169 EEPROM_CW_OFFSET_MODE
+        170 EEPROM_FREQ_CONV_MODE
+        171 EEPROM_LSB_USB_AUTO_SELECT
+        172 EEPROM_VERSION_MAJOR
+        173 EEPROM_LCD_BLANKING_CONFIG
+        174 EEPROM_VOLTMETER_CALIBRATE
+        175 EEPROM_WATERFALL_COLOR_SCHEME
+        176 EEPROM_WATERFALL_VERTICAL_STEP_SIZE
+        178 EEPROM_WATERFALL_CONTRAST
+        179 EEPROM_BAND0_MODE_A (15 band slots)
+        180 EEPROM_BAND0_MODE_A (15 band slots)
+        181 EEPROM_BAND0_MODE_A (15 band slots)
+        182 EEPROM_BAND0_MODE_A (15 band slots)
+        183 EEPROM_BAND0_MODE_A (15 band slots)
+        184 EEPROM_BAND0_MODE_A (15 band slots)
+        185 EEPROM_BAND0_MODE_A (15 band slots)
+        186 EEPROM_BAND0_MODE_A (15 band slots)
+        187 EEPROM_BAND0_MODE_A (15 band slots)
+        188 EEPROM_BAND0_MODE_A (15 band slots)
+        189 EEPROM_BAND0_MODE_A (15 band slots)
+        190 EEPROM_BAND0_MODE_A (15 band slots)
+        191 EEPROM_BAND0_MODE_A (15 band slots)
+        192 EEPROM_BAND0_MODE_A (15 band slots)
+        193 EEPROM_BAND0_MODE_A (15 band slots)
+        194 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        195 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        196 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        197 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        198 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        199 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        200 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        201 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        202 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        203 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        204 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        205 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        206 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        207 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        208 EEPROM_BAND0_FREQ_HIGH_A (15 band slots)
+        209 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        210 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        211 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        212 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        213 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        214 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        215 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        216 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        217 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        218 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        219 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        220 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        221 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        222 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        223 EEPROM_BAND0_FREQ_LOW_A (15 band slots)
+        224 EEPROM_BAND0_MODE_B (15 band slots)
+        225 EEPROM_BAND0_MODE_B (15 band slots)
+        226 EEPROM_BAND0_MODE_B (15 band slots)
+        227 EEPROM_BAND0_MODE_B (15 band slots)
+        228 EEPROM_BAND0_MODE_B (15 band slots)
+        229 EEPROM_BAND0_MODE_B (15 band slots)
+        230 EEPROM_BAND0_MODE_B (15 band slots)
+        231 EEPROM_BAND0_MODE_B (15 band slots)
+        232 EEPROM_BAND0_MODE_B (15 band slots)
+        233 EEPROM_BAND0_MODE_B (15 band slots)
+        234 EEPROM_BAND0_MODE_B (15 band slots)
+        235 EEPROM_BAND0_MODE_B (15 band slots)
+        236 EEPROM_BAND0_MODE_B (15 band slots)
+        237 EEPROM_BAND0_MODE_B (15 band slots)
+        238 EEPROM_BAND0_MODE_B (15 band slots)
+        239 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        240 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        241 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        242 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        243 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        244 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        245 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        246 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        247 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        248 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        249 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        250 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        251 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        252 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        253 EEPROM_BAND0_FREQ_HIGH_B (15 band slots)
+        254 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        255 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        256 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        257 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        258 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        259 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        260 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        261 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        262 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        263 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        264 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        265 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        266 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        267 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        268 EEPROM_BAND0_FREQ_LOW_B (15 band slots)
+        269 EEPROM_WATERFALL_SPEED
+        272 EEPROM_DSP_NOTCH_FFT_NUMTAPS
+        273 EEPROM_SPECTRUM_SIZE
+        275 EEPROM_TXRX_SWITCH_AUDIO_MUTE_DELAY
+        276 EEPROM_FLAGS2
+        277 EEPROM_FILTER_DISP_COLOUR
+        278 EEPROM_TX_IQ_10M_GAIN_BALANCE_TRANS_OFF
+        279 EEPROM_TX_IQ_10M_PHASE_BALANCE_TRANS_OFF
+        280 EEPROM_FM_SUBAUDIBLE_TONE_GEN
+        281 EEPROM_FM_TONE_BURST_MODE
+        282 EEPROM_FM_SQUELCH_SETTING
+        285 EEPROM_FM_SUBAUDIBLE_TONE_DET
+        286 EEPROM_KEYBOARD_BEEP_FREQ
+        287 EEPROM_BEEP_LOUDNESS
+        288 EEPROM_VERSION_MINOR
+        289 EEPROM_DETECTOR_COUPLING_COEFF_160M
+        290 EEPROM_DETECTOR_COUPLING_COEFF_6M
+        291 EEPROM_TUNE_POWER_LEVEL
+        293 EEPROM_CAT_XLAT
+        295 EEPROM_METER_COLOUR_UP
+        296 EEPROM_METER_COLOUR_DOWN
+        299 EEPROM_MANUAL_NOTCH
+        300 EEPROM_MANUAL_PEAK
+        301 EEPROM_TX_IQ_80M_PHASE_BALANCE_TRANS_OFF
+        302 EEPROM_DISPLAY_DBM
+        303 EEPROM_BASS_GAIN
+        304 EEPROM_TREBLE_GAIN
+        306 EEPROM_TX_FILTER
+        307 EEPROM_TX_BASS_GAIN
+        308 EEPROM_TX_TREBLE_GAIN
+        309 EEPROM_SAM_PLL_LOCKING_RANGE
+        310 EEPROM_SAM_PLL_STEP_RESPONSE
+        311 EEPROM_SAM_PLL_BANDWIDTH
+        312 EEPROM_I2C1_SPEED
+        313 EEPROM_I2C2_SPEED
+        314 EEPROM_SAM_FADE_LEVELER
+        315 EEPROM_LINEOUT_GAIN
+        316 EEPROM_IQ_AUTO_CORRECTION
+        318 EEPROM_AGC_WDSP_MODE
+        319 EEPROM_AGC_WDSP_THRESH
+        320 EEPROM_AGC_WDSP_SLOPE
+        321 EEPROM_AGC_WDSP_HANG
+        322 EEPROM_DBM_CALIBRATE
+        323 EEPROM_AGC_WDSP_TAU_DECAY_0
+        324 EEPROM_AGC_WDSP_TAU_HANG_DECAY
+        325 EEPROM_RTC_CALIB
+        326 EEPROM_AGC_WDSP_TAU_DECAY_1
+        327 EEPROM_AGC_WDSP_TAU_DECAY_2
+        328 EEPROM_AGC_WDSP_TAU_DECAY_3
+        329 EEPROM_AGC_WDSP_TAU_DECAY_4
+        330 EEPROM_LOW_POWER_CONFIG
+        331 EEPROM_CW_KEYER_WEIGHT
+        332 EEPROM_DIGI_MODE_CONF
+        333 EEPROM_Scope_TRACE_HL_BW
+        334 EEPROM_Scope_TRACE_HL_BW_BGR
+        335 EEPROM_TScal0_High
+        336 EEPROM_TScal0_High
+        337 EEPROM_TScal1_High
+        338 EEPROM_TScal1_High
+        339 EEPROM_TScal2_High
+        340 EEPROM_TScal2_High
+        341 EEPROM_TScal3_High
+        342 EEPROM_TScal3_High
+        343 EEPROM_TScal4_High
+        344 EEPROM_TScal4_High
+        345 EEPROM_TScal5_High
+        346 EEPROM_TScal5_High
+        347 EEPROM_CW_DECODER_ENABLE
+        348 EEPROM_Scope_Graticule_Ypos
+        349 EEPROM_Freq_Display_Font
+        350 EEPROM_NUMBER_OF_ENTRIES
+        351 EEPROM_DSP_MODE_MASK
+        352 EEPROM_ENABLE_PTT_RTS
+        353 EEPROM_CW_DECODER_THRESH
+        354 EEPROM_CW_DECODER_BLOCKSIZE
+        355 EEPROM_SMETER_ALPHAS
+        357 EEPROM_TX_IQ_20M_GAIN_BALANCE
+        358 EEPROM_TX_IQ_20M_PHASE_BALANCE
+        359 EEPROM_TX_IQ_15M_GAIN_BALANCE
+        360 EEPROM_TX_IQ_15M_PHASE_BALANCE
+        361 EEPROM_TX_IQ_10M_UP_GAIN_BALANCE
+        362 EEPROM_TX_IQ_10M_UP_PHASE_BALANCE
+        363 EEPROM_TX_IQ_20M_GAIN_BALANCE_TRANS_OFF
+        364 EEPROM_TX_IQ_20M_PHASE_BALANCE_TRANS_OFF
+        365 EEPROM_TX_IQ_15M_GAIN_BALANCE_TRANS_OFF
+        366 EEPROM_TX_IQ_15M_PHASE_BALANCE_TRANS_OFF
+        367 EEPROM_TX_IQ_10M_UP_GAIN_BALANCE_TRANS_OFF
+        368 EEPROM_TX_IQ_10M_UP_PHASE_BALANCE_TRANS_OFF
+        369 EEPROM_VSWR_PROTECTION_THRESHOLD
+        370 EEPROM_EXPFLAGS1
+        371 EEPROM_XVERTER_OFFSET_TX_HIGH (written outside the table)
+        372 EEPROM_XVERTER_OFFSET_TX_LOW (written outside the table)
+        373 EEPROM_CW_DECODER_FLAGS
+        374 EEPROM_BAND_REGION
+        375 EEPROM_DETECTOR_COUPLING_COEFF_11M
+        376 EEPROM_CONFIG_LAYOUT_VERSION (written outside the table)
+        377 EEPROM_AM_CARRIER_LEVEL
+        378 EEPROM_AM_TX_SIDEBAND
+        379 EEPROM_AM_PEP_HOLD
+        380 EEPROM_AM_PEP_DIM
+        381 EEPROM_AM_PEP_TARGET
+        382 EEPROM_AM_PEP_WARN
+        383 EEPROM_AGC_WDSP_HANG_TIME
+        384 EEPROM_AGC_WDSP_HANG_THRESH
+        385 EEPROM_AGC_WDSP_TAU_DECAY_5
+        386 EEPROM_PWR_METER_DISP
+        387 EEPROM_RTTY_SHIFT_IDX
+        388 EEPROM_RTTY_SPEED_IDX
+        389 EEPROM_PSK_SPEED_IDX
+        391 filter path memories (5 modes x 5 slots)
+        392 filter path memories (5 modes x 5 slots)
+        393 filter path memories (5 modes x 5 slots)
+        394 filter path memories (5 modes x 5 slots)
+        395 filter path memories (5 modes x 5 slots)
+        396 filter path memories (5 modes x 5 slots)
+        397 filter path memories (5 modes x 5 slots)
+        398 filter path memories (5 modes x 5 slots)
+        399 filter path memories (5 modes x 5 slots)
+        400 filter path memories (5 modes x 5 slots)
+        401 filter path memories (5 modes x 5 slots)
+        402 filter path memories (5 modes x 5 slots)
+        403 filter path memories (5 modes x 5 slots)
+        404 filter path memories (5 modes x 5 slots)
+        405 filter path memories (5 modes x 5 slots)
+        406 filter path memories (5 modes x 5 slots)
+        407 filter path memories (5 modes x 5 slots)
+        408 filter path memories (5 modes x 5 slots)
+        409 filter path memories (5 modes x 5 slots)
+        410 filter path memories (5 modes x 5 slots)
+        411 filter path memories (5 modes x 5 slots)
+        412 filter path memories (5 modes x 5 slots)
+        413 filter path memories (5 modes x 5 slots)
+        414 filter path memories (5 modes x 5 slots)
+        415 filter path memories (5 modes x 5 slots)
+"""),
 ]
 
 current_magic = vals['CONFIG_LAYOUT_VERSION_MAGIC']
@@ -1118,43 +1451,92 @@ layout_map = sorted((w, '|'.join(sorted({o[1] for o in lst})))
                     for w, lst in owners.items() if w < BASELINE_LAYOUT_FIRST_UNUSED)
 layout_digest = hashlib.sha1(repr(layout_map).encode()).hexdigest()[:12]
 
-markers = [m for m, _ in LAYOUT_HISTORY]
+markers = [m for m, _d, _s in LAYOUT_HISTORY]
 if len(set(markers)) != len(markers):
     sys.exit('two entries of LAYOUT_HISTORY share a marker (%s): one marker cannot stand for two '
              'map shapes. A radio holding the older shape would be read through the newer addresses.'
              % ', '.join('0x%x' % m for m in sorted({m for m in markers if markers.count(m) > 1})))
 
-recorded = dict(LAYOUT_HISTORY)
-if layout_digest not in recorded.values():
-    sys.exit('the address map of words below %d changed shape (recorded %s, now %s) while the '
-             'recorded marker for that shape is 0x%x.\n'
-             'A radio holding a configuration written under the old map cannot tell, so it will be '
-             'read through the wrong addresses. Three things must happen together:\n'
+def shape_map(text):
+    """the "word owner" lines of a recorded map shape as a dict"""
+    out = {}
+    for line in text.strip().splitlines():
+        line = line.split('#')[0].strip()
+        if line:
+            word, owner = line.split(None, 1)
+            out[int(word)] = owner.strip()
+    return out
+
+recorded = {m: (d, shape_map(text)) for m, d, text in LAYOUT_HISTORY}
+current_map = dict(layout_map)
+
+def describe_moved(rows):
+    return '\n'.join('  word %d: %s' % (w, text) for w, text in rows[:6]) + \
+        ('\n  ... and %d more' % (len(rows) - 6) if len(rows) > 6 else '')
+
+
+if current_magic not in recorded:
+    same_shape = [m for m, (_d, mp) in recorded.items() if mp == current_map]
+    if same_shape:
+        sys.exit('the address map below %d is exactly the one recorded for marker %s, but '
+                 'CONFIG_LAYOUT_VERSION_MAGIC is 0x%X. A radio carrying the recorded shape is then '
+                 'read through a marker no build ever wrote, and every healthy radio is pushed '
+                 'through the layout migration for nothing. Put the marker back to %s, or record a '
+                 'map change and append the new pair to LAYOUT_HISTORY.'
+                 % (BASELINE_LAYOUT_FIRST_UNUSED, ', '.join('0x%X' % m for m in same_shape),
+                    current_magic, ', '.join('0x%X' % m for m in same_shape)))
+    sys.exit('CONFIG_LAYOUT_VERSION_MAGIC is 0x%X, which no entry of LAYOUT_HISTORY knows, and the '
+             'address map below %d matches no recorded shape either. A radio holding a configuration '
+             'written under the previous marker cannot tell which map it is read through, so the '
+             'three things have to happen together:\n'
+             '  1. the marker above has to be the one this build writes, and no entry of '
+             'LAYOUT_HISTORY may use it;\n'
+             '  2. UiConfiguration_LayoutMigrationRequired() has to keep recognising the marker the '
+             'previous build wrote, otherwise every healthy radio is migrated through the '
+             'pre-renumbering translation, which corrupts it;\n'
+             '  3. append (0x%X, %s, """...""") to LAYOUT_HISTORY, with the map the firmware now '
+             'stores, and raise BASELINE_LAYOUT_FIRST_UNUSED if the range grew.'
+             % (current_magic, BASELINE_LAYOUT_FIRST_UNUSED, current_magic, layout_digest))
+
+rec_digest, rec_map = recorded[current_magic]
+moved = [(w, '%s is stored there now, the record has %s' % (current_map[w], rec_map[w]))
+         for w in sorted(current_map) if w in rec_map and current_map[w] != rec_map[w]]
+gone = [(w, 'the record has %s, nothing is stored there any more' % rec_map[w])
+        for w in sorted(rec_map) if w not in current_map]
+added = [(w, '%s is stored there' % current_map[w]) for w in sorted(current_map)
+         if w not in rec_map]
+
+if moved or gone:
+    sys.exit('the map of the words below %d moved:\n%s\n'
+             'A radio holding a configuration written under the recorded map cannot tell, so it will '
+             'be read through the wrong addresses. If the values really moved, three things have to '
+             'happen together:\n'
              '  1. raise CONFIG_LAYOUT_VERSION_MAGIC to a value no entry of LAYOUT_HISTORY uses;\n'
              '  2. extend UiConfiguration_LayoutMigrationRequired() to still recognise the marker '
              'the previous build wrote, otherwise every healthy radio is migrated through the '
              'pre-renumbering translation, which corrupts it;\n'
-             '  3. append the pair to LAYOUT_HISTORY: (0x%x, %s), and raise '
+             '  3. append (0x%X, %s, the new map) to LAYOUT_HISTORY and raise '
              'BASELINE_LAYOUT_FIRST_UNUSED if the range grew.\n'
-             'If the intent is to keep the old map readable instead, move the values back.'
-             % (BASELINE_LAYOUT_FIRST_UNUSED,
-                ', '.join(sorted(set(recorded.values()))) or '(nothing)', layout_digest,
-                current_magic, current_magic, layout_digest))
+             'If the intent is to keep the old layout readable, move the values back.'
+             % (BASELINE_LAYOUT_FIRST_UNUSED, describe_moved(moved + gone), current_magic,
+                layout_digest))
 
-if recorded.get(current_magic) != layout_digest:
-    sys.exit('the address map below %d has the shape recorded for marker %s, but '
-             'CONFIG_LAYOUT_VERSION_MAGIC is 0x%x. The marker decides which map a radio is read '
-             'through, so either the marker was bumped without the map being recorded for it, or the '
-             'map was recorded under a marker no build wrote. Record the pair (0x%x, %s) in '
-             'LAYOUT_HISTORY, or put the marker back to %s.'
-             % (BASELINE_LAYOUT_FIRST_UNUSED,
-                ', '.join('0x%X' % m for m, d in LAYOUT_HISTORY if d == layout_digest) or '(none)',
-                current_magic, current_magic, layout_digest,
-                ', '.join('0x%X' % m for m, d in LAYOUT_HISTORY if d == layout_digest) or '(none)'))
+if added:
+    print('  layout map: %d word(s) below %d are stored by the table but not by the recorded shape '
+          '(%s). Nothing moved, so the marker stays 0x%X; refresh the recorded shape and digest of '
+          'that entry in LAYOUT_HISTORY in the same commit.'
+          % (len(added), BASELINE_LAYOUT_FIRST_UNUSED,
+             ', '.join('%d %s' % (w, current_map[w]) for w, _t in added[:3]) +
+             (' ...' if len(added) > 3 else ''), current_magic))
+elif layout_digest != rec_digest:
+    sys.exit('the digest %s recorded for marker 0x%X does not describe the shape stored next to it '
+             '(the map works out to %s). The two have to be updated together, otherwise the next '
+             'real map change is compared against a record that never existed.'
+             % (rec_digest, current_magic, layout_digest))
 
 # every marker that is no longer current has to stay recognised by the migration, otherwise the
 # radios still carrying it are treated as if they had the current map
-older = [(m, d) for m, d in LAYOUT_HISTORY if m != current_magic]
+older = [(m, d) for m, d, _s in LAYOUT_HISTORY if m != current_magic]
 if older:
     migrate_fn = re.search(r'static\s+bool\s+UiConfiguration_LayoutMigrationRequired\s*\([^)]*\)\s*'
                            r'\{(.*?)\n\}', clean_cfg_c, re.S)
@@ -1165,7 +1547,7 @@ if older:
     defined = {name: int(value, 0) for name, value in
                re.findall(r'(?m)^\s*#define\s+([A-Za-z0-9_]+)\s+((?:0[xX])?[0-9A-Fa-f]+)\s*(?://|$)',
                           strip_comments(cfg_h))}
-    for marker, shape in older:
+    for marker, digest in older:
         spelled = any(t in migrate_body for t in ('0x%X' % marker, '0x%x' % marker, '%d' % marker))
         via_define = any(value == marker and re.search(r'\b%s\b' % name, migrate_body)
                          for name, value in defined.items())
@@ -1175,7 +1557,7 @@ if older:
                      'radio holding a configuration written with it is read through the current '
                      'address map, which is the silent renumbering this check exists to prevent. '
                      'Recognise the old marker there, or remove the pair only if no radio can be '
-                     'holding it.' % (shape, marker))
+                     'holding it.' % (digest, marker))
 
 print('  EEPROM address map: %d table rows (after expanding %d row macros) and %d multi word '
       'blocks, %d words claimed, none twice, %d words of the legacy filter range kept free (%s)'
