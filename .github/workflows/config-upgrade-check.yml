@@ -33,17 +33,24 @@ jobs:
       # visible or a value that was renamed without the record being refreshed keeps this job green
       # while the committed map no longer describes what the firmware stores. Rewriting the record
       # of the current marker from the table and looking at what that changed is the same rule as
-      # the harness file above.
-      - name: Record the layout map of the current marker
+      # for the harness file above, so both halves live in one step: the rewrite is the only thing
+      # that can tell a stale record, and it is also the one thing that fails on a layout change it
+      # must not repair (a word that changed hands, or a marker LAYOUT_HISTORY does not know). Those
+      # two outcomes are a stale record and a real layout change, so the step says which happened
+      # instead of leaving make's exit code to speak for the layout.
+      - name: Fail if a recorded layout map lags the table
         working-directory: mchf-eclipse
-        run: make layout-record
-
-      - name: Fail if that changed a committed record
         run: |
-          git diff --exit-code -- ':(glob)mchf-eclipse/support/config_upgrade/layout-*.map' || {
-            echo "::error::a recorded layout map does not match the table, run make layout-record and commit it with the change that made it stale"
+          make layout-record || {
+            echo "::error::a recorded layout map cannot be refreshed from the table: the recorder refused a word that changed hands or disappeared, or CONFIG_LAYOUT_VERSION_MAGIC is not in LAYOUT_HISTORY. That is a layout change and needs a new marker with a migration, not a rewritten map."
             exit 1
           }
+          changed="$(git status --porcelain -- ':(glob)support/config_upgrade/layout-*.map')"
+          if [ -n "$changed" ]; then
+            printf '%s\n' "$changed"
+            echo "::error::a recorded layout map does not match the table, run make layout-record and commit the result with the change that made the record stale"
+            exit 1
+          fi
 
       # The guard is only worth its lines if it still fails on the changes it exists for: a value
       # moving to another word, a value that was only renamed, a marker bumped without a map change,
