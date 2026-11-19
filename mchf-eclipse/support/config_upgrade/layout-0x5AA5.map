@@ -1,5 +1,7 @@
 # The id -> word map below word 416 that CONFIG_LAYOUT_VERSION_MAGIC 0x5AA5 wrote.
 # One "word owner" line per claimed word. Rewritten by "make layout-record".
+# A "#renamed <word> <name> <the name it had>" line records a value that kept its word and
+# got another name, so the translation of the previous layout still finds it.
 1 EEPROM_BAND_MODE (written outside the table)
 2 EEPROM_FREQ_HIGH (written outside the table)
 3 EEPROM_FREQ_LOW (written outside the table)
@@ -326,4 +328,4 @@
 413 filter path memories (5 modes x 5 slots)
 414 filter path memories (5 modes x 5 slots)
 415 filter path memories (5 modes x 5 slots)
-#digest 465ca9e5ce54e2936fb4ea052ca416866281d0f18a7ce87edf5b78f7a995dd4f
+#digest b3dc6cabc448038e30cac09bdb2488491296f255ef3e707559aada10feafb187

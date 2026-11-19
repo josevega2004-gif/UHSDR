@@ -48,6 +48,8 @@ root = str(Path(__file__).resolve().parents[2]) + '/'
 # --record-layout rewrites the LAYOUT_HISTORY entry of the marker this build writes and stops there.
 # It is the one command for a change that only renamed a stored value or made one visible to the
 # table parser: neither moves a word, so neither needs a new marker (see the layout guard below).
+# A renamed value is written down with the name it had, so the translation of the previous layout
+# still finds the value it is meant to move.
 RECORD_LAYOUT = '--record-layout' in sys.argv[1:]
 
 cfg_h = open(root+'drivers/ui/ui_configuration.h', encoding='utf-8', errors='surrogateescape').read()
@@ -1271,7 +1273,8 @@ LAYOUT_HISTORY = [
     # merely became visible leaves every recorded word where it was, and then the marker has to
     # stay, because bumping it pushes every healthy radio through the layout migration.
     # "make layout-record" rewrites the file of the current marker from the table: it takes a
-    # renamed value with it and refuses when a word changed hands or disappeared.
+    # renamed value with it, keeps the name the value had in a "#renamed" line so the previous
+    # layout translation still finds it, and refuses when a word changed hands or disappeared.
     (0x5AA5, 'layout-0x5AA5.map'),
 ]
 
@@ -1285,15 +1288,35 @@ if len(set(markers)) != len(markers):
              'map shapes. A radio holding the older shape would be read through the newer addresses.'
              % ', '.join('0x%x' % m for m in sorted({m for m in markers if markers.count(m) > 1})))
 
+RENAME_NOTE = '#renamed '
+
+
 def parse_map_file(path, name):
-    """the "word owner" lines of one recorded layout, if the record matches its own digest"""
+    """the "word owner" lines of one recorded layout, and the renames it carries
+
+    A record is checked against its own digest before any of it is used. Next to the map it carries
+    a "#renamed <word> <name> <the name it had>" line for every value that kept its word and got
+    another name: that is what lets the translation of the previous layout go on looking the value
+    up under the name it had there, instead of taking a rename for a value that never existed."""
     text = path.read_text(encoding='utf-8')
     fault = layout_digest.problem(text, name)
     if fault:
         sys.exit(fault + '\nHistory that can be edited without saying so cannot be the thing the '
                  'translation is judged against.')
     out = {}
+    renames = {}
     for lineno, line in enumerate(text.splitlines(), 1):
+        if line.startswith(RENAME_NOTE):
+            fields = line[len(RENAME_NOTE):].split()
+            if len(fields) != 3 or not fields[0].isdigit():
+                sys.exit('%s line %d is not a "#renamed <word> <name> <the name it had>" line: %r'
+                         % (name, lineno, line))
+            word = int(fields[0])
+            if word in renames:
+                sys.exit('%s records two renames of word %d. One word holds one value, so one note '
+                         'says all there is to say about it.' % (name, word))
+            renames[word] = (fields[1], fields[2])
+            continue
         line = line.split('#')[0].strip()
         if not line:
             continue
@@ -1303,7 +1326,7 @@ def parse_map_file(path, name):
         out[int(word)] = owner.strip()
     if not out:
         sys.exit('%s records no word at all, an empty record says nothing about the layout' % name)
-    return out
+    return out, renames
 
 
 def read_layout_map(name, marker, lenient=False):
@@ -1311,7 +1334,7 @@ def read_layout_map(name, marker, lenient=False):
     path = Path(__file__).resolve().parent / name
     if not path.exists():
         if lenient:
-            return {}          # the recorder is about to write this record, see below
+            return {}, {}      # the recorder is about to write this record, see below
         sys.exit('the layout record %s of marker 0x%X is missing. Restore it, or append the pair '
                  '(0x%X, %s) to LAYOUT_HISTORY with the map that build wrote.'
                  % (name, marker, marker, name))
@@ -1326,20 +1349,42 @@ def read_previous_layout(name):
                  'translation in ui_configuration.c is checked against, so the check would have '
                  'nothing to compare with. Restore the file, do not create it from the current '
                  'table: it describes a layout this firmware no longer writes.' % name)
-    return parse_map_file(path, name)
+    return parse_map_file(path, name)[0]
 
 
-def layout_file_text(marker, rows):
+def layout_file_text(marker, rows, renames):
+    notes = ''.join(RENAME_NOTE + '%d %s %s\n' % (word, now, was)
+                    for word, (now, was) in sorted(renames.items()))
     return layout_digest.seal(
         '# The id -> word map below word %d that CONFIG_LAYOUT_VERSION_MAGIC 0x%X wrote.\n' \
-           '# One "word owner" line per claimed word. Rewritten by "make layout-record".\n%s\n' \
-        % (BASELINE_LAYOUT_FIRST_UNUSED, marker,
+           '# One "word owner" line per claimed word. Rewritten by "make layout-record".\n' \
+           '# A "%s<word> <name> <the name it had>" line records a value that kept its word and\n' \
+           '# got another name, so the translation of the previous layout still finds it.\n%s%s\n' \
+        % (BASELINE_LAYOUT_FIRST_UNUSED, marker, RENAME_NOTE, notes,
            '\n'.join('%d %s' % (word, owner) for word, owner in rows)))
 
 
 def describe(rows):
     return '\n'.join('  word %d: %s' % (word, text) for word, text in rows[:6]) + \
         ('\n  ... and %d more' % (len(rows) - 6) if len(rows) > 6 else '')
+
+
+def plain_name(owner):
+    """the value a "word owner" string names, without how the word is written there"""
+    return owner.split(' (')[0].strip()
+
+
+def carry_rename(notes, word, now, was):
+    """the rename notes with `word` recording `now`, keeping the name the value carried before
+
+    A value renamed twice keeps the name the previous layout knows it by: the second rename reads
+    the name the record has now, and the note that carried it moves along. That is what makes the
+    notes a chain back to the oldest recorded layout rather than one hop."""
+    oldest = notes[word][1] if notes.get(word, (None,))[0] == was else was
+    for other, (name, before) in sorted(notes.items()):
+        if name == was and other != word:
+            notes[other] = (now, before)
+    notes[word] = (now, oldest)
 
 
 def map_shape(mapping):
@@ -1358,8 +1403,11 @@ if BASELINE_LAYOUT_FIRST_UNUSED != first_unused:
              'reported, a word stored above the baseline would be skipped without a word.'
              % (BASELINE_LAYOUT_FIRST_UNUSED, first_unused, first_unused))
 
-recorded = {marker: read_layout_map(name, marker, lenient=RECORD_LAYOUT and marker == current_magic)
-            for marker, name in LAYOUT_HISTORY}
+recorded = {}
+recorded_renames = {}
+for marker, name in LAYOUT_HISTORY:
+    recorded[marker], recorded_renames[marker] = read_layout_map(
+        name, marker, lenient=RECORD_LAYOUT and marker == current_magic)
 current_map = dict(layout_map)
 
 # two markers for one map shape mean a bump without a map change: every radio holding the older
@@ -1402,7 +1450,8 @@ records = dict(LAYOUT_HISTORY)
 
 # What differs is judged by shape first. A value that only got another name keeps its word, its
 # range and its meaning, so it is the same layout: renaming it must neither need a marker nor push
-# a single radio through the layout migration, and "make layout-record" takes the new name.
+# a single radio through the layout migration, and "make layout-record" takes the new name while
+# keeping the old one, which is the name the translation of the previous layout has for that value.
 #
 # Two values that trade words are not that. Nothing was renamed - both names still exist before and
 # after - so the value of one is simply read at the word of the other. That is the renumbering this
@@ -1434,8 +1483,11 @@ if RECORD_LAYOUT:
                  'through the wrong addresses.'
                  % (len(relocated) + len(gone), BASELINE_LAYOUT_FIRST_UNUSED,
                     describe(relocated + gone)))
+    notes = dict(recorded_renames[current_magic])
+    for word, _text in renamed:
+        carry_rename(notes, word, plain_name(current_map[word]), plain_name(rec_map[word]))
     path = Path(__file__).resolve().parent / records[current_magic]
-    text = layout_file_text(current_magic, layout_map)
+    text = layout_file_text(current_magic, layout_map, notes)
     if path.exists() and path.read_text(encoding='utf-8') == text:
         print('  layout record: marker 0x%X already records the %d words below %d this build '
               'stores, nothing to do.'
@@ -1445,8 +1497,9 @@ if RECORD_LAYOUT:
     print('  layout record: marker 0x%X now records %d words below %d in %s%s. Commit it together '
           'with the change that made it stale; the marker does not move.'
           % (current_magic, len(current_map), BASELINE_LAYOUT_FIRST_UNUSED, records[current_magic],
-             (', renaming %s' % ', '.join('%d %s' % (w, current_map[w]) for w, _t in renamed[:3]) +
-              (' ...' if len(renamed) > 3 else '')) if renamed else
+             (', renaming %s and keeping the name it had' %
+              (', '.join('%d %s' % (w, current_map[w]) for w, _t in renamed[:3]) +
+               (' ...' if len(renamed) > 3 else ''))) if renamed else
              (', including %s' % ', '.join('%d %s' % (w, current_map[w]) for w, _t in added[:3]))
              if added else ''))
     sys.exit(0)
@@ -1471,7 +1524,8 @@ if renamed:
     print('  layout map: %d word(s) below %d are stored by a value the record names differently '
           '(%s). Each of them kept its word and neither name appears anywhere else in the other '
           'map, so this is a rename: the marker stays 0x%X, run "make layout-record" and commit it '
-          'next to the rename.'
+          'next to the rename. The record keeps the name the value had, so the previous layout '
+          'translation still finds the value it moves.'
           % (len(renamed), BASELINE_LAYOUT_FIRST_UNUSED,
              ', '.join('%d %s' % (w, current_map[w]) for w, _t in renamed[:3]) +
              (' ...' if len(renamed) > 3 else ''), current_magic))
@@ -1539,7 +1593,7 @@ def layout_owner_key(owner):
     A record notes how a word is written (" (written outside the table)") or how many slots a
     block has, and it names the per band blocks by position, so the band number is dropped: the
     position is what was renumbered, not the value."""
-    name = owner.split(' (')[0].strip()
+    name = plain_name(owner)
     m = re.match(r'^EEPROM_BAND\d+(_\w+)$', name)
     return 'band' + m.group(1) if m and m.group(1) in BAND_BLOCK_OWNERS else name
 
@@ -1554,6 +1608,39 @@ def firmware_function(name):
     return m.group(0)
 
 
+# The rename notes are what tell the translation of the previous layout which value it is looking
+# at: a value that kept its word and got another name is still the value that record names. A
+# renumbering is not that - the guard above refuses a word that changed hands - so following a
+# note cannot hide one. A note that does not describe the value the record has at its word is a
+# record that disagrees with itself, and the translation would be checked against the wrong value.
+for word, (now, was) in sorted(recorded_renames[current_magic].items()):
+    owner = rec_map.get(word)
+    if owner is None:
+        sys.exit('%s records that word %d was renamed to %s, but it names no value at that word. '
+                 'The note and the map have to describe the same words.'
+                 % (records[current_magic], word, now))
+    if plain_name(owner) != now:
+        sys.exit('%s records that word %d was renamed to %s, but it names %s there. The note and '
+                 'the map have to describe the same value, otherwise the previous layout '
+                 'translation is checked against a value the record does not carry.'
+                 % (records[current_magic], word, now, plain_name(owner)))
+    if now == was:
+        sys.exit('%s records that word %d was renamed from %s to itself, which says nothing about '
+                 'the value. Drop the note.' % (records[current_magic], word, now))
+
+renamed_values = {layout_owner_key(now): layout_owner_key(was)
+                  for _word, (now, was) in recorded_renames[current_magic].items()}
+
+
+def oldest_name(key):
+    """the name a value had in the layout the previous record describes, along the notes"""
+    seen = set()
+    while key in renamed_values and key not in seen:
+        seen.add(key)
+        key = renamed_values[key]
+    return key
+
+
 previous_map = read_previous_layout(PREVIOUS_LAYOUT_RECORD)
 previous_keys = {}
 for word, owner in previous_map.items():
@@ -1566,7 +1653,7 @@ for owner, words in sorted(previous_keys.items()):
 
 current_keys = {}
 for word, owner in current_map.items():
-    current_keys.setdefault(layout_owner_key(owner), []).append(word)
+    current_keys.setdefault(oldest_name(layout_owner_key(owner)), []).append(word)
 
 old_layout_rows = []            # (word, kind, lo, hi, owner) for every word of the current record
 claimed_previous = set()

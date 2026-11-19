@@ -5,8 +5,9 @@ The guard only earns its place if it still fails on the changes it exists to cat
 one mutation at a time and checks the verdict:
 
   1. a stored value moves to another word      -> the check fails, the recorder refuses to record it
-  2. a stored value is only renamed           -> the check passes, the recorder takes the new name,
-                                                 and the marker stays
+  2. a stored value is only renamed           -> the check passes, the recorder takes the new name
+                                                 and keeps the name the value had, the marker
+                                                 stays, and the compiled translation still finds it
   3. an offset of the previous layout translation moves
                                               -> the compiled translation disagrees with the two
                                                  records, naming the settings it reads wrongly
@@ -203,24 +204,33 @@ def case_renumbering():
 def case_rename():
     """a stored value that only got another name: same word, same layout, no marker
 
-    The record is left naming the value the way it was called before, which is the state a rename
-    puts it in: the table has the new name and the record still has the old one.
+    The name is changed where the table declares it - the header and the row - and the record is
+    left naming the value the way it was called before, which is the state a rename puts the tree
+    in. The recorder has to take the new name and write down the name the value had; the compiled
+    harness then has to go on translating the value, because the record kept that name for it.
+    Losing the link there is what used to leave a marker bump as the only way through.
     """
-    text = RECORD.read_text(encoding='utf-8')
-    rows = [line for line in text.splitlines() if re.fullmatch(r'\d+ EEPROM_\w+', line)]
-    assert rows, 'the record lists no plain EEPROM_ name, this case needs one'
-    word, owner = rows[0].split()
-    stale = owner + '_BEFORE_RENAME'
-    RECORD.write_text(layout_digest.seal(
-        text.replace('%s %s\n' % (word, owner), '%s %s\n' % (word, stale))), encoding='utf-8')
+    text = HEADER.read_text(encoding='utf-8')
+    match = re.search(r'(?m)^#define\s+(EEPROM_FREQ_STEP)\s+(\d+)\s*$', text)
+    assert match, 'the define this case renames is gone, update this case'
+    owner, word = match.group(1), match.group(2)
+    stale = owner + '_RENAMED'
+    for path in (HEADER, TABLE):
+        source = path.read_text(encoding='utf-8')
+        path.write_text(re.sub(r'\b%s\b' % owner, stale, source), encoding='utf-8')
 
-    expect('a stored value the record names differently', run(), 0, '%s %s' % (word, owner))
+    expect('a stored value renamed where the table declares it', run(), 0,
+           '%s %s' % (word, stale))
     expect('the recorder takes the name the table stores', run('--record-layout'), 0, RECORD_NAME)
     written = RECORD.read_text(encoding='utf-8')
-    if ('%s %s\n' % (word, stale)) in written or ('%s %s\n' % (word, owner)) not in written:
-        print('  FAIL  the recorder left the record naming the value %s' % stale)
-        failures.append('the recorder kept the stale name')
+    if ('%s %s\n' % (word, stale)) not in written or ('%s %s\n' % (word, owner)) in written:
+        print('  FAIL  the record does not name the value %s' % stale)
+        failures.append('the recorder did not take the new name')
+    if ('#renamed %s %s %s\n' % (word, stale, owner)) not in written:
+        print('  FAIL  the record dropped the name the value had (%s)' % owner)
+        failures.append('the recorder did not keep the previous name')
     expect('the recorder runs again without complaining', run('--record-layout'), 0)
+    expect('the compiled check still translates the renamed value', run_check(), 0)
 
 
 def case_old_layout_translation():
