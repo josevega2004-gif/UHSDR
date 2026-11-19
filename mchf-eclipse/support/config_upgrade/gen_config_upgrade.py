@@ -637,6 +637,13 @@ for cond, ctype, idname, var, d, lo, hi in table:
     if vals[idname] >= first_unused:
         sys.exit('%s (&%s) has id %d but EEPROM_FIRST_UNUSED is only %d'
                  % (idname, var, vals[idname], first_unused))
+    span = RTYPES.get(ctype, ('', 1))[1]
+    if vals[idname] + span > first_unused:
+        sys.exit('%s (&%s) is stored in %d words and ends at word %d, above EEPROM_FIRST_UNUSED '
+                 '%d: the second word is written outside the configuration range, where no record '
+                 'claims it and every check here stops looking. Give it a lower id, or raise '
+                 'EEPROM_FIRST_UNUSED and the baseline with it'
+                 % (idname, var, span, vals[idname] + span - 1, first_unused))
     dv, mn, mx = resolve(d), resolve(lo), resolve(hi)
     if None in (dv, mn, mx):
         unresolved += 1
@@ -687,6 +694,21 @@ for eid, users in sorted(by_id.items()):
             sys.exit('eeprom id %d (%s) is used twice in the ConfigEntry table of this '
                      'configuration: &%s and &%s, one of them silently overwrites the other'
                      % (eid, users[i][0], users[i][1], users[j][1]))
+
+# The other half of the same rule: one RAM variable must not be stored under two ids. The address
+# map cannot see this - the two rows have different words - but the load writes both into the same
+# field, whichever row comes last wins, and the save writes that one value into both words, so the
+# operator sees one of the two settings mirror the other no matter which he changes.
+by_var = {}
+for cond, ctype, idname, var, d, lo, hi in table:
+    by_var.setdefault(var.strip(), []).append(idname)
+for var, ids in sorted(by_var.items()):
+    if len(ids) > 1:
+        sys.exit('&%s is stored under %s in the ConfigEntry table of this configuration. Both rows '
+                 'load into the same variable, so the last one wins and the save writes its value '
+                 'into both words: one of the two settings mirrors the other. Give one of them its '
+                 'own variable, or store it under the other id only.'
+                 % (var, ' and '.join(sorted(ids))))
 
 # which items the menu actually offers, and where their code lives: the case bodies of items that
 # the menu structure does not list any more are dead code and must not be compared, they check
@@ -1089,6 +1111,56 @@ for n in single_direct:
         sys.exit('%s is not used in ui_configuration.c any more, drop it from the address map of '
                  'gen_config_upgrade.py' % n)
     bulk_blocks.append((hdr_define(n), 1, '%s (written outside the table)' % n))
+
+# -----------------------------------------------------------------------------------------------
+# What the save path writes outside the table, derived from the save path itself
+#
+# The list above is how the map learned about these words, and until now nothing tied it to the
+# code: the only check was that each name still occurs somewhere in the file. A new direct write -
+# the kind that destroyed the 22 settings under the filter path block - would not be in the map at
+# all, and a removed one would stay in it and keep its word reserved. The save function is the one
+# place those writes happen, so the set of EEPROM names in it has to be exactly the set the map
+# claims outside the table.
+save_call = re.search(r'uint16_t\s+UiConfiguration_SaveEepromValues\s*\(\s*void\s*\)\s*\{(.*?)\n\}',
+                      clean_cfg_c, re.S)
+if not save_call:
+    sys.exit('UiConfiguration_SaveEepromValues() is gone from ui_configuration.c or its signature '
+             'changed, the words the save path writes outside the table cannot be checked')
+save_body = save_call.group(1)
+save_written = {name for name in re.findall(r'\b(EEPROM_\w+)\b', save_body + wbody)
+                if name in vals and vals[name] < first_unused}
+map_direct = set(single_direct) | set(band_bases) | {'EEPROM_FILTER_PATH_MAP_BASE'}
+unmapped = sorted(save_written - map_direct)
+unwritten = sorted(map_direct - save_written)
+if unmapped or unwritten:
+    sys.exit('the save path and the address map disagree about the words written outside the '
+             'ConfigEntry table.\n'
+             '  written by UiConfiguration_SaveEepromValues() but not in the map: %s\n'
+             '  in the map but no longer written by it: %s\n'
+             'A word the map does not know can be handed to a table row and destroyed at every '
+             'save; a word the save no longer writes keeps a word reserved for nothing. Add it to '
+             'single_direct or bulk_blocks of gen_config_upgrade.py, or drop it from there.'
+             % (', '.join(unmapped) or 'none', ', '.join(unwritten) or 'none'))
+
+# The marker is what stops the next boot from translating the configuration it just saved. Writing
+# it before the values would leave a current marker over words of the previous layout, and not
+# writing it at all would migrate the radio on every boot, each time reading its current words
+# through the previous addresses.
+marker_write = re.search(r'ConfigStorage_WriteVariable\(\s*EEPROM_CONFIG_LAYOUT_VERSION\s*,\s*'
+                         r'CONFIG_LAYOUT_VERSION_MAGIC\s*\)', save_body)
+if not marker_write:
+    sys.exit('UiConfiguration_SaveEepromValues() no longer writes CONFIG_LAYOUT_VERSION_MAGIC to '
+             'EEPROM_CONFIG_LAYOUT_VERSION. Without it the next boot migrates the configuration '
+             'again and reads its current words through the previous layout addresses.')
+values_at = save_body.find('UiConfiguration_WriteConfigEntries')
+if values_at >= 0 and marker_write.start() < values_at:
+    sys.exit('UiConfiguration_SaveEepromValues() writes the layout marker before the configuration '
+             'values. A save that stops in between leaves the current marker over values of the '
+             'previous layout, and the next boot reads them through the current addresses. Write '
+             'the marker after the values.')
+print('  save path: %d words written outside the table (%s), all of them in the address map, the '
+      'layout marker written after the values'
+      % (len(save_written), ', '.join(sorted(save_written))))
 
 # the keyer macro memory lives in its own byte area below the variables, make sure it stayed there
 if hdr_define('EEPROM_KEYER_MEMORY_ADDRESS') < first_unused:
@@ -1597,6 +1669,84 @@ T('               "recorded previous map gives them, none twice\\n\\n", old_layo
 T('    }')
 T('    return bad ? 1 : 0;')
 T('}')
+
+# The lifecycle of a migration, which the static comparison of the two maps cannot see: the save
+# has to carry each translated value to its current word and write the marker, and the marker has
+# to be what stops the next boot from translating the configuration a second time.
+lifecycle_c = []
+L2 = lifecycle_c.append
+L2('/* ---------------------------------------------------------------------------------------------')
+L2('   the migration lifecycle: one save turns a previous layout configuration into a current one,')
+L2('   and the marker that save writes stops the next boot from translating it once more */')
+L2('#define MARKER_WORD %du' % hdr_define('EEPROM_CONFIG_LAYOUT_VERSION'))
+L2('#define LAYOUT_MAGIC 0x%Xu' % current_magic)
+L2('')
+L2('/* mirror of UiConfiguration_LayoutMigrationRequired(): only the current magic means the words')
+L2('   were stored in this layout already */')
+L2('static bool needs_migration(const image_t* img)')
+L2('{')
+L2('    return !(img->present[MARKER_WORD] && img->value[MARKER_WORD] == LAYOUT_MAGIC);')
+L2('}')
+L2('')
+L2('/* the save of a migrated configuration: every value read through the translation is written')
+L2('   at its current word, and the marker is written last */')
+L2('static void save_as_current(image_t* img)')
+L2('{')
+L2('    const image_t before = *img;')
+L2('    for (unsigned w = 0; w < FIRST_UNUSED; w++)')
+L2('    {')
+L2('        const uint16_t old = UiConfiguration_OldLayoutAddress((uint16_t)w);')
+L2('        if (old != CONFIG_LAYOUT_OLD_NO_VALUE && old < %d)' % IMAGE_SLOTS)
+L2('        {')
+L2('            img->value[w] = before.value[old];')
+L2('            img->present[w] = before.present[old];')
+L2('        }')
+L2('    }')
+L2('    img->value[MARKER_WORD] = LAYOUT_MAGIC;')
+L2('    img->present[MARKER_WORD] = true;')
+L2('}')
+L2('')
+L2('static int check_migration_lifecycle(void)')
+L2('{')
+L2('    unsigned probed = 0;')
+L2('    for (unsigned i = 0; i < old_layout_count; i++)')
+L2('    {')
+L2('        const old_layout_t* e = &old_layout[i];')
+L2('        image_t img;')
+L2('        if (e->kind != OLD_ONE)')
+L2('        {')
+L2('            continue;           /* a block word needs its band, the translation check has it */')
+L2('        }')
+L2('        blank_image(&img);')
+L2('        img.value[e->lo] = 0x1234;')
+L2('        img.present[e->lo] = true;')
+L2('        if (!needs_migration(&img))')
+L2('        {')
+L2('            printf("CHECK FAILED: a configuration without the layout marker is not migrated, "')
+L2('                   "its words are read as if they were current\\n");')
+L2('            return 1;')
+L2('        }')
+L2('        save_as_current(&img);')
+L2('        if (needs_migration(&img))')
+L2('        {')
+L2('            printf("CHECK FAILED: the save did not mark the configuration as current, so the "')
+L2('                   "next boot translates %s (id %u) again\\n", e->owner, e->id);')
+L2('            return 1;')
+L2('        }')
+L2('        if (!img.present[e->id] || img.value[e->id] != 0x1234)')
+L2('        {')
+L2('            printf("CHECK FAILED: %s (id %u) was stored at word %u in the previous layout and "')
+L2('                   "did not arrive at its current word after the save\\n",')
+L2('                   e->owner, e->id, e->lo);')
+L2('            return 1;')
+L2('        }')
+L2('        probed++;')
+L2('    }')
+L2('    printf("migration lifecycle: %u values stored in the previous layout are read at their "')
+L2('           "current word after one save, and the marker that save writes stops the next boot "')
+L2('           "from translating them again\\n\\n", probed);')
+L2('    return 0;')
+L2('}')
 
 print('  previous layout translation: %d words of the current map, %d translated onto a recorded '
       'word of the previous layout, %d of them a band block, %d values the previous layout did '
@@ -2471,6 +2621,10 @@ static int check_row_roundtrip(void)
 """)
 A('')
 
+# the lifecycle model reads and writes an image, so it belongs after the image helpers above
+for line in lifecycle_c:
+    A(line)
+A('')
 A('int main(void)')
 A('{')
 A('    image_t img;')
@@ -2534,6 +2688,7 @@ A('    rc |= check_save_order();')
 A('    rc |= check_filter_map_migration();')
 A('    rc |= check_filter_map_save();')
 A('    rc |= check_old_layout_translation();')
+A('    rc |= check_migration_lifecycle();')
 A('    if (entry_count == 0)')
 A('    {')
 A('        printf("CHECK FAILED: no entries parsed, the generator matched nothing\\n");')

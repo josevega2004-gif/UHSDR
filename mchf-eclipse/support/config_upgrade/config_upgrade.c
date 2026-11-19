@@ -1665,6 +1665,79 @@ static int check_row_roundtrip(void)
     return rc;
 }
 
+/* ---------------------------------------------------------------------------------------------
+   the migration lifecycle: one save turns a previous layout configuration into a current one,
+   and the marker that save writes stops the next boot from translating it once more */
+#define MARKER_WORD 376u
+#define LAYOUT_MAGIC 0x5AA5u
+
+/* mirror of UiConfiguration_LayoutMigrationRequired(): only the current magic means the words
+   were stored in this layout already */
+static bool needs_migration(const image_t* img)
+{
+    return !(img->present[MARKER_WORD] && img->value[MARKER_WORD] == LAYOUT_MAGIC);
+}
+
+/* the save of a migrated configuration: every value read through the translation is written
+   at its current word, and the marker is written last */
+static void save_as_current(image_t* img)
+{
+    const image_t before = *img;
+    for (unsigned w = 0; w < FIRST_UNUSED; w++)
+    {
+        const uint16_t old = UiConfiguration_OldLayoutAddress((uint16_t)w);
+        if (old != CONFIG_LAYOUT_OLD_NO_VALUE && old < 1024)
+        {
+            img->value[w] = before.value[old];
+            img->present[w] = before.present[old];
+        }
+    }
+    img->value[MARKER_WORD] = LAYOUT_MAGIC;
+    img->present[MARKER_WORD] = true;
+}
+
+static int check_migration_lifecycle(void)
+{
+    unsigned probed = 0;
+    for (unsigned i = 0; i < old_layout_count; i++)
+    {
+        const old_layout_t* e = &old_layout[i];
+        image_t img;
+        if (e->kind != OLD_ONE)
+        {
+            continue;           /* a block word needs its band, the translation check has it */
+        }
+        blank_image(&img);
+        img.value[e->lo] = 0x1234;
+        img.present[e->lo] = true;
+        if (!needs_migration(&img))
+        {
+            printf("CHECK FAILED: a configuration without the layout marker is not migrated, "
+                   "its words are read as if they were current\n");
+            return 1;
+        }
+        save_as_current(&img);
+        if (needs_migration(&img))
+        {
+            printf("CHECK FAILED: the save did not mark the configuration as current, so the "
+                   "next boot translates %s (id %u) again\n", e->owner, e->id);
+            return 1;
+        }
+        if (!img.present[e->id] || img.value[e->id] != 0x1234)
+        {
+            printf("CHECK FAILED: %s (id %u) was stored at word %u in the previous layout and "
+                   "did not arrive at its current word after the save\n",
+                   e->owner, e->id, e->lo);
+            return 1;
+        }
+        probed++;
+    }
+    printf("migration lifecycle: %u values stored in the previous layout are read at their "
+           "current word after one save, and the marker that save writes stops the next boot "
+           "from translating them again\n\n", probed);
+    return 0;
+}
+
 int main(void)
 {
     image_t img;
@@ -1731,6 +1804,7 @@ int main(void)
     rc |= check_filter_map_migration();
     rc |= check_filter_map_save();
     rc |= check_old_layout_translation();
+    rc |= check_migration_lifecycle();
     if (entry_count == 0)
     {
         printf("CHECK FAILED: no entries parsed, the generator matched nothing\n");

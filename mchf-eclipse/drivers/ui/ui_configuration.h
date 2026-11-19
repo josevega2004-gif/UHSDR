@@ -623,7 +623,8 @@ uint16_t    UiConfiguration_SaveEepromValues(void);
 // UiConfiguration_LayoutMigrationRequired() knows exactly one previous layout, so a new value here
 // must be paired with accepting the value the previous build wrote, otherwise every healthy radio
 // gets read through the pre-renumbering translation. make config-upgrade-check now refuses a change
-// to the shape of the map while this constant stays put, see BASELINE_LAYOUT_DIGEST.
+// to the shape of the map while this constant stays put, see the layout guard in
+// support/config_upgrade/gen_config_upgrade.py.
 //
 #define CONFIG_LAYOUT_VERSION_MAGIC                 0x5AA5
 #define EEPROM_CONFIG_LAYOUT_VERSION                376
