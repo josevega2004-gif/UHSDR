@@ -416,7 +416,8 @@ layout-record:
 layout-guard-selftest:
 	# run the layout guard through the changes it exists to catch: a value moving to another word,
 	# a marker bumped without a map change, a parser that learns a stored word, one that loses a
-	# word, and a record that does not parse. It mutates the tree and leaves it as it found it.
+	# word, and a record that does not parse. It rewrites those files in place, leaves them as it
+	# found them, and refuses to start while any of them differs from HEAD.
 	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/layout_guard_selftest.py
 
 .PHONY: config-upgrade-check

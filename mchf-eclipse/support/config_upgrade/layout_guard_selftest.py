@@ -12,7 +12,9 @@ one mutation at a time to the working tree, runs the generator against it, and c
   5. the record does not parse                 -> the check fails
 
 The five cases were run by hand after every change to the guard; this is that matrix, scripted. Every
-mutation is undone again, also when a case fails, so the tree is left as it was found.
+mutation is undone again, also when a case fails, so the tree is left as it was found. Because the
+files are rewritten in place, it refuses to start while any of them differs from HEAD: an interrupted
+run must not be the reason uncommitted work disappears.
 """
 import re
 import subprocess
@@ -162,7 +164,35 @@ CASES = (
 )
 
 
+def uncommitted(paths):
+    """what git reports for these files, so an interrupted run cannot discard uncommitted work"""
+    rel = [str(path.relative_to(ROOT)) for path in paths]
+    try:
+        status = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain', '--', *rel],
+                                capture_output=True, text=True)
+    except OSError as err:
+        sys.exit('cannot ask git whether the files this self-test rewrites are clean (%s). Run it '
+                 'from a git checkout, or commit or stash those files first.' % err)
+    if status.returncode != 0:
+        reason = (status.stderr.strip() or status.stdout.strip())
+        if 'not a git repository' in reason:
+            sys.exit('this is not a git checkout, so the self-test cannot tell whether the files it '
+                     'rewrites carry work that is not committed. Run it in the repository checkout.')
+        sys.exit('git could not report the state of the files this self-test rewrites: %s\n'
+                 'Commit or stash them first.' % reason)
+    return [line for line in status.stdout.splitlines() if line.strip()], rel
+
+
 def main():
+    dirty, rel = uncommitted(TOUCHED)
+    if dirty:
+        names = [line[3:].strip().strip('"') for line in dirty]
+        sys.exit('refusing to run: this self-test rewrites these files in place and they already '
+                 'differ from HEAD, so an interrupted run would discard that work:\n%s\n'
+                 'Commit or stash them first, for example\n'
+                 '  git stash push -u -- %s\n'
+                 'and run "make layout-guard-selftest" again.'
+                 % ('\n'.join('  ' + line for line in dirty), ' '.join(names)))
     snapshot = {path: path.read_bytes() for path in TOUCHED}
     try:
         for title, case in CASES:
