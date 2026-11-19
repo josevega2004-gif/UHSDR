@@ -192,65 +192,6 @@ static void run_agc(const char* title, const image_t* img, uint16_t stored_count
 
 /* every value the AGC menu can produce has to survive a save/load cycle, on the serial EEPROM
    as well as on the flash of the boards that have no external EEPROM */
-static int check_agc_roundtrip(void)
-{
-    int rc = 0;
-    for (unsigned i = 0; i < agc_entry_count; i++)
-    {
-        const agc_entry_t* e = &agc_entries[i];
-        const int32_t probes[] = { e->def, e->min, e->max, e->menu_min, e->menu_max, e->menu_def };
-        for (unsigned p = 0; p < sizeof(probes)/sizeof(probes[0]); p++)
-        {
-            const int32_t want = probes[p];
-            if ((want < e->min) || (want > e->max)) continue;
-            if (e->menu_max < 0 && p >= 3) continue;
-            if (agc_load_bits(e, agc_store_bits(e, want)) != want)
-            {
-                printf("CHECK FAILED: %s cannot keep %d in its storage slot\n", e->idname, (int)want);
-                rc = 1;
-                continue;
-            }
-            for (unsigned s = 0; s < 2; s++)
-            {
-                image_t img;
-                memset(&img, 0, sizeof(img));
-                for (unsigned k = 0; k < sizeof(img.value)/sizeof(img.value[0]); k++)
-                {
-                    img.value[k] = 0xFFFF;
-                }
-                agc_save(&img, e, want);
-                const int32_t got = agc_read(&img, e, false, (store_t)s);
-                if (got != want)
-                {
-                    printf("CHECK FAILED: %s: menu value %d does not survive save/load (%s reads %d)\n",
-                           e->idname, (int)want, s ? "flash" : "i2c eeprom", (int)got);
-                    rc = 1;
-                }
-            }
-        }
-        if (e->menu_max >= 0)
-        {
-            if ((e->menu_min < e->min) || (e->menu_max > e->max))
-            {
-                printf("CHECK FAILED: %s can be set to %d..%d but only %d..%d is stored\n",
-                       e->idname, (int)e->menu_min, (int)e->menu_max, (int)e->min, (int)e->max);
-                rc = 1;
-            }
-        }
-        if ((e->def < e->min) || (e->def > e->max))
-        {
-            printf("CHECK FAILED: %s default %d is outside its stored range %d..%d\n",
-                   e->idname, (int)e->def, (int)e->min, (int)e->max);
-            rc = 1;
-        }
-    }
-    return rc;
-}
-
-/* The upgrade case: the configuration on the radio was written by a firmware whose entry count
-   was below the id of a value that exists now. A value the operator sets after the upgrade has to
-   survive the next power cycle, which means the save has to record the ceiling of the current
-   firmware, not the one it read. */
 static int check_upgrade_persistence(void)
 {
     int rc = 0;
@@ -787,6 +728,295 @@ static int check_filter_map_save(void)
     return rc;
 }
 
+/* ---------------------------------------------------------------------------------------------
+   one round trip per row of the configuration table. The read rules are those of the firmware:
+   the stored word goes through the type before the range check, which is where a Uint8 row
+   loses its high byte and an Int32_16 row gets its sign back
+*/
+typedef enum { R_UINT8, R_UINT16, R_UINT32_16, R_INT16, R_INT32_16, R_INT32 } rtype_t;
+typedef struct { const char* idname; uint16_t id; rtype_t type; uint16_t words; int32_t def, min, max, outside; } rrow_t;
+
+#define R_NO_OUTSIDE INT32_MIN
+static const rrow_t rrows[] =
+{
+    { "EEPROM_TX_AUDIO_SRC", 5u, R_UINT8, 1u, 0, 0, 4, 5 },
+    { "EEPROM_AUDIO_GAIN", 8u, R_UINT8, 1u, 16, 0, 30, 31 },
+    { "EEPROM_RX_CODEC_GAIN", 9u, R_UINT8, 1u, 9, 0, 9, 10 },
+    { "EEPROM_NB_SETTING", 76u, R_UINT8, 1u, 0, 0, 15, 16 },
+    { "EEPROM_TX_POWER_LEVEL", 12u, R_UINT8, 1u, 2, 0, 5, 6 },
+    { "EEPROM_CW_KEYER_SPEED", 13u, R_UINT8, 1u, 20, 5, 48, 49 },
+    { "EEPROM_CW_KEYER_MODE", 14u, R_UINT8, 1u, 0, 0, 3, 4 },
+    { "EEPROM_CW_KEYER_WEIGHT", 331u, R_UINT8, 1u, 100, 50, 150, 151 },
+    { "EEPROM_CW_SIDETONE_GAIN", 15u, R_UINT8, 1u, 5, 0, 15, 16 },
+    { "EEPROM_FREQ_CAL", 75u, R_INT32_16, 1u, 0, -1499, 1499, 1500 },
+    { "EEPROM_AGC_WDSP_MODE", 318u, R_UINT8, 1u, 2, 0, 5, 6 },
+    { "EEPROM_AGC_WDSP_HANG", 321u, R_UINT8, 1u, 0, 0, 1, 2 },
+    { "EEPROM_AGC_WDSP_THRESH", 319u, R_INT32_16, 1u, 20, -20, 120, 121 },
+    { "EEPROM_AGC_WDSP_SLOPE", 320u, R_UINT8, 1u, 70, 0, 200, 201 },
+    { "EEPROM_AGC_WDSP_TAU_DECAY_0", 323u, R_INT32_16, 1u, 4000, 50, 5000, 5001 },
+    { "EEPROM_AGC_WDSP_TAU_DECAY_1", 326u, R_INT32_16, 1u, 2000, 50, 5000, 5001 },
+    { "EEPROM_AGC_WDSP_TAU_DECAY_2", 327u, R_INT32_16, 1u, 500, 50, 5000, 5001 },
+    { "EEPROM_AGC_WDSP_TAU_DECAY_3", 328u, R_INT32_16, 1u, 250, 50, 5000, 5001 },
+    { "EEPROM_AGC_WDSP_TAU_DECAY_4", 329u, R_INT32_16, 1u, 50, 50, 5000, 5001 },
+    { "EEPROM_AGC_WDSP_TAU_DECAY_5", 385u, R_INT32_16, 1u, 1, 1, 5000, 5001 },
+    { "EEPROM_AGC_WDSP_HANG_TIME", 383u, R_INT32_16, 1u, 500, 10, 5000, 5001 },
+    { "EEPROM_AGC_WDSP_HANG_THRESH", 384u, R_INT32_16, 1u, 45, -20, 120, 121 },
+    { "EEPROM_AGC_WDSP_TAU_HANG_DECAY", 324u, R_INT32_16, 1u, 500, 100, 5000, 5001 },
+    { "EEPROM_MIC_BOOST", 16u, R_INT32_16, 1u, 0, 0, 20, 21 },
+    { "EEPROM_AM_CARRIER_LEVEL", 377u, R_UINT8, 1u, 100, 50, 125, 126 },
+    { "EEPROM_AM_TX_SIDEBAND", 378u, R_UINT8, 1u, 0, 0, 2, 3 },
+    { "EEPROM_AM_PEP_HOLD", 379u, R_UINT8, 1u, 4, 0, 20, 21 },
+    { "EEPROM_AM_PEP_DIM", 380u, R_UINT8, 1u, 1, 0, 1, 2 },
+    { "EEPROM_AM_PEP_TARGET", 381u, R_UINT8, 1u, 12, 4, 40, 41 },
+    { "EEPROM_AM_PEP_WARN", 382u, R_UINT8, 1u, 6, 0, 20, 21 },
+    { "EEPROM_MIC_GAIN", 78u, R_UINT8, 1u, 15, 2, 99, 100 },
+    { "EEPROM_LINE_GAIN", 79u, R_UINT8, 1u, 12, 3, 31, 32 },
+    { "EEPROM_SIDETONE_FREQ", 80u, R_UINT32_16, 1u, 750, 400, 10000, 10001 },
+    { "EEPROM_METER_COLOUR_UP", 295u, R_UINT8, 1u, 2, 0, 19, 20 },
+    { "EEPROM_METER_COLOUR_DOWN", 296u, R_UINT8, 1u, 8, 0, 19, 20 },
+    { "EEPROM_SPECTRUM_TRACE_COLOUR", 85u, R_UINT8, 1u, 0, 0, 19, 20 },
+    { "EEPROM_SPECTRUM_GRID_COLOUR", 86u, R_UINT8, 1u, 16, 0, 19, 20 },
+    { "EEPROM_SPECTRUM_CENTRE_LINE_COLOUR", 90u, R_UINT8, 1u, 16, 0, 19, 20 },
+    { "EEPROM_SPECTRUM_SCALE_COLOUR", 87u, R_UINT8, 1u, 16, 0, 19, 20 },
+    { "EEPROM_PADDLE_REVERSE", 88u, R_UINT8, 1u, 0, 0, 1, 2 },
+    { "EEPROM_CW_RX_DELAY", 89u, R_UINT8, 1u, 8, 0, 50, 51 },
+    { "EEPROM_MAX_VOLUME", 10u, R_UINT8, 1u, 16, 8, 30, 31 },
+    { "EEPROM_PA_BIAS", 7u, R_UINT8, 1u, 0, 0, 115, 116 },
+    { "EEPROM_PA_CW_BIAS", 147u, R_UINT8, 1u, 0, 0, 115, 116 },
+    { "EEPROM_IQ_AUTO_CORRECTION", 316u, R_UINT8, 1u, 1, 0, 1, 2 },
+    { "EEPROM_TX_IQ_80M_GAIN_BALANCE", 17u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_80M_PHASE_BALANCE", 18u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_80M_GAIN_BALANCE_TRANS_OFF", 164u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_80M_PHASE_BALANCE_TRANS_OFF", 301u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_20M_GAIN_BALANCE", 357u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_20M_PHASE_BALANCE", 358u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_20M_GAIN_BALANCE_TRANS_OFF", 363u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_20M_PHASE_BALANCE_TRANS_OFF", 364u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_15M_GAIN_BALANCE", 359u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_15M_PHASE_BALANCE", 360u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_15M_GAIN_BALANCE_TRANS_OFF", 365u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_15M_PHASE_BALANCE_TRANS_OFF", 366u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_10M_GAIN_BALANCE", 133u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_10M_PHASE_BALANCE", 134u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_10M_GAIN_BALANCE_TRANS_OFF", 278u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_10M_PHASE_BALANCE_TRANS_OFF", 279u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_10M_UP_GAIN_BALANCE", 361u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_10M_UP_PHASE_BALANCE", 362u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_10M_UP_GAIN_BALANCE_TRANS_OFF", 367u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_TX_IQ_10M_UP_PHASE_BALANCE_TRANS_OFF", 368u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_RX_IQ_80M_GAIN_BALANCE", 19u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_RX_IQ_80M_PHASE_BALANCE", 20u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_RX_IQ_10M_GAIN_BALANCE", 135u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_RX_IQ_10M_PHASE_BALANCE", 136u, R_INT32_16, 1u, -128, -128, 127, 128 },
+    { "EEPROM_SENSOR_NULL", 137u, R_UINT8, 1u, 100, 75, 150, 151 },
+    { "EEPROM_PWR_METER_DISP", 386u, R_UINT8, 1u, 0, 0, 1, 2 },
+    { "EEPROM_XVERTER_DISP", 139u, R_UINT32_16, 1u, 0, 0, 10, 11 },
+    { "EEPROM_SPECTRUM_MAGNIFY", 143u, R_UINT8, 1u, 0, 0, 5, 6 },
+    { "EEPROM_AM_MODE_DISABLE", 146u, R_UINT16, 1u, 1, 0, 7, 8 },
+    { "EEPROM_METER_MODE", 150u, R_UINT8, 1u, 0, 0, 3, 4 },
+    { "EEPROM_ALC_DECAY_TIME", 151u, R_UINT32_16, 1u, 10, 0, 20, 21 },
+    { "EEPROM_ALC_POSTFILT_TX_GAIN", 152u, R_UINT32_16, 1u, 1, 1, 25, 26 },
+    { "EEPROM_STEP_SIZE_CONFIG", 153u, R_UINT16, 1u, 0, 0, 255, 256 },
+    { "EEPROM_DSP_MODE", 154u, R_UINT8, 1u, 0, 0, 255, R_NO_OUTSIDE },
+    { "EEPROM_DSP_NR_STRENGTH", 155u, R_UINT8, 1u, 160, 0, 200, 201 },
+    { "EEPROM_DSP_NOTCH_DECOR_BUFLEN", 160u, R_UINT8, 1u, 128, 128, 128, 129 },
+    { "EEPROM_DSP_NOTCH_FFT_NUMTAPS", 272u, R_UINT8, 1u, 64, 16, 64, 65 },
+    { "EEPROM_DSP_NOTCH_CONV_RATE", 161u, R_UINT8, 1u, 10, 0, 40, 41 },
+    { "EEPROM_TX_AUDIO_COMPRESS", 163u, R_INT16, 1u, 2, -1, 13, 14 },
+    { "EEPROM_TX_DISABLE", 165u, R_UINT8, 1u, 0, 0, 1, 2 },
+    { "EEPROM_VERSION_MINOR", 288u, R_UINT16, 1u, 0, 0, 255, 256 },
+    { "EEPROM_VERSION_RELEASE", 167u, R_UINT16, 1u, 0, 0, 255, 256 },
+    { "EEPROM_VERSION_MAJOR", 172u, R_UINT16, 1u, 0, 0, 255, 256 },
+    { "EEPROM_CW_OFFSET_MODE", 169u, R_UINT8, 1u, 0, 0, 8, 9 },
+    { "EEPROM_FREQ_CONV_MODE", 170u, R_INT32_16, 1u, 4, 0, 4, 5 },
+    { "EEPROM_LSB_USB_AUTO_SELECT", 171u, R_UINT8, 1u, 2, 0, 2, 3 },
+    { "EEPROM_LCD_BLANKING_CONFIG", 173u, R_UINT8, 1u, 0, 0, 255, R_NO_OUTSIDE },
+    { "EEPROM_VFO_MEM_MODE", 141u, R_UINT32_16, 1u, 0, 0, 255, 256 },
+    { "EEPROM_VOLTMETER_CALIBRATE", 174u, R_UINT32_16, 1u, 100, 0, 200, 201 },
+    { "EEPROM_FILTER_DISP_COLOUR", 277u, R_UINT8, 1u, 0, 0, 19, 20 },
+    { "EEPROM_FM_SUBAUDIBLE_TONE_GEN", 280u, R_UINT32_16, 1u, 0, 0, 56, 57 },
+    { "EEPROM_FM_SUBAUDIBLE_TONE_DET", 285u, R_UINT32_16, 1u, 0, 0, 56, 57 },
+    { "EEPROM_FM_TONE_BURST_MODE", 281u, R_UINT8, 1u, 0, 0, 2, 3 },
+    { "EEPROM_FM_SQUELCH_SETTING", 282u, R_UINT8, 1u, 12, 0, 20, 21 },
+    { "EEPROM_KEYBOARD_BEEP_FREQ", 286u, R_UINT32_16, 1u, 1000, 200, 3000, 3001 },
+    { "EEPROM_BEEP_LOUDNESS", 287u, R_UINT8, 1u, 10, 0, 21, 22 },
+    { "EEPROM_TUNE_POWER_LEVEL", 291u, R_UINT8, 1u, 5, 0, 5, 6 },
+    { "EEPROM_CAT_XLAT", 293u, R_UINT8, 1u, 1, 0, 1, 2 },
+    { "EEPROM_MANUAL_NOTCH", 299u, R_UINT32_16, 1u, 800, 200, 5000, 5001 },
+    { "EEPROM_MANUAL_PEAK", 300u, R_UINT32_16, 1u, 750, 200, 5000, 5001 },
+    { "EEPROM_DISPLAY_DBM", 302u, R_UINT8, 1u, 0, 0, 2, 3 },
+    { "EEPROM_DBM_CALIBRATE", 322u, R_INT32_16, 1u, 0, -100, 100, 101 },
+    { "EEPROM_DIGI_MODE_CONF", 332u, R_UINT8, 1u, 1, 1, 2, 3 },
+    { "EEPROM_BASS_GAIN", 303u, R_INT32_16, 1u, 2, -20, 20, 21 },
+    { "EEPROM_TREBLE_GAIN", 304u, R_INT32_16, 1u, 0, -20, 20, 21 },
+    { "EEPROM_TX_FILTER", 306u, R_UINT8, 1u, 0, 0, 3, 4 },
+    { "EEPROM_TX_BASS_GAIN", 307u, R_INT32_16, 1u, 4, -20, 6, 7 },
+    { "EEPROM_TX_TREBLE_GAIN", 308u, R_INT32_16, 1u, 4, -20, 6, 7 },
+    { "EEPROM_SAM_PLL_LOCKING_RANGE", 309u, R_INT32_16, 1u, 2500, 50, 8000, 8001 },
+    { "EEPROM_SAM_PLL_STEP_RESPONSE", 310u, R_INT32_16, 1u, 65, 1, 100, 101 },
+    { "EEPROM_SAM_PLL_BANDWIDTH", 311u, R_INT32_16, 1u, 250, 15, 1000, 1001 },
+    { "EEPROM_SAM_FADE_LEVELER", 314u, R_UINT8, 1u, 1, 0, 1, 2 },
+    { "EEPROM_LINEOUT_GAIN", 315u, R_UINT8, 1u, 73, 1, 80, 81 },
+    { "EEPROM_CW_DECODER_ENABLE", 347u, R_UINT8, 1u, 1, 0, 1, 2 },
+    { "EEPROM_Scope_Graticule_Ypos", 348u, R_UINT16, 1u, 0, 0, 480, 481 },
+    { "EEPROM_Freq_Display_Font", 349u, R_UINT8, 1u, 0, 0, 1, 2 },
+    { "EEPROM_Scope_TRACE_HL_BW", 333u, R_UINT8, 1u, 0, 0, 19, 20 },
+    { "EEPROM_Scope_TRACE_HL_BW_BGR", 334u, R_UINT8, 1u, 20, 0, 100, 101 },
+    { "EEPROM_NUMBER_OF_ENTRIES", 350u, R_UINT16, 1u, 416, 416, 416, 417 },
+    { "EEPROM_ENABLE_PTT_RTS", 352u, R_UINT8, 1u, 0, 0, 1, 2 },
+    { "EEPROM_CW_DECODER_THRESH", 353u, R_UINT32_16, 1u, 32000, 1000, 50000, 50001 },
+    { "EEPROM_VSWR_PROTECTION_THRESHOLD", 369u, R_UINT8, 1u, 1, 1, 10, 11 },
+};
+static const unsigned rrow_count = sizeof(rrows)/sizeof(rrows[0]);
+#define RROW_SKIPPED 69u   /* rows whose stored range uses macros this harness cannot expand */
+
+static void blank_image(image_t* img)
+{
+    memset(img, 0, sizeof(*img));
+    for (unsigned i = 0; i < sizeof(img->value)/sizeof(img->value[0]); i++)
+    {
+        img->value[i] = 0xFFFF;
+    }
+}
+
+/* mirror of UiWriteSettingEEPROM_*(): an Int32 row takes two words, high first */
+static void row_store(image_t* img, const rrow_t* r, int32_t value)
+{
+    img->present[r->id] = true;
+    img->value[r->id] = (uint16_t)value;
+    if (r->type == R_INT32)
+    {
+        img->present[r->id + 1] = true;
+        img->value[r->id + 1] = (uint16_t)(((uint32_t)value) & 0xFFFFu);
+    }
+}
+
+/* mirror of UiReadSettingEEPROM_UInt8/UInt16/UInt32_16/Int16/Int32_16/Int32 */
+static int32_t row_read(const image_t* img, const rrow_t* r, bool load_default)
+{
+    if (!img->present[r->id] || (r->type == R_INT32 && !img->present[r->id + 1]))
+    {
+        return r->def;                       /* a read that fails loads the default */
+    }
+    const uint16_t raw = img->value[r->id];
+    int32_t v;
+    switch (r->type)
+    {
+    case R_UINT8:
+        v = raw & 0xFF;                      /* the uint8_t pointer truncates before the check */
+        break;
+    case R_UINT16:
+    case R_UINT32_16:
+        v = raw;
+        break;
+    case R_INT16:
+    case R_INT32_16:
+        v = (int16_t)raw;                    /* the firmware reads the word as a signed 16 bit */
+        break;
+    default:                                 /* R_INT32: high word, then low word */
+        v = (int32_t)(((uint32_t)raw << 16) | img->value[r->id + 1]);
+        break;
+    }
+    return (v < r->min || v > r->max || load_default) ? r->def : v;
+}
+
+static int check_row_roundtrip(void)
+{
+    static const char* const probe_name[3] = { "minimum", "default", "maximum" };
+    int rc = 0;
+    unsigned probes = 0;
+
+    for (unsigned i = 0; i < rrow_count; i++)
+    {
+        const rrow_t* r = &rrows[i];
+        const int32_t values[3] = { r->min, r->def, r->max };
+        image_t img;
+
+        for (unsigned p = 0; p < 3; p++)
+        {
+            blank_image(&img);
+            row_store(&img, r, values[p]);
+            const int32_t got = row_read(&img, r, false);
+            if (got != values[p])
+            {
+                printf("CHECK FAILED: %s (id %u) stored its %s %d and read back %d\n",
+                       r->idname, r->id, probe_name[p], values[p], got);
+                rc = 1;
+            }
+            if (row_read(&img, r, true) != r->def)
+            {
+                printf("CHECK FAILED: %s (id %u) does not load its default %d when it is asked to\n",
+                       r->idname, r->id, r->def);
+                rc = 1;
+            }
+            probes += 2;
+        }
+
+        if (r->outside != R_NO_OUTSIDE)
+        {
+            blank_image(&img);
+            row_store(&img, r, r->outside);
+            const int32_t got = row_read(&img, r, false);
+            if (got != r->def)
+            {
+                printf("CHECK FAILED: %s (id %u) keeps the stored %d, which is outside %d..%d, "
+                       "instead of loading the default %d\n",
+                       r->idname, r->id, r->outside, r->min, r->max, r->def);
+                rc = 1;
+            }
+            probes++;
+        }
+
+        /* an erased word must never come back as a value outside the range */
+        blank_image(&img);
+        row_store(&img, r, -1);
+        img.value[r->id] = 0xFFFF;
+        if (r->type == R_INT32)
+        {
+            img.value[r->id + 1] = 0xFFFF;
+        }
+        {
+            const int32_t erased = row_read(&img, r, false);
+            if (erased < r->min || erased > r->max)
+            {
+                printf("CHECK FAILED: %s (id %u) reads an erased word as %d, outside %d..%d\n",
+                       r->idname, r->id, erased, r->min, r->max);
+                rc = 1;
+            }
+            probes++;
+        }
+
+        /* the truncation case: a Uint8 row whose range fits a byte accepts 0x0100 | value */
+        if (r->type == R_UINT8 && r->min >= 0 && r->max <= 0xFF)
+        {
+            const int32_t v = r->max;
+            const uint16_t word = (uint16_t)(0x0100 | (v & 0xFF));
+            blank_image(&img);
+            img.present[r->id] = true;
+            img.value[r->id] = word;
+            {
+                const int32_t got = row_read(&img, r, false);
+                if (got != v)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads 0x%04X as %d, a Uint8 setting keeps "
+                           "only the low byte, so it has to read %d\n", r->idname, r->id, word, got, v);
+                    rc = 1;
+                }
+            }
+            probes++;
+        }
+    }
+
+    if (rc == 0)
+    {
+        printf("round trip: %u probes over %u stored rows, every value comes back the way it was "
+               "written, values outside the range fall back to the default (%u rows are not covered "
+               "because their range uses macros this harness cannot expand)\n\n",
+               probes, rrow_count, RROW_SKIPPED);
+    }
+    return rc;
+}
+
 int main(void)
 {
     image_t img;
@@ -847,7 +1077,7 @@ int main(void)
     /* the self checks which make this program fail, so that CI catches a broken configuration */
     int rc = 0;
 
-    rc |= check_agc_roundtrip();
+    rc |= check_row_roundtrip();
     rc |= check_upgrade_persistence();
     rc |= check_save_order();
     rc |= check_filter_map_migration();

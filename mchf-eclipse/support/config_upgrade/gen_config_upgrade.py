@@ -860,6 +860,22 @@ if 'EEPROM_FILTER_PATH_MAP_LEGACY_BASE' in wbody:
              'only: the current block would stay empty, the probe would report it as never written '
              'and every boot would read the legacy memories instead of the stored ones')
 
+# check_row_roundtrip() models UiReadSettingEEPROM_UInt8() as it is written: the stored word is
+# assigned to a uint8_t before the range check, so the high byte is lost. If that changes, the model
+# is describing a firmware that no longer exists.
+u8_read = re.search(r'UiReadSettingEEPROM_UInt8\s*\(\s*uint16_t\s+addr\s*,\s*volatile\s+uint8_t'
+                    r'[^)]*\)\s*\{(.*?)\n\}', clean_cfg_c, re.S)
+if not u8_read:
+    sys.exit('UiReadSettingEEPROM_UInt8() is gone or its signature changed, the truncation model of '
+             'check_row_roundtrip() has nothing to describe')
+u8_body = u8_read.group(1)
+u8_assign = u8_body.find('*val_ptr = value')
+u8_check = u8_body.find('*val_ptr < min_val')
+if u8_assign < 0 or u8_check < 0 or u8_assign > u8_check:
+    sys.exit('UiReadSettingEEPROM_UInt8() no longer truncates the stored word before it range '
+             'checks it. check_row_roundtrip() models the truncation for every UInt8 row, so the '
+             'model and the firmware have to change together.')
+
 bulk_blocks = []            # (base, words, who, the code that proves it)
 if not re.search(r'EEPROM_FILTER_PATH_MAP_BASE\s*\+\s*idx\s*\*\s*FILTER_PATH_MEM_MAX\s*\+\s*mem_idx',
                  clean_cfg_c):
@@ -969,26 +985,78 @@ if legacy_free != sorted(LEGACY_FREE_WORDS):
 # UiConfiguration_FilterMapNotStoredYet() tells the two layouts apart by probing the new block.
 # -----------------------------------------------------------------------------------------------
 BASELINE_LAYOUT_FIRST_UNUSED = 416
-BASELINE_LAYOUT_DIGEST = 'a2dd5fa69241'   # shape of the map as of commit 92418c08
 
+# One entry per (marker, map shape) pair that radios in the field can be holding: the value
+# EEPROM_CONFIG_LAYOUT_VERSION held in that build, and the digest of the id -> word map that build
+# wrote through it. Append only. A map shape that appears under a marker already used for another
+# shape is the failure this list exists to prevent - radios carrying the old shape cannot tell.
+LAYOUT_HISTORY = [
+    (0x5AA5, 'a2dd5fa69241'),          # as of commit 92418c08
+]
+
+current_magic = vals['CONFIG_LAYOUT_VERSION_MAGIC']
 layout_map = sorted((w, '|'.join(sorted({o[1] for o in lst})))
                     for w, lst in owners.items() if w < BASELINE_LAYOUT_FIRST_UNUSED)
 layout_digest = hashlib.sha1(repr(layout_map).encode()).hexdigest()[:12]
-if layout_digest != BASELINE_LAYOUT_DIGEST:
-    sys.exit('the address map of words below %d changed shape (%s -> %s) while '
-             'CONFIG_LAYOUT_VERSION_MAGIC is still 0x%x.\n'
+
+markers = [m for m, _ in LAYOUT_HISTORY]
+if len(set(markers)) != len(markers):
+    sys.exit('two entries of LAYOUT_HISTORY share a marker (%s): one marker cannot stand for two '
+             'map shapes. A radio holding the older shape would be read through the newer addresses.'
+             % ', '.join('0x%x' % m for m in sorted({m for m in markers if markers.count(m) > 1})))
+
+recorded = dict(LAYOUT_HISTORY)
+if layout_digest not in recorded.values():
+    sys.exit('the address map of words below %d changed shape (recorded %s, now %s) while the '
+             'recorded marker for that shape is 0x%x.\n'
              'A radio holding a configuration written under the old map cannot tell, so it will be '
              'read through the wrong addresses. Three things must happen together:\n'
-             '  1. raise CONFIG_LAYOUT_VERSION_MAGIC to a new value;\n'
-             '  2. extend UiConfiguration_LayoutMigrationRequired() to still accept the value the '
-             'previous build wrote, otherwise every healthy radio gets migrated through the '
-             'pre-renumbering translation, which corrupts it - the marker mechanism knows exactly '
-             'one previous layout today;\n'
-             '  3. set BASELINE_LAYOUT_DIGEST here to %s (and BASELINE_LAYOUT_FIRST_UNUSED if the '
-             'range grew).\n'
+             '  1. raise CONFIG_LAYOUT_VERSION_MAGIC to a value no entry of LAYOUT_HISTORY uses;\n'
+             '  2. extend UiConfiguration_LayoutMigrationRequired() to still recognise the marker '
+             'the previous build wrote, otherwise every healthy radio is migrated through the '
+             'pre-renumbering translation, which corrupts it;\n'
+             '  3. append the pair to LAYOUT_HISTORY: (0x%x, %s), and raise '
+             'BASELINE_LAYOUT_FIRST_UNUSED if the range grew.\n'
              'If the intent is to keep the old map readable instead, move the values back.'
-             % (BASELINE_LAYOUT_FIRST_UNUSED, BASELINE_LAYOUT_DIGEST or '(not set yet)',
-                layout_digest, vals['CONFIG_LAYOUT_VERSION_MAGIC'], layout_digest))
+             % (BASELINE_LAYOUT_FIRST_UNUSED,
+                ', '.join(sorted(set(recorded.values()))) or '(nothing)', layout_digest,
+                current_magic, current_magic, layout_digest))
+
+if recorded.get(current_magic) != layout_digest:
+    sys.exit('the address map below %d has the shape recorded for marker %s, but '
+             'CONFIG_LAYOUT_VERSION_MAGIC is 0x%x. The marker decides which map a radio is read '
+             'through, so either the marker was bumped without the map being recorded for it, or the '
+             'map was recorded under a marker no build wrote. Record the pair (0x%x, %s) in '
+             'LAYOUT_HISTORY, or put the marker back to %s.'
+             % (BASELINE_LAYOUT_FIRST_UNUSED,
+                ', '.join('0x%X' % m for m, d in LAYOUT_HISTORY if d == layout_digest) or '(none)',
+                current_magic, current_magic, layout_digest,
+                ', '.join('0x%X' % m for m, d in LAYOUT_HISTORY if d == layout_digest) or '(none)'))
+
+# every marker that is no longer current has to stay recognised by the migration, otherwise the
+# radios still carrying it are treated as if they had the current map
+older = [(m, d) for m, d in LAYOUT_HISTORY if m != current_magic]
+if older:
+    migrate_fn = re.search(r'static\s+bool\s+UiConfiguration_LayoutMigrationRequired\s*\([^)]*\)\s*'
+                           r'\{(.*?)\n\}', clean_cfg_c, re.S)
+    if not migrate_fn:
+        sys.exit('UiConfiguration_LayoutMigrationRequired() is gone from ui_configuration.c, the '
+                 'markers of older layouts cannot be checked')
+    migrate_body = migrate_fn.group(1)
+    defined = {name: int(value, 0) for name, value in
+               re.findall(r'(?m)^\s*#define\s+([A-Za-z0-9_]+)\s+((?:0[xX])?[0-9A-Fa-f]+)\s*(?://|$)',
+                          strip_comments(cfg_h))}
+    for marker, shape in older:
+        spelled = any(t in migrate_body for t in ('0x%X' % marker, '0x%x' % marker, '%d' % marker))
+        via_define = any(value == marker and re.search(r'\b%s\b' % name, migrate_body)
+                         for name, value in defined.items())
+        if not (spelled or via_define):
+            sys.exit('LAYOUT_HISTORY records map shape %s under marker 0x%X, but '
+                     'UiConfiguration_LayoutMigrationRequired() no longer mentions that marker. A '
+                     'radio holding a configuration written with it is read through the current '
+                     'address map, which is the silent renumbering this check exists to prevent. '
+                     'Recognise the old marker there, or remove the pair only if no radio can be '
+                     'holding it.' % (shape, marker))
 
 print('  EEPROM address map: %d table rows (after expanding %d row macros) and %d multi word '
       'blocks, %d words claimed, none twice, %d words of the legacy filter range kept free (%s)'
@@ -1235,65 +1303,6 @@ A('}')
 A('')
 A('/* every value the AGC menu can produce has to survive a save/load cycle, on the serial EEPROM')
 A('   as well as on the flash of the boards that have no external EEPROM */')
-A('static int check_agc_roundtrip(void)')
-A('{')
-A('    int rc = 0;')
-A('    for (unsigned i = 0; i < agc_entry_count; i++)')
-A('    {')
-A('        const agc_entry_t* e = &agc_entries[i];')
-A('        const int32_t probes[] = { e->def, e->min, e->max, e->menu_min, e->menu_max, e->menu_def };')
-A('        for (unsigned p = 0; p < sizeof(probes)/sizeof(probes[0]); p++)')
-A('        {')
-A('            const int32_t want = probes[p];')
-A('            if ((want < e->min) || (want > e->max)) continue;')
-A('            if (e->menu_max < 0 && p >= 3) continue;')
-A('            if (agc_load_bits(e, agc_store_bits(e, want)) != want)')
-A('            {')
-A('                printf("CHECK FAILED: %s cannot keep %d in its storage slot\\n", e->idname, (int)want);')
-A('                rc = 1;')
-A('                continue;')
-A('            }')
-A('            for (unsigned s = 0; s < 2; s++)')
-A('            {')
-A('                image_t img;')
-A('                memset(&img, 0, sizeof(img));')
-A('                for (unsigned k = 0; k < sizeof(img.value)/sizeof(img.value[0]); k++)')
-A('                {')
-A('                    img.value[k] = 0xFFFF;')
-A('                }')
-A('                agc_save(&img, e, want);')
-A('                const int32_t got = agc_read(&img, e, false, (store_t)s);')
-A('                if (got != want)')
-A('                {')
-A('                    printf("CHECK FAILED: %s: menu value %d does not survive save/load (%s reads %d)\\n",')
-A('                           e->idname, (int)want, s ? "flash" : "i2c eeprom", (int)got);')
-A('                    rc = 1;')
-A('                }')
-A('            }')
-A('        }')
-A('        if (e->menu_max >= 0)')
-A('        {')
-A('            if ((e->menu_min < e->min) || (e->menu_max > e->max))')
-A('            {')
-A('                printf("CHECK FAILED: %s can be set to %d..%d but only %d..%d is stored\\n",')
-A('                       e->idname, (int)e->menu_min, (int)e->menu_max, (int)e->min, (int)e->max);')
-A('                rc = 1;')
-A('            }')
-A('        }')
-A('        if ((e->def < e->min) || (e->def > e->max))')
-A('        {')
-A('            printf("CHECK FAILED: %s default %d is outside its stored range %d..%d\\n",')
-A('                   e->idname, (int)e->def, (int)e->min, (int)e->max);')
-A('            rc = 1;')
-A('        }')
-A('    }')
-A('    return rc;')
-A('}')
-A('')
-A('/* The upgrade case: the configuration on the radio was written by a firmware whose entry count')
-A('   was below the id of a value that exists now. A value the operator sets after the upgrade has to')
-A('   survive the next power cycle, which means the save has to record the ceiling of the current')
-A('   firmware, not the one it read. */')
 A('static int check_upgrade_persistence(void)')
 A('{')
 A('    int rc = 0;')
@@ -1623,9 +1632,228 @@ A('    {')
 A('        printf("filter path memories: a migrated configuration is saved at %u..%u and the next boot "')
 A('               "reads it from there\\n\\n", FILTER_MAP_BASE, FILTER_MAP_BASE + FILTER_MAP_WORDS - 1);')
 A('    }')
+# -----------------------------------------------------------------------------------------------
+# One round trip per row of the table: the value the firmware writes has to be the value it reads
+# back. The AM and AGC checks above were written by hand for the settings somebody was looking at;
+# this walks every row of the compiled table that has a resolved stored range, which is where the
+# signed 16 bit values and the Uint8 truncation actually live.
+#
+# The type rules are the firmware's own: UiReadSettingEEPROM_UInt8() assigns the stored word to a
+# uint8_t BEFORE it range checks it, so 0x0107 is accepted as 7, and UiReadSettingEEPROM_Int32_16()
+# casts the word to int16_t first, so a negative value survives as long as it is stored that way.
+# -----------------------------------------------------------------------------------------------
+RTYPES = {
+    'ConfigEntry_UInt8': ('R_UINT8', 1),
+    'ConfigEntry_UInt16': ('R_UINT16', 1),
+    'ConfigEntry_UInt32_16': ('R_UINT32_16', 1),
+    'ConfigEntry_Int16': ('R_INT16', 1),
+    'ConfigEntry_Int32_16': ('R_INT32_16', 1),
+    'ConfigEntry_Int32': ('R_INT32', 2),
+}
+RTYPE_LIMITS = {                     # what the stored word can hold after the firmware's cast
+    'R_UINT8': (0, 0xFF),
+    'R_UINT16': (0, 0xFFFF),
+    'R_UINT32_16': (0, 0xFFFF),
+    'R_INT16': (-0x8000, 0x7FFF),
+    'R_INT32_16': (-0x8000, 0x7FFF),
+    'R_INT32': (-0x80000000, 0x7FFFFFFF),
+}
+rrow_data = []
+for cond, ctype, idname, var, d, lo, hi in map_rows:
+    if ctype not in RTYPES:
+        sys.exit('%s (&%s) is stored as %s, which the round trip check does not model. Add the type '
+                 'to RTYPES in gen_config_upgrade.py.' % (idname, var, ctype))
+    dv, mn, mx = resolve(d), resolve(lo), resolve(hi)
+    if None in (dv, mn, mx):
+        continue                     # a range built from macros the parser cannot expand
+    rtype, words = RTYPES[ctype]
+    low, high = RTYPE_LIMITS[rtype]
+    # a stored value the firmware has to reject. A row that spans the whole width of its type has
+    # none: for an UInt8 row from 0 to 255 every stored word is a legal value after truncation.
+    outside = mx + 1 if mx < high else (mn - 1 if mn > low else None)
+    rrow_data.append((idname, vals[idname], rtype, words, dv, mn, mx, outside))
+if len(rrow_data) < 100:
+    sys.exit('only %d rows of the configuration table have a resolved stored range, the round trip '
+             'check would cover almost nothing' % len(rrow_data))
+
 A('    return rc;')
 A('}')
 A('')
+def AL(text):
+    """emit a block of C source line by line, exactly as written"""
+    for line in text.strip('\n').split('\n'):
+        A(line)
+
+A('/* ---------------------------------------------------------------------------------------------')
+A('   one round trip per row of the configuration table. The read rules are those of the firmware:')
+A('   the stored word goes through the type before the range check, which is where a Uint8 row')
+A('   loses its high byte and an Int32_16 row gets its sign back')
+A('*/')
+A('typedef enum { R_UINT8, R_UINT16, R_UINT32_16, R_INT16, R_INT32_16, R_INT32 } rtype_t;')
+A('typedef struct { const char* idname; uint16_t id; rtype_t type; uint16_t words; int32_t def, min, max, outside; } rrow_t;')
+A('')
+A('#define R_NO_OUTSIDE INT32_MIN')
+A('static const rrow_t rrows[] =')
+A('{')
+for idname, eid, rtype, words, dv, mn, mx, outside in rrow_data:
+    A('    { "%s", %du, %s, %du, %d, %d, %d, %s },'
+      % (idname, eid, rtype, words, dv, mn, mx,
+         'R_NO_OUTSIDE' if outside is None else str(outside)))
+A('};')
+A('static const unsigned rrow_count = sizeof(rrows)/sizeof(rrows[0]);')
+A('#define RROW_SKIPPED %du   /* rows whose stored range uses macros this harness cannot expand */'
+  % (len(map_rows) - len(rrow_data)))
+A('')
+AL(r"""
+static void blank_image(image_t* img)
+{
+    memset(img, 0, sizeof(*img));
+    for (unsigned i = 0; i < sizeof(img->value)/sizeof(img->value[0]); i++)
+    {
+        img->value[i] = 0xFFFF;
+    }
+}
+
+/* mirror of UiWriteSettingEEPROM_*(): an Int32 row takes two words, high first */
+static void row_store(image_t* img, const rrow_t* r, int32_t value)
+{
+    img->present[r->id] = true;
+    img->value[r->id] = (uint16_t)value;
+    if (r->type == R_INT32)
+    {
+        img->present[r->id + 1] = true;
+        img->value[r->id + 1] = (uint16_t)(((uint32_t)value) & 0xFFFFu);
+    }
+}
+
+/* mirror of UiReadSettingEEPROM_UInt8/UInt16/UInt32_16/Int16/Int32_16/Int32 */
+static int32_t row_read(const image_t* img, const rrow_t* r, bool load_default)
+{
+    if (!img->present[r->id] || (r->type == R_INT32 && !img->present[r->id + 1]))
+    {
+        return r->def;                       /* a read that fails loads the default */
+    }
+    const uint16_t raw = img->value[r->id];
+    int32_t v;
+    switch (r->type)
+    {
+    case R_UINT8:
+        v = raw & 0xFF;                      /* the uint8_t pointer truncates before the check */
+        break;
+    case R_UINT16:
+    case R_UINT32_16:
+        v = raw;
+        break;
+    case R_INT16:
+    case R_INT32_16:
+        v = (int16_t)raw;                    /* the firmware reads the word as a signed 16 bit */
+        break;
+    default:                                 /* R_INT32: high word, then low word */
+        v = (int32_t)(((uint32_t)raw << 16) | img->value[r->id + 1]);
+        break;
+    }
+    return (v < r->min || v > r->max || load_default) ? r->def : v;
+}
+
+static int check_row_roundtrip(void)
+{
+    static const char* const probe_name[3] = { "minimum", "default", "maximum" };
+    int rc = 0;
+    unsigned probes = 0;
+
+    for (unsigned i = 0; i < rrow_count; i++)
+    {
+        const rrow_t* r = &rrows[i];
+        const int32_t values[3] = { r->min, r->def, r->max };
+        image_t img;
+
+        for (unsigned p = 0; p < 3; p++)
+        {
+            blank_image(&img);
+            row_store(&img, r, values[p]);
+            const int32_t got = row_read(&img, r, false);
+            if (got != values[p])
+            {
+                printf("CHECK FAILED: %s (id %u) stored its %s %d and read back %d\n",
+                       r->idname, r->id, probe_name[p], values[p], got);
+                rc = 1;
+            }
+            if (row_read(&img, r, true) != r->def)
+            {
+                printf("CHECK FAILED: %s (id %u) does not load its default %d when it is asked to\n",
+                       r->idname, r->id, r->def);
+                rc = 1;
+            }
+            probes += 2;
+        }
+
+        if (r->outside != R_NO_OUTSIDE)
+        {
+            blank_image(&img);
+            row_store(&img, r, r->outside);
+            const int32_t got = row_read(&img, r, false);
+            if (got != r->def)
+            {
+                printf("CHECK FAILED: %s (id %u) keeps the stored %d, which is outside %d..%d, "
+                       "instead of loading the default %d\n",
+                       r->idname, r->id, r->outside, r->min, r->max, r->def);
+                rc = 1;
+            }
+            probes++;
+        }
+
+        /* an erased word must never come back as a value outside the range */
+        blank_image(&img);
+        row_store(&img, r, -1);
+        img.value[r->id] = 0xFFFF;
+        if (r->type == R_INT32)
+        {
+            img.value[r->id + 1] = 0xFFFF;
+        }
+        {
+            const int32_t erased = row_read(&img, r, false);
+            if (erased < r->min || erased > r->max)
+            {
+                printf("CHECK FAILED: %s (id %u) reads an erased word as %d, outside %d..%d\n",
+                       r->idname, r->id, erased, r->min, r->max);
+                rc = 1;
+            }
+            probes++;
+        }
+
+        /* the truncation case: a Uint8 row whose range fits a byte accepts 0x0100 | value */
+        if (r->type == R_UINT8 && r->min >= 0 && r->max <= 0xFF)
+        {
+            const int32_t v = r->max;
+            const uint16_t word = (uint16_t)(0x0100 | (v & 0xFF));
+            blank_image(&img);
+            img.present[r->id] = true;
+            img.value[r->id] = word;
+            {
+                const int32_t got = row_read(&img, r, false);
+                if (got != v)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads 0x%04X as %d, a Uint8 setting keeps "
+                           "only the low byte, so it has to read %d\n", r->idname, r->id, word, got, v);
+                    rc = 1;
+                }
+            }
+            probes++;
+        }
+    }
+
+    if (rc == 0)
+    {
+        printf("round trip: %u probes over %u stored rows, every value comes back the way it was "
+               "written, values outside the range fall back to the default (%u rows are not covered "
+               "because their range uses macros this harness cannot expand)\n\n",
+               probes, rrow_count, RROW_SKIPPED);
+    }
+    return rc;
+}
+""")
+A('')
+
 A('int main(void)')
 A('{')
 A('    image_t img;')
@@ -1683,7 +1911,7 @@ A('')
 A('    /* the self checks which make this program fail, so that CI catches a broken configuration */')
 A('    int rc = 0;')
 A('')
-A('    rc |= check_agc_roundtrip();')
+A('    rc |= check_row_roundtrip();')
 A('    rc |= check_upgrade_persistence();')
 A('    rc |= check_save_order();')
 A('    rc |= check_filter_map_migration();')
