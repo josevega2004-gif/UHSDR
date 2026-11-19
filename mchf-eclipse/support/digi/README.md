@@ -55,7 +55,9 @@ WAV check had. `-Wno-sign-compare` is the target build's own flag and is passed 
 those compile as they ship while the bench's own code stays under the full warning set. Moving
 the chain in found the WAV bug - the round trip had never reset the decoder, so it started from
 the previous case's filter state and only passed because that state happened to be harmless - and
-it withdrew the loopback's ability to grade the shift, which the shift bullet above records.
+it withdrew the loopback's ability to grade the shift until the transmitter's tones could be
+held where they belong while only the receiver's setting moved, which is what `Rtty_BenchTxSpaceTone`
+is for and what the shift bullet above records.
 
 The shims are deliberately thin. If a firmware source ever reaches for more of the radio than
 this, the bench stops compiling instead of quietly inventing behaviour, which is the point:
@@ -93,14 +95,16 @@ the size of the CW lift, measured rather than guessed.
   whatever the space filter does, so those rows decode at 0.0 % even when the receiver is given the
   850 Hz space filter for a 170 Hz signal. One row was built to break that: `weak mark 170` sends the
   mark tone 30 dB below the space tone, past the 22.9 dB by which the mark filter rejects the space
-  tone, so the mark channel inverts and the space filter has to carry the bits. That worked while
-  the bench fed the demodulator directly - 0.0 % with the 170 Hz filter, 100 % with the 850 Hz one -
-  and it stopped working when the radio's AGC went into the loop: the AGC now sets the level the ATC
-  compares against, the mark channel keeps the right polarity, and the row decodes at 0.0 % with
-  either space filter. Measured the same way, `wmark car300` also decodes at 0.0 % with the 850 Hz
-  filter. So the synthetic loopback no longer grades any shift, and the shift setting is graded by
-  the live capture above, not by this table. A live capture, of course, still needs the tones on the
-  modem's own frequencies.
+  tone, so the mark channel inverts and the space filter has to carry the bits. That row stopped
+  grading anything the moment the shift setting started to move both ends of the loop: the
+  transmitter took its shift from the receiver's filter, so "the 850 Hz setting" was really an
+  850 Hz signal with an 850 Hz filter and decoded perfectly. `Rtty_BenchTxSpaceTone()` separates
+  them - the signal stays at 170 Hz shift while only the setting moves - and with that, and the
+  mark tone 30 dB down, the setting is graded again: 0.0 % at 170 and at 200 Hz (adjacent bands),
+  **97.9 %** at 85, 425, 450 and 850. The clean two-tone signal still decodes at 0.0 % with every
+  setting, because the mark channel carries the bits whatever the space filter does; that is
+  measured, printed next to the other column by `rtty-shift`, and it is why the guard row needs the
+  weak mark. A live capture, of course, still needs the tones on the modem's own frequencies.
 * Inside the ATC branch the variable names are the opposite of what they hold. `mark_mag`/`mark_env`
   carry the **space** filter output and `space_mag`/`space_env` the **915 Hz mark** output, because
   the block starts by exchanging them to cancel the naming convention of the FlDigi formula it was
@@ -122,8 +126,9 @@ CER is measured after aligning away the lead-in junk, so it describes the modem 
 | AWGN 20, 10, 7 dB | 0.0 |
 | QSB 0.4 Hz, 6 dB deep | 0.0 |
 | QSB 2 Hz, 10 dB deep | **6.2** (3/48, and **2.3** in `rtty-long`) |
-| weak mark, 30 dB below the space tone | 0.0, with the 170 Hz space filter or the 850 Hz one |
-| weak mark + carrier 300 Hz above the space tone at +20 dB | 0.0 (0.0 with the 850 Hz filter too, **31.2** with the carrier at +30 dB) |
+| weak mark, 30 dB below the space tone | 0.0 with the 170 Hz space filter, **97.9** with the 850 Hz one |
+| 170 Hz signal decoded with the 850 Hz setting, mark 30 dB down | **97.9** (47/48), against 0.0 % at 170 and 200 Hz |
+| weak mark + carrier 300 Hz above the space tone at +20 dB | 0.0 at 170 Hz, **31.2** with the carrier at +30 dB (11.7 in `rtty-long`); **97.9** at either carrier level once the setting is 850 Hz |
 | reference error: 1 and 3 ppm on 20 m (14 and 42 Hz), 2 ppm on 10 m (56 Hz), 1 ppm on 6 m (50 Hz) | 0.0 |
 | reference error: 1 ppm on 20 m on the 450 Hz / 50 Bd signal (14 Hz) | 0.0 |
 | reference error: 56 Hz (4 ppm at 14 MHz) at 10 dB, at 7 dB and under 0.5 Hz / 6 dB QSB | 0.0 |
@@ -156,6 +161,28 @@ over the wanted signal and costs **31.2 %** at +30 dB, with the weak mark tone i
 holding the bits on the space filter. That is a filter rejection limit, not a level one - which is
 what makes it the interesting failure, since the AGC cannot help with it. It reproduces without a
 radio or an antenna.
+
+## Shift setting, `make -C support/digi rtty-shift`
+
+The signal is 170 Hz / 45.45 Bd and only the receiver's setting moves, which is what a radio set
+wrong does. Two columns, because they say different things: the clean signal decodes whatever the
+setting is, while the signal with its mark tone 30 dB down puts the decision on the space filter and
+then the setting matters. Measured at 20 dB SNR:
+
+| setting | clean % | weak mark % |
+|---|---|---|
+| 85 Hz | 0.0 | **97.9** |
+| 170 Hz | 0.0 | 0.0 |
+| 200 Hz | 0.0 | 0.0 |
+| 425 Hz | 0.0 | **97.9** |
+| 450 Hz | 0.0 | **97.9** |
+| 850 Hz | 0.0 | **97.9** |
+
+170 and 200 both decode because they are one filter band apart; everything else costs the text. The
+mode asserts the matching setting and the 850 Hz one, and the matrix carries the same guard as the
+`shift 170/850` row so the ordinary `rtty` run fails too if the setting stops mattering. What it
+does not do, and cannot, is reproduce the on-air result that a real DDH 8 capture decodes only at
+425/450 Hz: that comes from the signal, not from a synthetic two-tone.
 
 ## Symbol clock, `clk` rows
 
@@ -414,8 +441,8 @@ off, which is exactly the distortion the bench should be shown rather than hidin
 3. RTTY: chase the fast-fading failure with the numbers in front of us.
 4. Only then decide about FT8 RX, where the RAM question is per board rather than per mode.
 
-CI: the `digi-checks` job in `.github/workflows/config-upgrade-check.yml` runs six steps - the
+CI: the `digi-checks` job in `.github/workflows/config-upgrade-check.yml` runs seven steps - the
 filter design check (`support/digi/design_rtty_filters.py`), `make digi-bench` (the self checks),
 the RTTY shift, SNR and reference error character error rate matrix, that matrix again with the long
-message, the tuning error sweep, and the weather fax table. `make digi-bench` is also available on
-its own; it is one of the six, not the whole job.
+message, the shift setting curve, the tuning error sweep, and the weather fax table.
+`make digi-bench` is also available on its own; it is one of the seven, not the whole job.
