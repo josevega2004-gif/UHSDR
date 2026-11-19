@@ -405,6 +405,13 @@ digi-bench:
 	# channel) and a synthetic weather fax broadcast is decoded by the reference demodulator
 	@$(MAKE) -C $(ROOTLOC)/support/digi test
 
+.PHONY: layout-record
+layout-record:
+	# rewrite the recorded layout map of the current CONFIG_LAYOUT_VERSION_MAGIC from the table
+	# for a change that only made a stored word visible to the parser (the check names the word and
+	# asks for this command); it refuses when a word moved, that needs a new marker
+	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/gen_config_upgrade.py --record-layout
+
 .PHONY: config-upgrade-check
 config-upgrade-check:  
 	# check which values a configuration stored by an older build receives as defaults, see support/config_upgrade

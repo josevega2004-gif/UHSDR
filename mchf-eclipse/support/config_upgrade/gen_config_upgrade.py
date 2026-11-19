@@ -39,6 +39,11 @@ from pathlib import Path
 # the firmware sources are two directories above this script (support/config_upgrade)
 root = str(Path(__file__).resolve().parents[2]) + '/'
 
+# --record-layout rewrites the LAYOUT_HISTORY entry of the marker this build writes and stops there.
+# It is the one command for a change that only made a stored word visible to the table parser, which
+# needs no new marker because nothing moved (see the layout guard below).
+RECORD_LAYOUT = '--record-layout' in sys.argv[1:]
+
 cfg_h = open(root+'drivers/ui/ui_configuration.h', encoding='utf-8', errors='surrogateescape').read()
 cfg_c = open(root+'drivers/ui/ui_configuration.c', encoding='utf-8', errors='surrogateescape').read()
 aud_h = open(root+'drivers/audio/audio_driver.h', encoding='utf-8', errors='surrogateescape').read()
@@ -1116,6 +1121,8 @@ LAYOUT_HISTORY = [
     # which needs a new marker. A word that was always stored but that the table parser used to
     # skip (the packed UInt8x2 row was one) leaves every recorded word where it was, and then the
     # marker must stay: bumping it would push every healthy radio through the layout migration.
+    # "make layout-record" rewrites the entry of the current marker from the table. It refuses when
+    # a word moved or disappeared, because that is a renumbering and needs the steps above.
     (0x5AA5, 'a63f1098d0fc', """
         1 EEPROM_BAND_MODE (written outside the table)
         2 EEPROM_FREQ_HIGH (written outside the table)
@@ -1506,8 +1513,51 @@ gone = [(w, 'the record has %s, nothing is stored there any more' % rec_map[w])
 added = [(w, '%s is stored there' % current_map[w]) for w in sorted(current_map)
          if w not in rec_map]
 
+def rewrite_layout_entry(marker, digest, words):
+    """replace the LAYOUT_HISTORY entry of one marker with the given map, in this file"""
+    path = Path(__file__).resolve()
+    src = open(path, encoding='utf-8').read()
+    start = src.index('LAYOUT_HISTORY = [')
+    stop = src.index('\n]\n', start)
+    for m in re.finditer(r"\(\s*0x([0-9A-Fa-f]+)\s*,\s*'([0-9a-f]+)'\s*,\s*\"\"\"(.*?)\"\"\"\s*\)",
+                         src[start:stop], re.S):
+        if int(m.group(1), 16) != marker:
+            continue
+        shape = '\n'.join('        %d %s' % (word, owner) for word, owner in words)
+        new = "(0x%X, '%s', \"\"\"\n%s\n\"\"\")" % (marker, digest, shape)
+        src = src[:start + m.start()] + new + src[start + m.end():]
+        open(path, 'w', encoding='utf-8').write(src)
+        return True
+    return False
+
+
+if RECORD_LAYOUT:
+    if moved or gone:
+        sys.exit('refusing to record the layout map: %d word(s) below %d moved or disappeared.\n%s\n'
+                 'A renumbering is not a record to refresh. It needs a new '
+                 'CONFIG_LAYOUT_VERSION_MAGIC and a migration that still recognises the marker the '
+                 'previous build wrote, otherwise every radio holding the old layout is read '
+                 'through the wrong addresses.'
+                 % (len(moved) + len(gone), BASELINE_LAYOUT_FIRST_UNUSED,
+                    describe_moved(moved + gone)))
+    if not added and layout_digest == rec_digest:
+        print('  layout record: marker 0x%X already records the %d words below %d this build '
+              'stores, nothing to do.' % (current_magic, len(current_map), BASELINE_LAYOUT_FIRST_UNUSED))
+        sys.exit(0)
+    if not rewrite_layout_entry(current_magic, layout_digest, layout_map):
+        sys.exit('LAYOUT_HISTORY has no entry for marker 0x%X to rewrite. Append '
+                 '(0x%X, %s, """...""") with the map below %d by hand, then run this again.'
+                 % (current_magic, current_magic, layout_digest, BASELINE_LAYOUT_FIRST_UNUSED))
+    print('  layout record: marker 0x%X now records %d words below %d, digest %s%s. Commit the '
+          'generator together with the change that made the word visible; the marker does not move.'
+          % (current_magic, len(current_map), BASELINE_LAYOUT_FIRST_UNUSED, layout_digest,
+             (', including %s' % ', '.join('%d %s' % (w, current_map[w]) for w, _t in added[:3]))
+             if added else ''))
+    sys.exit(0)
+
 if moved or gone:
     sys.exit('the map of the words below %d moved:\n%s\n'
+
              'A radio holding a configuration written under the recorded map cannot tell, so it will '
              'be read through the wrong addresses. If the values really moved, three things have to '
              'happen together:\n'
@@ -1523,15 +1573,15 @@ if moved or gone:
 
 if added:
     print('  layout map: %d word(s) below %d are stored by the table but not by the recorded shape '
-          '(%s). Nothing moved, so the marker stays 0x%X; refresh the recorded shape and digest of '
-          'that entry in LAYOUT_HISTORY in the same commit.'
+          '(%s). Nothing moved, so the marker stays 0x%X: run "make layout-record" and commit the '
+          'generator together with the change that made the word visible.'
           % (len(added), BASELINE_LAYOUT_FIRST_UNUSED,
              ', '.join('%d %s' % (w, current_map[w]) for w, _t in added[:3]) +
              (' ...' if len(added) > 3 else ''), current_magic))
 elif layout_digest != rec_digest:
     sys.exit('the digest %s recorded for marker 0x%X does not describe the shape stored next to it '
-             '(the map works out to %s). The two have to be updated together, otherwise the next '
-             'real map change is compared against a record that never existed.'
+             '(the map works out to %s). Run "make layout-record" to write both from the table, '
+             'otherwise the next real map change is compared against a record that never existed.'
              % (rec_digest, current_magic, layout_digest))
 
 # every marker that is no longer current has to stay recognised by the migration, otherwise the
