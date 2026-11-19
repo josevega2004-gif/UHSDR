@@ -7,11 +7,14 @@ one mutation at a time to the working tree, runs the generator against it, and c
   1. a stored value moves to another word      -> the check fails, the recorder refuses to record it
   2. a stored value is only renamed           -> the check passes, the recorder takes the new name,
                                                  and the marker stays
-  3. the marker moves, the map does not        -> the check fails
-  4. the parser learns about a stored word     -> the check passes, "make layout-record" writes the
+  3. an offset of the previous layout translation moves
+                                              -> the compiled translation disagrees with the two
+                                                 records, naming the settings it reads wrongly
+  4. the marker moves, the map does not        -> the check fails
+  5. the parser learns about a stored word     -> the check passes, "make layout-record" writes the
                                                  record, and a second run leaves it untouched
-  5. the parser loses a stored word            -> the check fails
-  6. the record does not parse                 -> the check fails
+  6. the parser loses a stored word            -> the check fails
+  7. the record does not parse                 -> the check fails
 
 An assertion may look at the exit code and at the data a verdict has to name: the settings that
 moved, the marker that was recorded, the record that did not parse. It may not look at the wording:
@@ -36,11 +39,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 GEN = ROOT / 'support/config_upgrade/gen_config_upgrade.py'
 HEADER = ROOT / 'drivers/ui/ui_configuration.h'
+TABLE = ROOT / 'drivers/ui/ui_configuration.c'
 EMITTED = ROOT / 'support/config_upgrade/config_upgrade.c'
 # every record file, by name, because which one this build uses is only known once the header is
 # read, and a run that was killed may have left that header saying anything
 RECORD_GLOB = ':(glob)support/config_upgrade/layout-*.map'
-REL = [str(path.relative_to(ROOT)) for path in (GEN, HEADER, EMITTED)] + [RECORD_GLOB]
+REL = [str(path.relative_to(ROOT)) for path in (GEN, HEADER, TABLE, EMITTED)] + [RECORD_GLOB]
 
 FAILS = 1          # sys.exit('message') in the generator, and make reports that as 2
 
@@ -146,18 +150,31 @@ def run(*args):
     return proc.returncode, proc.stdout + proc.stderr
 
 
+def run_check():
+    """the whole check as CI runs it: generator, host compiler, generated program
+
+    One case needs it, because what it perturbs is firmware C that only the compiled harness can
+    see. make reports a failing recipe as 2, the program itself returns 1, so the assertion there
+    is on any failure rather than on one exit code."""
+    proc = subprocess.run(['make', '-C', str(ROOT), 'config-upgrade-check'],
+                          capture_output=True, text=True)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 def expect(name, result, want_rc, *needles, any_of=()):
-    """one assertion: the exit code, and the data the verdict has to name"""
+    """one assertion: the exit code (None for any failure), and the data the verdict has to name"""
     rc, out = result
     crashed = 'Traceback (most recent call last)' in out
     missing = [n for n in needles if n not in out]
     unnamed = bool(any_of) and not any(n in out for n in any_of)
-    if rc == want_rc and not crashed and not missing and not unnamed:
+    failure_seen = rc != 0 if want_rc is None else rc == want_rc
+    if failure_seen and not crashed and not missing and not unnamed:
         print('  ok    %s' % name)
         return
     why = []
-    if rc != want_rc:
-        why.append('exit %d, expected %d' % (rc, want_rc))
+    if not failure_seen:
+        why.append('exit %d, expected %s'
+                   % (rc, 'a failure' if want_rc is None else want_rc))
     if crashed:
         why.append('the generator crashed instead of reporting a verdict')
     if missing:
@@ -213,6 +230,22 @@ def case_rename():
     expect('the recorder runs again without complaining', run('--record-layout'), 0)
 
 
+def case_old_layout_translation():
+    """one offset of UiConfiguration_OldLayoutAddress() changed
+
+    A wrong branch there reads every migrated radio from the wrong words and nothing else in the
+    tree notices: the firmware compiles, the current map is untouched. The check compares the
+    compiled function with the two recorded maps, so the whole harness has to run for this one.
+    """
+    source = TABLE.read_text(encoding='utf-8')
+    branch = 'return id + 57;'
+    assert source.count(branch) == 1, \
+        'the branch of UiConfiguration_OldLayoutAddress() this case perturbs is gone, update this case'
+    TABLE.write_text(source.replace(branch, 'return id + 56;'), encoding='utf-8')
+    expect('an offset of the previous layout translation moves', run_check(), None,
+           'CHECK FAILED', any_of=record_owners())
+
+
 def case_marker_bumped():
     """a marker without a map change pushes healthy radios through the layout migration"""
     bumped = MARKER + 1
@@ -266,10 +299,11 @@ def case_broken_record():
 CASES = (
     ('1. a value moves to another word', case_renumbering),
     ('2. a value is only renamed', case_rename),
-    ('3. the marker moves, the map does not', case_marker_bumped),
-    ('4. the parser learns a stored word', case_parser_addition),
-    ('5. the parser loses a stored word', case_parser_regression),
-    ('6. the record does not parse', case_broken_record),
+    ('3. an offset of the previous layout translation moves', case_old_layout_translation),
+    ('4. the marker moves, the map does not', case_marker_bumped),
+    ('5. the parser learns a stored word', case_parser_addition),
+    ('6. the parser loses a stored word', case_parser_regression),
+    ('7. the record does not parse', case_broken_record),
 )
 
 

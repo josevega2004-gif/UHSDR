@@ -8,6 +8,503 @@
 #define PREVIOUS_FIRST_UNUSED 383u
 #define SAVE_RECORDS_ENTRY_COUNT 1
 
+/* ---------------------------------------------------------------------------------------------
+   The address translation of the previous layout, compiled from ui_configuration.c itself and
+   compared with the two recorded maps below. A wrong offset in one of its branches corrupts
+   every radio that is migrated, and nothing else in the tree would notice. */
+#define CONFIG_LAYOUT_OLD_NO_VALUE     0xffff               
+#define CONFIG_LAYOUT_NEW_BAND_SLOTS   (MAX_BANDS)          
+#define CONFIG_LAYOUT_OLD_BAND_SLOTS   18                   
+#define CONFIG_LAYOUT_OLD_VFO_BASE     183                  
+#define CONFIG_LAYOUT_OLD_FULL_BASE    115                  
+#define BAND_MODE_10 9
+#define BAND_MODE_11 8
+#define BAND_MODE_160 13
+#define BAND_MODE_2200 11
+#define BAND_MODE_6 10
+#define BAND_MODE_630 12
+#define BAND_MODE_8 14
+#define BAND_MODE_GEN 15
+#define EEPROM_BAND0_5W 97
+#define EEPROM_BAND0_FULL 112
+#define EEPROM_BAND0_MODE_A 179
+#define EEPROM_BAND13_5W 110
+#define EEPROM_BAND13_FULL 125
+#define EEPROM_BAND_REGION 374
+#define MAX_BANDS 15
+
+static uint16_t UiConfiguration_OldBandSlot(uint16_t new_slot)
+{
+    switch (new_slot)
+    {
+    case BAND_MODE_10:   return 8;      
+    case BAND_MODE_6:    return 9;      
+    case BAND_MODE_2200: return 14;
+    case BAND_MODE_630:  return 15;
+    case BAND_MODE_160:  return 16;
+    case BAND_MODE_GEN:  return 17;                         
+    case BAND_MODE_11:   return CONFIG_LAYOUT_OLD_NO_VALUE; 
+    case BAND_MODE_8:    return CONFIG_LAYOUT_OLD_NO_VALUE; 
+    default:             return new_slot;                   
+    }
+}
+
+static uint16_t UiConfiguration_OldLayoutAddress(uint16_t id)
+{
+    
+    if (id >= EEPROM_BAND0_5W && id <= EEPROM_BAND13_5W)
+    {
+        uint16_t slot = UiConfiguration_OldBandSlot(id - EEPROM_BAND0_5W);
+        return slot == CONFIG_LAYOUT_OLD_NO_VALUE ? slot : (uint16_t)(EEPROM_BAND0_5W + slot);
+    }
+    if (id >= EEPROM_BAND0_FULL && id <= EEPROM_BAND13_FULL)
+    {
+        uint16_t slot = UiConfiguration_OldBandSlot(id - EEPROM_BAND0_FULL);
+        return slot == CONFIG_LAYOUT_OLD_NO_VALUE ? slot : (uint16_t)(CONFIG_LAYOUT_OLD_FULL_BASE + slot);
+    }
+
+    
+    if (id >= EEPROM_BAND0_MODE_A && id < EEPROM_BAND0_MODE_A + 6 * CONFIG_LAYOUT_NEW_BAND_SLOTS)
+    {
+        uint16_t block = (id - EEPROM_BAND0_MODE_A) / CONFIG_LAYOUT_NEW_BAND_SLOTS;
+        uint16_t slot = UiConfiguration_OldBandSlot((id - EEPROM_BAND0_MODE_A) % CONFIG_LAYOUT_NEW_BAND_SLOTS);
+        if (slot == CONFIG_LAYOUT_OLD_NO_VALUE)
+        {
+            return CONFIG_LAYOUT_OLD_NO_VALUE;
+        }
+        return (uint16_t)(CONFIG_LAYOUT_OLD_VFO_BASE + block * CONFIG_LAYOUT_OLD_BAND_SLOTS + slot);
+    }
+
+    
+    if (id < EEPROM_BAND0_5W)
+    {
+        return id;                                          
+    }
+    if (id < 127)
+    {
+        return id;                                          
+    }
+    if (id < 160)
+    {
+        return id + 6;                                      
+    }
+    if (id < EEPROM_BAND0_MODE_A)
+    {
+        return id + 4;                                      
+    }
+    if (id < 295)
+    {
+        return id + 22;                                     
+    }
+    if (id < 299)
+    {
+        return id + 32;
+    }
+    if (id <= EEPROM_BAND_REGION)
+    {
+        return id + 57;                                     
+    }
+    return CONFIG_LAYOUT_OLD_NO_VALUE;
+}
+
+typedef enum { OLD_NONE, OLD_ONE, OLD_BLOCK } old_layout_kind_t;
+typedef struct { uint16_t id, lo, hi; old_layout_kind_t kind; const char* owner; } old_layout_t;
+static const old_layout_t old_layout[] =
+{
+    { 1, 1, 1, OLD_ONE, "EEPROM_BAND_MODE (written outside the table)" },
+    { 2, 2, 2, OLD_ONE, "EEPROM_FREQ_HIGH (written outside the table)" },
+    { 3, 3, 3, OLD_ONE, "EEPROM_FREQ_LOW (written outside the table)" },
+    { 4, 4, 4, OLD_ONE, "EEPROM_FREQ_STEP" },
+    { 5, 5, 5, OLD_ONE, "EEPROM_TX_AUDIO_SRC" },
+    { 6, 6, 6, OLD_ONE, "EEPROM_TCXO_STATE" },
+    { 7, 7, 7, OLD_ONE, "EEPROM_PA_BIAS" },
+    { 8, 8, 8, OLD_ONE, "EEPROM_AUDIO_GAIN" },
+    { 9, 9, 9, OLD_ONE, "EEPROM_RX_CODEC_GAIN" },
+    { 10, 10, 10, OLD_ONE, "EEPROM_MAX_VOLUME" },
+    { 12, 12, 12, OLD_ONE, "EEPROM_TX_POWER_LEVEL" },
+    { 13, 13, 13, OLD_ONE, "EEPROM_CW_KEYER_SPEED" },
+    { 14, 14, 14, OLD_ONE, "EEPROM_CW_KEYER_MODE" },
+    { 15, 15, 15, OLD_ONE, "EEPROM_CW_SIDETONE_GAIN" },
+    { 16, 16, 16, OLD_ONE, "EEPROM_MIC_BOOST" },
+    { 17, 17, 17, OLD_ONE, "EEPROM_TX_IQ_80M_GAIN_BALANCE" },
+    { 18, 18, 18, OLD_ONE, "EEPROM_TX_IQ_80M_PHASE_BALANCE" },
+    { 19, 19, 19, OLD_ONE, "EEPROM_RX_IQ_80M_GAIN_BALANCE" },
+    { 20, 20, 20, OLD_ONE, "EEPROM_RX_IQ_80M_PHASE_BALANCE" },
+    { 75, 75, 75, OLD_ONE, "EEPROM_FREQ_CAL" },
+    { 76, 76, 76, OLD_ONE, "EEPROM_NB_SETTING" },
+    { 78, 78, 78, OLD_ONE, "EEPROM_MIC_GAIN" },
+    { 79, 79, 79, OLD_ONE, "EEPROM_LINE_GAIN" },
+    { 80, 80, 80, OLD_ONE, "EEPROM_SIDETONE_FREQ" },
+    { 81, 81, 81, OLD_ONE, "EEPROM_SPEC_SCOPE_SPEED" },
+    { 82, 82, 82, OLD_ONE, "EEPROM_SPECTRUM_FILTER" },
+    { 85, 85, 85, OLD_ONE, "EEPROM_SPECTRUM_TRACE_COLOUR" },
+    { 86, 86, 86, OLD_ONE, "EEPROM_SPECTRUM_GRID_COLOUR" },
+    { 87, 87, 87, OLD_ONE, "EEPROM_SPECTRUM_SCALE_COLOUR" },
+    { 88, 88, 88, OLD_ONE, "EEPROM_PADDLE_REVERSE" },
+    { 89, 89, 89, OLD_ONE, "EEPROM_CW_RX_DELAY" },
+    { 90, 90, 90, OLD_ONE, "EEPROM_SPECTRUM_CENTRE_LINE_COLOUR" },
+    { 91, 91, 91, OLD_ONE, "EEPROM_DETECTOR_COUPLING_COEFF_2200M" },
+    { 92, 92, 92, OLD_ONE, "EEPROM_DETECTOR_COUPLING_COEFF_630M" },
+    { 93, 93, 93, OLD_ONE, "EEPROM_DETECTOR_COUPLING_COEFF_80M" },
+    { 94, 94, 94, OLD_ONE, "EEPROM_DETECTOR_COUPLING_COEFF_40M" },
+    { 95, 95, 95, OLD_ONE, "EEPROM_DETECTOR_COUPLING_COEFF_20M" },
+    { 96, 96, 96, OLD_ONE, "EEPROM_DETECTOR_COUPLING_COEFF_15M" },
+    { 97, 97, 114, OLD_BLOCK, "EEPROM_BAND0_5W" },
+    { 98, 97, 114, OLD_BLOCK, "EEPROM_BAND1_5W" },
+    { 99, 97, 114, OLD_BLOCK, "EEPROM_BAND2_5W" },
+    { 100, 97, 114, OLD_BLOCK, "EEPROM_BAND3_5W" },
+    { 101, 97, 114, OLD_BLOCK, "EEPROM_BAND4_5W" },
+    { 102, 97, 114, OLD_BLOCK, "EEPROM_BAND5_5W" },
+    { 103, 97, 114, OLD_BLOCK, "EEPROM_BAND6_5W" },
+    { 104, 97, 114, OLD_BLOCK, "EEPROM_BAND7_5W" },
+    { 105, 97, 114, OLD_BLOCK, "EEPROM_BAND8_5W" },
+    { 106, 97, 114, OLD_BLOCK, "EEPROM_BAND9_5W" },
+    { 107, 97, 114, OLD_BLOCK, "EEPROM_BAND10_5W" },
+    { 108, 97, 114, OLD_BLOCK, "EEPROM_BAND11_5W" },
+    { 109, 97, 114, OLD_BLOCK, "EEPROM_BAND12_5W" },
+    { 110, 97, 114, OLD_BLOCK, "EEPROM_BAND13_5W" },
+    { 112, 115, 132, OLD_BLOCK, "EEPROM_BAND0_FULL" },
+    { 113, 115, 132, OLD_BLOCK, "EEPROM_BAND1_FULL" },
+    { 114, 115, 132, OLD_BLOCK, "EEPROM_BAND2_FULL" },
+    { 115, 115, 132, OLD_BLOCK, "EEPROM_BAND3_FULL" },
+    { 116, 115, 132, OLD_BLOCK, "EEPROM_BAND4_FULL" },
+    { 117, 115, 132, OLD_BLOCK, "EEPROM_BAND5_FULL" },
+    { 118, 115, 132, OLD_BLOCK, "EEPROM_BAND6_FULL" },
+    { 119, 115, 132, OLD_BLOCK, "EEPROM_BAND7_FULL" },
+    { 120, 115, 132, OLD_BLOCK, "EEPROM_BAND8_FULL" },
+    { 121, 115, 132, OLD_BLOCK, "EEPROM_BAND9_FULL" },
+    { 122, 115, 132, OLD_BLOCK, "EEPROM_BAND10_FULL" },
+    { 123, 115, 132, OLD_BLOCK, "EEPROM_BAND11_FULL" },
+    { 124, 115, 132, OLD_BLOCK, "EEPROM_BAND12_FULL" },
+    { 125, 115, 132, OLD_BLOCK, "EEPROM_BAND13_FULL" },
+    { 133, 139, 139, OLD_ONE, "EEPROM_TX_IQ_10M_GAIN_BALANCE" },
+    { 134, 140, 140, OLD_ONE, "EEPROM_TX_IQ_10M_PHASE_BALANCE" },
+    { 135, 141, 141, OLD_ONE, "EEPROM_RX_IQ_10M_GAIN_BALANCE" },
+    { 136, 142, 142, OLD_ONE, "EEPROM_RX_IQ_10M_PHASE_BALANCE" },
+    { 137, 143, 143, OLD_ONE, "EEPROM_SENSOR_NULL" },
+    { 139, 145, 145, OLD_ONE, "EEPROM_XVERTER_DISP" },
+    { 140, 146, 146, OLD_ONE, "EEPROM_XVERTER_OFFSET_HIGH (written outside the table)" },
+    { 141, 147, 147, OLD_ONE, "EEPROM_VFO_MEM_MODE" },
+    { 142, 148, 148, OLD_ONE, "EEPROM_XVERTER_OFFSET_LOW (written outside the table)" },
+    { 143, 149, 149, OLD_ONE, "EEPROM_SPECTRUM_MAGNIFY" },
+    { 146, 152, 152, OLD_ONE, "EEPROM_AM_MODE_DISABLE" },
+    { 147, 153, 153, OLD_ONE, "EEPROM_PA_CW_BIAS" },
+    { 148, 154, 154, OLD_ONE, "EEPROM_SPECTRUM_DB_DIV" },
+    { 149, 155, 155, OLD_ONE, "EEPROM_SPECTRUM_AGC_RATE" },
+    { 150, 156, 156, OLD_ONE, "EEPROM_METER_MODE" },
+    { 151, 157, 157, OLD_ONE, "EEPROM_ALC_DECAY_TIME" },
+    { 152, 158, 158, OLD_ONE, "EEPROM_ALC_POSTFILT_TX_GAIN" },
+    { 153, 159, 159, OLD_ONE, "EEPROM_STEP_SIZE_CONFIG" },
+    { 154, 160, 160, OLD_ONE, "EEPROM_DSP_MODE" },
+    { 155, 161, 161, OLD_ONE, "EEPROM_DSP_NR_STRENGTH" },
+    { 160, 164, 164, OLD_ONE, "EEPROM_DSP_NOTCH_DECOR_BUFLEN" },
+    { 161, 165, 165, OLD_ONE, "EEPROM_DSP_NOTCH_CONV_RATE" },
+    { 163, 167, 167, OLD_ONE, "EEPROM_TX_AUDIO_COMPRESS" },
+    { 164, 168, 168, OLD_ONE, "EEPROM_TX_IQ_80M_GAIN_BALANCE_TRANS_OFF" },
+    { 165, 169, 169, OLD_ONE, "EEPROM_TX_DISABLE" },
+    { 166, 170, 170, OLD_ONE, "EEPROM_FLAGS1" },
+    { 167, 171, 171, OLD_ONE, "EEPROM_VERSION_RELEASE" },
+    { 169, 173, 173, OLD_ONE, "EEPROM_CW_OFFSET_MODE" },
+    { 170, 174, 174, OLD_ONE, "EEPROM_FREQ_CONV_MODE" },
+    { 171, 175, 175, OLD_ONE, "EEPROM_LSB_USB_AUTO_SELECT" },
+    { 172, 176, 176, OLD_ONE, "EEPROM_VERSION_MAJOR" },
+    { 173, 177, 177, OLD_ONE, "EEPROM_LCD_BLANKING_CONFIG" },
+    { 174, 178, 178, OLD_ONE, "EEPROM_VOLTMETER_CALIBRATE" },
+    { 175, 179, 179, OLD_ONE, "EEPROM_WATERFALL_COLOR_SCHEME" },
+    { 176, 180, 180, OLD_ONE, "EEPROM_WATERFALL_VERTICAL_STEP_SIZE" },
+    { 178, 182, 182, OLD_ONE, "EEPROM_WATERFALL_CONTRAST" },
+    { 179, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 180, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 181, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 182, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 183, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 184, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 185, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 186, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 187, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 188, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 189, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 190, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 191, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 192, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 193, 183, 200, OLD_BLOCK, "EEPROM_BAND0_MODE_A (15 band slots)" },
+    { 194, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 195, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 196, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 197, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 198, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 199, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 200, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 201, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 202, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 203, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 204, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 205, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 206, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 207, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 208, 201, 218, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_A (15 band slots)" },
+    { 209, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 210, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 211, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 212, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 213, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 214, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 215, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 216, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 217, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 218, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 219, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 220, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 221, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 222, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 223, 219, 236, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_A (15 band slots)" },
+    { 224, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 225, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 226, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 227, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 228, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 229, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 230, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 231, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 232, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 233, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 234, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 235, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 236, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 237, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 238, 237, 254, OLD_BLOCK, "EEPROM_BAND0_MODE_B (15 band slots)" },
+    { 239, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 240, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 241, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 242, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 243, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 244, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 245, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 246, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 247, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 248, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 249, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 250, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 251, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 252, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 253, 255, 272, OLD_BLOCK, "EEPROM_BAND0_FREQ_HIGH_B (15 band slots)" },
+    { 254, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 255, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 256, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 257, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 258, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 259, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 260, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 261, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 262, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 263, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 264, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 265, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 266, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 267, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 268, 273, 290, OLD_BLOCK, "EEPROM_BAND0_FREQ_LOW_B (15 band slots)" },
+    { 269, 291, 291, OLD_ONE, "EEPROM_WATERFALL_SPEED" },
+    { 272, 294, 294, OLD_ONE, "EEPROM_DSP_NOTCH_FFT_NUMTAPS" },
+    { 273, 295, 295, OLD_ONE, "EEPROM_SPECTRUM_SIZE" },
+    { 275, 297, 297, OLD_ONE, "EEPROM_TXRX_SWITCH_AUDIO_MUTE_DELAY" },
+    { 276, 298, 298, OLD_ONE, "EEPROM_FLAGS2" },
+    { 277, 299, 299, OLD_ONE, "EEPROM_FILTER_DISP_COLOUR" },
+    { 278, 300, 300, OLD_ONE, "EEPROM_TX_IQ_10M_GAIN_BALANCE_TRANS_OFF" },
+    { 279, 301, 301, OLD_ONE, "EEPROM_TX_IQ_10M_PHASE_BALANCE_TRANS_OFF" },
+    { 280, 302, 302, OLD_ONE, "EEPROM_FM_SUBAUDIBLE_TONE_GEN" },
+    { 281, 303, 303, OLD_ONE, "EEPROM_FM_TONE_BURST_MODE" },
+    { 282, 304, 304, OLD_ONE, "EEPROM_FM_SQUELCH_SETTING" },
+    { 285, 307, 307, OLD_ONE, "EEPROM_FM_SUBAUDIBLE_TONE_DET" },
+    { 286, 308, 308, OLD_ONE, "EEPROM_KEYBOARD_BEEP_FREQ" },
+    { 287, 309, 309, OLD_ONE, "EEPROM_BEEP_LOUDNESS" },
+    { 288, 310, 310, OLD_ONE, "EEPROM_VERSION_MINOR" },
+    { 289, 311, 311, OLD_ONE, "EEPROM_DETECTOR_COUPLING_COEFF_160M" },
+    { 290, 312, 312, OLD_ONE, "EEPROM_DETECTOR_COUPLING_COEFF_6M" },
+    { 291, 313, 313, OLD_ONE, "EEPROM_TUNE_POWER_LEVEL" },
+    { 293, 315, 315, OLD_ONE, "EEPROM_CAT_XLAT" },
+    { 295, 327, 327, OLD_ONE, "EEPROM_METER_COLOUR_UP" },
+    { 296, 328, 328, OLD_ONE, "EEPROM_METER_COLOUR_DOWN" },
+    { 299, 356, 356, OLD_ONE, "EEPROM_MANUAL_NOTCH" },
+    { 300, 357, 357, OLD_ONE, "EEPROM_MANUAL_PEAK" },
+    { 301, 358, 358, OLD_ONE, "EEPROM_TX_IQ_80M_PHASE_BALANCE_TRANS_OFF" },
+    { 302, 359, 359, OLD_ONE, "EEPROM_DISPLAY_DBM" },
+    { 303, 360, 360, OLD_ONE, "EEPROM_BASS_GAIN" },
+    { 304, 361, 361, OLD_ONE, "EEPROM_TREBLE_GAIN" },
+    { 306, 363, 363, OLD_ONE, "EEPROM_TX_FILTER" },
+    { 307, 364, 364, OLD_ONE, "EEPROM_TX_BASS_GAIN" },
+    { 308, 365, 365, OLD_ONE, "EEPROM_TX_TREBLE_GAIN" },
+    { 309, 366, 366, OLD_ONE, "EEPROM_SAM_PLL_LOCKING_RANGE" },
+    { 310, 367, 367, OLD_ONE, "EEPROM_SAM_PLL_STEP_RESPONSE" },
+    { 311, 368, 368, OLD_ONE, "EEPROM_SAM_PLL_BANDWIDTH" },
+    { 312, 369, 369, OLD_ONE, "EEPROM_I2C1_SPEED" },
+    { 313, 370, 370, OLD_ONE, "EEPROM_I2C2_SPEED" },
+    { 314, 371, 371, OLD_ONE, "EEPROM_SAM_FADE_LEVELER" },
+    { 315, 372, 372, OLD_ONE, "EEPROM_LINEOUT_GAIN" },
+    { 316, 373, 373, OLD_ONE, "EEPROM_IQ_AUTO_CORRECTION" },
+    { 318, 375, 375, OLD_ONE, "EEPROM_AGC_WDSP_MODE" },
+    { 319, 376, 376, OLD_ONE, "EEPROM_AGC_WDSP_THRESH" },
+    { 320, 377, 377, OLD_ONE, "EEPROM_AGC_WDSP_SLOPE" },
+    { 321, 378, 378, OLD_ONE, "EEPROM_AGC_WDSP_HANG" },
+    { 322, 379, 379, OLD_ONE, "EEPROM_DBM_CALIBRATE" },
+    { 323, 380, 380, OLD_ONE, "EEPROM_AGC_WDSP_TAU_DECAY_0" },
+    { 324, 381, 381, OLD_ONE, "EEPROM_AGC_WDSP_TAU_HANG_DECAY" },
+    { 325, 382, 382, OLD_ONE, "EEPROM_RTC_CALIB" },
+    { 326, 383, 383, OLD_ONE, "EEPROM_AGC_WDSP_TAU_DECAY_1" },
+    { 327, 384, 384, OLD_ONE, "EEPROM_AGC_WDSP_TAU_DECAY_2" },
+    { 328, 385, 385, OLD_ONE, "EEPROM_AGC_WDSP_TAU_DECAY_3" },
+    { 329, 386, 386, OLD_ONE, "EEPROM_AGC_WDSP_TAU_DECAY_4" },
+    { 330, 387, 387, OLD_ONE, "EEPROM_LOW_POWER_CONFIG" },
+    { 331, 388, 388, OLD_ONE, "EEPROM_CW_KEYER_WEIGHT" },
+    { 332, 389, 389, OLD_ONE, "EEPROM_DIGI_MODE_CONF" },
+    { 333, 390, 390, OLD_ONE, "EEPROM_Scope_TRACE_HL_BW" },
+    { 334, 391, 391, OLD_ONE, "EEPROM_Scope_TRACE_HL_BW_BGR" },
+    { 335, 392, 393, OLD_BLOCK, "EEPROM_TScal0_High" },
+    { 336, 392, 393, OLD_BLOCK, "EEPROM_TScal0_High" },
+    { 337, 394, 395, OLD_BLOCK, "EEPROM_TScal1_High" },
+    { 338, 394, 395, OLD_BLOCK, "EEPROM_TScal1_High" },
+    { 339, 396, 397, OLD_BLOCK, "EEPROM_TScal2_High" },
+    { 340, 396, 397, OLD_BLOCK, "EEPROM_TScal2_High" },
+    { 341, 398, 399, OLD_BLOCK, "EEPROM_TScal3_High" },
+    { 342, 398, 399, OLD_BLOCK, "EEPROM_TScal3_High" },
+    { 343, 400, 401, OLD_BLOCK, "EEPROM_TScal4_High" },
+    { 344, 400, 401, OLD_BLOCK, "EEPROM_TScal4_High" },
+    { 345, 402, 403, OLD_BLOCK, "EEPROM_TScal5_High" },
+    { 346, 402, 403, OLD_BLOCK, "EEPROM_TScal5_High" },
+    { 347, 404, 404, OLD_ONE, "EEPROM_CW_DECODER_ENABLE" },
+    { 348, 405, 405, OLD_ONE, "EEPROM_Scope_Graticule_Ypos" },
+    { 349, 406, 406, OLD_ONE, "EEPROM_Freq_Display_Font" },
+    { 350, 407, 407, OLD_ONE, "EEPROM_NUMBER_OF_ENTRIES" },
+    { 351, 408, 408, OLD_ONE, "EEPROM_DSP_MODE_MASK" },
+    { 352, 409, 409, OLD_ONE, "EEPROM_ENABLE_PTT_RTS" },
+    { 353, 410, 410, OLD_ONE, "EEPROM_CW_DECODER_THRESH" },
+    { 354, 411, 411, OLD_ONE, "EEPROM_CW_DECODER_BLOCKSIZE" },
+    { 355, 412, 412, OLD_ONE, "EEPROM_SMETER_ALPHAS" },
+    { 357, 414, 414, OLD_ONE, "EEPROM_TX_IQ_20M_GAIN_BALANCE" },
+    { 358, 415, 415, OLD_ONE, "EEPROM_TX_IQ_20M_PHASE_BALANCE" },
+    { 359, 416, 416, OLD_ONE, "EEPROM_TX_IQ_15M_GAIN_BALANCE" },
+    { 360, 417, 417, OLD_ONE, "EEPROM_TX_IQ_15M_PHASE_BALANCE" },
+    { 361, 418, 418, OLD_ONE, "EEPROM_TX_IQ_10M_UP_GAIN_BALANCE" },
+    { 362, 419, 419, OLD_ONE, "EEPROM_TX_IQ_10M_UP_PHASE_BALANCE" },
+    { 363, 420, 420, OLD_ONE, "EEPROM_TX_IQ_20M_GAIN_BALANCE_TRANS_OFF" },
+    { 364, 421, 421, OLD_ONE, "EEPROM_TX_IQ_20M_PHASE_BALANCE_TRANS_OFF" },
+    { 365, 422, 422, OLD_ONE, "EEPROM_TX_IQ_15M_GAIN_BALANCE_TRANS_OFF" },
+    { 366, 423, 423, OLD_ONE, "EEPROM_TX_IQ_15M_PHASE_BALANCE_TRANS_OFF" },
+    { 367, 424, 424, OLD_ONE, "EEPROM_TX_IQ_10M_UP_GAIN_BALANCE_TRANS_OFF" },
+    { 368, 425, 425, OLD_ONE, "EEPROM_TX_IQ_10M_UP_PHASE_BALANCE_TRANS_OFF" },
+    { 369, 426, 426, OLD_ONE, "EEPROM_VSWR_PROTECTION_THRESHOLD" },
+    { 370, 427, 427, OLD_ONE, "EEPROM_EXPFLAGS1" },
+    { 371, 428, 428, OLD_ONE, "EEPROM_XVERTER_OFFSET_TX_HIGH (written outside the table)" },
+    { 372, 429, 429, OLD_ONE, "EEPROM_XVERTER_OFFSET_TX_LOW (written outside the table)" },
+    { 373, 430, 430, OLD_ONE, "EEPROM_CW_DECODER_FLAGS" },
+    { 374, 431, 431, OLD_ONE, "EEPROM_BAND_REGION" },
+    { 375, 0, 0, OLD_NONE, "EEPROM_DETECTOR_COUPLING_COEFF_11M" },
+    { 376, 0, 0, OLD_NONE, "EEPROM_CONFIG_LAYOUT_VERSION (written outside the table)" },
+    { 377, 0, 0, OLD_NONE, "EEPROM_AM_CARRIER_LEVEL" },
+    { 378, 0, 0, OLD_NONE, "EEPROM_AM_TX_SIDEBAND" },
+    { 379, 0, 0, OLD_NONE, "EEPROM_AM_PEP_HOLD" },
+    { 380, 0, 0, OLD_NONE, "EEPROM_AM_PEP_DIM" },
+    { 381, 0, 0, OLD_NONE, "EEPROM_AM_PEP_TARGET" },
+    { 382, 0, 0, OLD_NONE, "EEPROM_AM_PEP_WARN" },
+    { 383, 0, 0, OLD_NONE, "EEPROM_AGC_WDSP_HANG_TIME" },
+    { 384, 0, 0, OLD_NONE, "EEPROM_AGC_WDSP_HANG_THRESH" },
+    { 385, 0, 0, OLD_NONE, "EEPROM_AGC_WDSP_TAU_DECAY_5" },
+    { 386, 0, 0, OLD_NONE, "EEPROM_PWR_METER_DISP" },
+    { 387, 0, 0, OLD_NONE, "EEPROM_RTTY_SHIFT_IDX" },
+    { 388, 0, 0, OLD_NONE, "EEPROM_RTTY_SPEED_IDX" },
+    { 389, 0, 0, OLD_NONE, "EEPROM_PSK_SPEED_IDX" },
+    { 391, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 392, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 393, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 394, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 395, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 396, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 397, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 398, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 399, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 400, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 401, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 402, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 403, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 404, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 405, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 406, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 407, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 408, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 409, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 410, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 411, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 412, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 413, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 414, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+    { 415, 329, 353, OLD_BLOCK, "filter path memories (5 modes x 5 slots)" },
+};
+static const unsigned old_layout_count = sizeof(old_layout)/sizeof(old_layout[0]);
+
+static const char* old_layout_expectation(const old_layout_t* e)
+{
+    static char txt[32];
+    switch (e->kind)
+    {
+    case OLD_NONE:  return "that the value did not exist";
+    case OLD_ONE:   snprintf(txt, sizeof(txt), "word %u", e->lo); return txt;
+    default:        snprintf(txt, sizeof(txt), "a word in %u..%u", e->lo, e->hi); return txt;
+    }
+}
+
+static int check_old_layout_translation(void)
+{
+    static uint16_t seen[1024];
+    unsigned bad = 0, mapped = 0;
+    memset(seen, 0, sizeof(seen));
+    for (unsigned i = 0; i < old_layout_count; i++)
+    {
+        const old_layout_t* e = &old_layout[i];
+        const uint16_t got = UiConfiguration_OldLayoutAddress(e->id);
+        int ok;
+        switch (e->kind)
+        {
+        case OLD_NONE:  ok = (got == CONFIG_LAYOUT_OLD_NO_VALUE); break;
+        case OLD_ONE:   ok = (got == e->lo); break;
+        default:        ok = (got == CONFIG_LAYOUT_OLD_NO_VALUE) ||
+                            (got >= e->lo && got <= e->hi); break;
+        }
+        if (got != CONFIG_LAYOUT_OLD_NO_VALUE)
+        {
+            mapped++;
+            if (got < sizeof(seen)/sizeof(seen[0]))
+            {
+                if (seen[got])
+                {
+                    ok = 0;         /* two values translated onto the same word */
+                }
+                seen[got] = 1;
+            }
+        }
+        if (!ok)
+        {
+            bad++;
+            if (bad <= 10)
+            {
+                printf("CHECK FAILED: %s (id %u) translates to ", e->owner, e->id);
+                if (got == CONFIG_LAYOUT_OLD_NO_VALUE)
+                {
+                    printf("no previous address, the two records say %s\n", old_layout_expectation(e));
+                }
+                else
+                {
+                    printf("%u, the two records say %s\n", got, old_layout_expectation(e));
+                }
+            }
+        }
+    }
+    if (bad == 0)
+    {
+        printf("previous layout translation: %u stored values, %u of them land on a word the "
+               "recorded previous map gives them, none twice\n\n", old_layout_count, mapped);
+    }
+    return bad ? 1 : 0;
+}
+
 typedef enum { KIND_PERCENT, KIND_SIDEBAND, KIND_HALF_SECONDS, KIND_ON_OFF, KIND_DB } kind_t;
 typedef struct { const char* name; const char* idname; uint16_t id; int16_t def, min, max; kind_t kind; } entry_t;
 static const entry_t entries[] = {
@@ -1233,6 +1730,7 @@ int main(void)
     rc |= check_save_order();
     rc |= check_filter_map_migration();
     rc |= check_filter_map_save();
+    rc |= check_old_layout_translation();
     if (entry_count == 0)
     {
         printf("CHECK FAILED: no entries parsed, the generator matched nothing\n");

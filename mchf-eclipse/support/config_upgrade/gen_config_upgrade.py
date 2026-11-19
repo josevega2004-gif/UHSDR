@@ -9,6 +9,11 @@
 # checks that every AGC value the operator can change in the menu is stored, survives a save/load
 # round trip and keeps the range the menu offers.
 #
+# It also compiles the address translation of the previous layout, UiConfiguration_OldLayoutAddress()
+# in ui_configuration.c, and compares its output with the map of that layout and the map of the
+# current one: a wrong branch there reads every migrated radio from the wrong words, and nothing
+# else in the tree would notice.
+#
 # Usage:  ./gen_config_upgrade.py && gcc -O2 -Wall -o config_upgrade config_upgrade.c && ./config_upgrade
 #
 # Rerun after adding, removing or renumbering configuration values (ui_configuration.h and the
@@ -1194,15 +1199,8 @@ if len(set(markers)) != len(markers):
              'map shapes. A radio holding the older shape would be read through the newer addresses.'
              % ', '.join('0x%x' % m for m in sorted({m for m in markers if markers.count(m) > 1})))
 
-def read_layout_map(name, marker, lenient=False):
-    """the "word owner" lines of one recorded layout, from the file next to this script"""
-    path = Path(__file__).resolve().parent / name
-    if not path.exists():
-        if lenient:
-            return {}          # the recorder is about to write this record, see below
-        sys.exit('the layout record %s of marker 0x%X is missing. Restore it, or append the pair '
-                 '(0x%X, %s) to LAYOUT_HISTORY with the map that build wrote.'
-                 % (name, marker, marker, name))
+def parse_map_file(path, name):
+    """the "word owner" lines of one recorded layout"""
     out = {}
     for lineno, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
         line = line.split('#')[0].strip()
@@ -1215,6 +1213,29 @@ def read_layout_map(name, marker, lenient=False):
     if not out:
         sys.exit('%s records no word at all, an empty record says nothing about the layout' % name)
     return out
+
+
+def read_layout_map(name, marker, lenient=False):
+    """the "word owner" lines of one recorded layout, from the file next to this script"""
+    path = Path(__file__).resolve().parent / name
+    if not path.exists():
+        if lenient:
+            return {}          # the recorder is about to write this record, see below
+        sys.exit('the layout record %s of marker 0x%X is missing. Restore it, or append the pair '
+                 '(0x%X, %s) to LAYOUT_HISTORY with the map that build wrote.'
+                 % (name, marker, marker, name))
+    return parse_map_file(path, name)
+
+
+def read_previous_layout(name):
+    """the record of the layout that UiConfiguration_OldLayoutAddress() translates"""
+    path = Path(__file__).resolve().parent / name
+    if not path.exists():
+        sys.exit('the record of the previous layout, %s, is missing. It is the map the address '
+                 'translation in ui_configuration.c is checked against, so the check would have '
+                 'nothing to compare with. Restore the file, do not create it from the current '
+                 'table: it describes a layout this firmware no longer writes.' % name)
+    return parse_map_file(path, name)
 
 
 def layout_file_text(marker, rows):
@@ -1396,6 +1417,194 @@ if older:
                      'Recognise the old marker there, or remove the pair only if no radio can be '
                      'holding it.' % marker)
 
+# -----------------------------------------------------------------------------------------------
+# The address translation of the previous layout, compiled and compared with the two records
+#
+# UiConfiguration_OldLayoutAddress() is hand written arithmetic: it maps every current id to the
+# word the layout before the band renumbering stored that value at, and reports 0xFFFF for a value
+# that did not exist there. A wrong offset in one of its branches fails nothing else in the tree:
+# the firmware still compiles, the current map is untouched, and only a radio holding the previous
+# configuration is read through the wrong words - silently, because every word it does read holds
+# a plausible value of some other setting.
+#
+# So the function itself is compiled for the host, together with the record of the previous layout
+# and the record of the current marker, and every current word is asked what the two maps imply:
+#   - a value both records name once: exactly the word the previous record gives it;
+#   - a per band block, whose words are positions that were renumbered: any word of the block the
+#     previous record gives it, and no word twice;
+#   - a value the previous layout did not have: 0xFFFF.
+# The bands are compared as blocks because the record names them by position - EEPROM_BAND5_5W is
+# the sixth slot, not 5m - so which band a slot held cannot be read from it. A branch that trades
+# two bands keeps every block inside its range and passes; a branch that moves an offset does not.
+PREVIOUS_LAYOUT_RECORD = 'layout-before-0x5AA5.map'
+BAND_BLOCK_OWNERS = ('_MODE_A', '_MODE_B', '_FREQ_HIGH_A', '_FREQ_HIGH_B',
+                     '_FREQ_LOW_A', '_FREQ_LOW_B', '_5W', '_FULL')
+
+
+def layout_owner_key(owner):
+    """the value a word belongs to, across the two records
+
+    A record notes how a word is written (" (written outside the table)") or how many slots a
+    block has, and it names the per band blocks by position, so the band number is dropped: the
+    position is what was renumbered, not the value."""
+    name = owner.split(' (')[0].strip()
+    m = re.match(r'^EEPROM_BAND\d+(_\w+)$', name)
+    return 'band' + m.group(1) if m and m.group(1) in BAND_BLOCK_OWNERS else name
+
+
+def firmware_function(name):
+    """one uint16_t function of ui_configuration.c, compiled for the host exactly as it is"""
+    m = re.search(r'static\s+uint16_t\s+%s\s*\([^)]*\)\s*\{.*?\n\}' % name, clean_cfg_c, re.S)
+    if not m:
+        sys.exit('%s() is gone from ui_configuration.c or its signature changed, so the address '
+                 'translation of the previous layout can no longer be compiled and checked. '
+                 'Update this check together with the function.' % name)
+    return m.group(0)
+
+
+previous_map = read_previous_layout(PREVIOUS_LAYOUT_RECORD)
+previous_keys = {}
+for word, owner in previous_map.items():
+    previous_keys.setdefault(layout_owner_key(owner), []).append(word)
+for owner, words in sorted(previous_keys.items()):
+    if len(words) > 1 and max(words) - min(words) + 1 != len(words):
+        sys.exit('%s gives %s the words %s, which are not contiguous. The block check compares a '
+                 'translated address with the range of the block, so a block has to be contiguous '
+                 'in the record.' % (PREVIOUS_LAYOUT_RECORD, owner, ', '.join(map(str, sorted(words)))))
+
+old_layout_rows = []            # (word, kind, lo, hi, owner) for every word of the current record
+claimed_previous = set()
+for word, owner in sorted(current_map.items()):
+    words = previous_keys.get(layout_owner_key(owner))
+    if not words:
+        old_layout_rows.append((word, 'none', 0, 0, owner))
+        continue
+    claimed_previous.update(words)
+    if len(words) == 1:
+        old_layout_rows.append((word, 'one', words[0], words[0], owner))
+    else:
+        old_layout_rows.append((word, 'block', min(words), max(words), owner))
+previous_only = len(set(previous_map) - claimed_previous)
+
+old_defines = []
+start = clean_cfg_c.find('#define CONFIG_LAYOUT_OLD_NO_VALUE')
+if start < 0:
+    sys.exit('CONFIG_LAYOUT_OLD_NO_VALUE is gone from ui_configuration.c, so the address translation '
+             'of the previous layout cannot be compiled for the host')
+for line in clean_cfg_c[start:].splitlines():
+    if not line.startswith('#define'):
+        break
+    old_defines.append(line)
+translation = firmware_function('UiConfiguration_OldBandSlot') + '\n\n' + \
+    firmware_function('UiConfiguration_OldLayoutAddress')
+translation_defines = []
+named = {re.match(r'#define\s+(\w+)', line).group(1) for line in old_defines}
+for token in sorted(set(re.findall(r'\b[A-Z][A-Z0-9_]+\b', '\n'.join(old_defines) + '\n' + translation))):
+    if token in named:
+        continue
+    value = resolve(token)
+    if value is None:
+        sys.exit('%s is used by the address translation of the previous layout but this harness '
+                 'cannot work out its value, so the translation cannot be compiled for the host. '
+                 'Teach gen_config_upgrade.py how to read it.' % token)
+    translation_defines.append((token, value))
+
+translation_c = []              # the section of config_upgrade.c which checks the translation
+T = translation_c.append
+T('/* ---------------------------------------------------------------------------------------------')
+T('   The address translation of the previous layout, compiled from ui_configuration.c itself and')
+T('   compared with the two recorded maps below. A wrong offset in one of its branches corrupts')
+T('   every radio that is migrated, and nothing else in the tree would notice. */')
+for line in old_defines:
+    T(line)
+for name, value in translation_defines:
+    T('#define %s %d' % (name, value))
+T('')
+for line in translation.splitlines():
+    T(line)
+T('')
+T('typedef enum { OLD_NONE, OLD_ONE, OLD_BLOCK } old_layout_kind_t;')
+T('typedef struct { uint16_t id, lo, hi; old_layout_kind_t kind; const char* owner; } old_layout_t;')
+T('static const old_layout_t old_layout[] =')
+T('{')
+for word, kind, lo, hi, owner in old_layout_rows:
+    T('    { %d, %d, %d, %s, "%s" },'
+      % (word, lo, hi, {'none': 'OLD_NONE', 'one': 'OLD_ONE', 'block': 'OLD_BLOCK'}[kind], owner))
+T('};')
+T('static const unsigned old_layout_count = sizeof(old_layout)/sizeof(old_layout[0]);')
+T('')
+T('static const char* old_layout_expectation(const old_layout_t* e)')
+T('{')
+T('    static char txt[32];')
+T('    switch (e->kind)')
+T('    {')
+T('    case OLD_NONE:  return "that the value did not exist";')
+T('    case OLD_ONE:   snprintf(txt, sizeof(txt), "word %u", e->lo); return txt;')
+T('    default:        snprintf(txt, sizeof(txt), "a word in %u..%u", e->lo, e->hi); return txt;')
+T('    }')
+T('}')
+T('')
+T('static int check_old_layout_translation(void)')
+T('{')
+T('    static uint16_t seen[%d];' % IMAGE_SLOTS)
+T('    unsigned bad = 0, mapped = 0;')
+T('    memset(seen, 0, sizeof(seen));')
+T('    for (unsigned i = 0; i < old_layout_count; i++)')
+T('    {')
+T('        const old_layout_t* e = &old_layout[i];')
+T('        const uint16_t got = UiConfiguration_OldLayoutAddress(e->id);')
+T('        int ok;')
+T('        switch (e->kind)')
+T('        {')
+T('        case OLD_NONE:  ok = (got == CONFIG_LAYOUT_OLD_NO_VALUE); break;')
+T('        case OLD_ONE:   ok = (got == e->lo); break;')
+T('        default:        ok = (got == CONFIG_LAYOUT_OLD_NO_VALUE) ||')
+T('                            (got >= e->lo && got <= e->hi); break;')
+T('        }')
+T('        if (got != CONFIG_LAYOUT_OLD_NO_VALUE)')
+T('        {')
+T('            mapped++;')
+T('            if (got < sizeof(seen)/sizeof(seen[0]))')
+T('            {')
+T('                if (seen[got])')
+T('                {')
+T('                    ok = 0;         /* two values translated onto the same word */')
+T('                }')
+T('                seen[got] = 1;')
+T('            }')
+T('        }')
+T('        if (!ok)')
+T('        {')
+T('            bad++;')
+T('            if (bad <= 10)')
+T('            {')
+T('                printf("CHECK FAILED: %s (id %u) translates to ", e->owner, e->id);')
+T('                if (got == CONFIG_LAYOUT_OLD_NO_VALUE)')
+T('                {')
+T('                    printf("no previous address, the two records say %s\\n", old_layout_expectation(e));')
+T('                }')
+T('                else')
+T('                {')
+T('                    printf("%u, the two records say %s\\n", got, old_layout_expectation(e));')
+T('                }')
+T('            }')
+T('        }')
+T('    }')
+T('    if (bad == 0)')
+T('    {')
+T('        printf("previous layout translation: %u stored values, %u of them land on a word the "')
+T('               "recorded previous map gives them, none twice\\n\\n", old_layout_count, mapped);')
+T('    }')
+T('    return bad ? 1 : 0;')
+T('}')
+
+print('  previous layout translation: %d words of the current map, %d translated onto a recorded '
+      'word of the previous layout, %d of them a band block, %d values the previous layout did '
+      'not have, %d words of the previous layout left without a current value'
+      % (len(old_layout_rows), sum(1 for r in old_layout_rows if r[1] != 'none'),
+         sum(1 for r in old_layout_rows if r[1] == 'block'),
+         sum(1 for r in old_layout_rows if r[1] == 'none'), previous_only))
+
 print('  EEPROM address map: %d table rows (after expanding %d row macros) and %d multi word '
       'blocks, %d words claimed, none twice, %d words of the legacy filter range kept free (%s)'
       % (len(map_rows), len(row_macros), len(bulk_blocks), len(owners),
@@ -1466,6 +1675,9 @@ A('')
 A('#define FIRST_UNUSED %du' % first_unused)
 A('#define PREVIOUS_FIRST_UNUSED %du' % agc_first_unused_before)
 A('#define SAVE_RECORDS_ENTRY_COUNT %d' % (1 if save_records_entry_count else 0))
+A('')
+for line in translation_c:
+    A(line)
 A('')
 A('typedef enum { KIND_PERCENT, KIND_SIDEBAND, KIND_HALF_SECONDS, KIND_ON_OFF, KIND_DB } kind_t;')
 A('typedef struct { const char* name; const char* idname; uint16_t id; int16_t def, min, max; kind_t kind; } entry_t;')
@@ -2321,6 +2533,7 @@ A('    rc |= check_upgrade_persistence();')
 A('    rc |= check_save_order();')
 A('    rc |= check_filter_map_migration();')
 A('    rc |= check_filter_map_save();')
+A('    rc |= check_old_layout_translation();')
 A('    if (entry_count == 0)')
 A('    {')
 A('        printf("CHECK FAILED: no entries parsed, the generator matched nothing\\n");')

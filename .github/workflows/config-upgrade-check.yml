@@ -53,10 +53,10 @@ jobs:
           fi
 
       # The guard is only worth its lines if it still fails on the changes it exists for: a value
-      # moving to another word, a value that was only renamed, a marker bumped without a map change,
-      # a parser that gains or loses a stored word, and a record that does not parse. It rewrites
-      # those files in place, puts them back from HEAD, and refuses to start on a checkout where
-      # they are already modified.
+      # moving to another word, a value that was only renamed, an offset of the previous layout
+      # translation moving, a marker bumped without a map change, a parser that gains or loses a
+      # stored word, and a record that does not parse. It rewrites those files in place, puts them
+      # back from HEAD, and refuses to start on a checkout where they are already modified.
       - name: Run the layout guard through the changes it exists to catch
         working-directory: mchf-eclipse
         run: make layout-guard-selftest
