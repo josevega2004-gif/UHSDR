@@ -640,11 +640,27 @@ for cond, ctype, idname, var, d, lo, hi in table:
         sys.exit('%s (&%s) has the stored range %d..%d, which holds no value at all: the firmware '
                  'rejects every read of it, so the setting stays at its default %d forever'
                  % (idname, var, mn, mx, dv))
+    # The ends of the range have to be values the type can hold for the same reason the default
+    # does: the firmware assigns the stored word to the type before it range checks it, so a bound
+    # above the width of the type is not a bound. A row declaring 0..1000 as UInt8 accepts every
+    # word, because 0x012C has already become 44 by the time the comparison runs, and the values
+    # the table says it stores above 255 are silently replaced by their low byte.
+    rtype = RTYPES.get(ctype)
+    if rtype is not None:
+        low, high = RTYPE_LIMITS[rtype[0]]
+        for bound_name, bound in (('minimum', mn), ('maximum', mx)):
+            if not (low <= bound <= high):
+                sys.exit('%s (&%s) declares the stored range %d..%d, but %s holds only %d..%d: the '
+                         'firmware assigns the stored word to the type before it range checks it, '
+                         'so its %s %d reads back as %d and every stored value is folded into that '
+                         'range before the check. Fit the range to the type, or store the value in '
+                         'a wider one'
+                         % (idname, var, mn, mx, ctype, low, high, bound_name, bound,
+                            as_stored(rtype[0], bound)))
     if not (mn <= dv <= mx):
         sys.exit('%s (&%s) has default %d outside its stored range %d..%d, a value in the middle of '
                  'the range the menu offers is replaced by the default at the next start'
                  % (idname, var, dv, mn, mx))
-    rtype = RTYPES.get(ctype)
     if rtype is not None:
         stored = as_stored(rtype[0], dv)
         if stored != dv:
