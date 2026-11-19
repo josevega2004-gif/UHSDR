@@ -21,9 +21,14 @@ are outside the filter bank as well, which is a real limit on reusing this modem
 
 ## What is real and what is scaffolding
 
-`drivers/audio/rtty.c` is compiled **unmodified** from this Makefile, together with its own
-`rtty.h`. Both the transmitter (`Rtty_Modulator_GenSample`) and the receiver
-(`Rtty_Demodulator_ProcessSample`) in the numbers below are firmware code. The only substitutes:
+`drivers/audio/rtty.c` is compiled from this Makefile, together with its own `rtty.h` (the bench
+hooks it exposes live in the file behind `HOST_BENCH`, which the radio build never defines, and
+nothing in the modem's own path is changed), and so is `drivers/audio/audio_agc.c`, whose cold-start
+reset hook is behind the same guard: every case runs through the radio's audio AGC before the
+demodulator, so the modem sees the level the receiver would hand it rather than the modulator's
+own output. Both the transmitter (`Rtty_Modulator_GenSample`), the AGC
+(`AudioAgc_RunAgcWdsp`) and the receiver (`Rtty_Demodulator_ProcessSample`) in the numbers below
+are firmware code. The only substitutes:
 
 | file | replaces | why it is safe |
 |---|---|---|
@@ -31,8 +36,26 @@ are outside the filter bank as well, which is a real limit on reusing this modem
 | `shim/radio_management.h` | `RadioManagement_Request_TxOff` | one call, its firing is itself a checked item |
 | `shim/uhsdr_digi_buffer.h` via the real header | the TX character buffer | real enum and prototypes, scripted feed in `modem_host.c` |
 | `shim/softdds.h`, `softdds_host.c` | the sine table DDS | computed instead of looked up; `test` measures the produced tone (915.0 Hz asked, 915.0 Hz measured) before grading anything with it |
-| `shim/arm_math.h` | CMSIS types | `hardware/uhsdr_types.h` includes that header only for `float32_t` and friends |
+| `shim/arm_math.h` | CMSIS types | `hardware/uhsdr_types.h` includes that header only for `float32_t` and friends; the AGC additionally needs the filter instance types `audio_driver.h` names, `pow10f` (glibc has no such function) and `arm_max_f32`/`arm_min_f32`, whose four argument form `misc/uhsdr_math.c` calls |
+| `shim/uhsdr_board_config.h` | `hardware/uhsdr_board_config.h` | the real one selects a board and includes STM32 headers; the AGC takes two numbers from it, the 48 kHz rate and the 32 sample block, and they are mirrored at the mcHF values |
 | `shim/uhsdr_board.h`, `shim/profiling.h` | board switches, counters | empty; the switches the modem needs come from `-D` |
+
+The chain around the modem is `audio_driver.c`'s 12 ksps one: the AGC, then the fixed post-AGC
+gain (`POST_AGC_GAIN_SCALING_DECIMATE_4 * 0.333`, read from the real header), then the
+demodulator. Two stages of that pipeline are left out by name rather than by accident: the
+operator's notch/peak/lowshelf biquad, which stays a passthrough until a shape is picked and is a
+station setting this bench does not measure, and the impulse blanker, which needs an impulse and no
+case sends one. The AGC runs on the factory configuration from `audio_agc.h` (MED, 70 dB slope,
+20 dB threshold), because the firmware loads those from EEPROM; it is fed in ADC counts and its
+output scaled back into the bench's +-1 samples, because a +-1 input is 72 dB below the level its
+`max_input`/`out_target` are written for and its thresholds would then mean something else. Every
+case starts it cold: the AGC carries gain, ring buffer and hang counter from one transmission to
+the next, which would make a level row depend on the case before it, the same order dependency the
+WAV check had. `-Wno-sign-compare` is the target build's own flag and is passed to the firmware sources only, so
+those compile as they ship while the bench's own code stays under the full warning set. Moving
+the chain in found the WAV bug - the round trip had never reset the decoder, so it started from
+the previous case's filter state and only passed because that state happened to be harmless - and
+it withdrew the loopback's ability to grade the shift, which the shift bullet above records.
 
 The shims are deliberately thin. If a firmware source ever reaches for more of the radio than
 this, the bench stops compiling instead of quietly inventing behaviour, which is the point:
@@ -68,14 +91,16 @@ the size of the CW lift, measured rather than guessed.
   So on air the space filter's selectivity is doing real work that an equal two-tone synthetic
   signal never asks of it: with both tones at full level the 915 Hz filter keeps the right polarity
   whatever the space filter does, so those rows decode at 0.0 % even when the receiver is given the
-  850 Hz space filter for a 170 Hz signal. One row is built to remove that. `weak mark 170` sends the
-  mark tone 30 dB below the space tone - past the 22.9 dB by which the mark filter rejects the space
-  tone - so the mark channel is inverted (it reads the space tone 22.9 dB down as louder than the
-  mark tone 30 dB down) and the decision has to come from the space filter. That row decodes at
-  0.0 % with the 170 Hz filter and at 100 % with the 850 Hz one, so it is the only loopback case that
-  grades the shift setting. Weakening the **space** tone instead grades nothing: measured, it still
-  decodes at 0.0 % with every space filter, 850 Hz included, because the mark channel keeps the
-  right polarity. A live capture, of course, still needs the tones on the modem's own frequencies.
+  850 Hz space filter for a 170 Hz signal. One row was built to break that: `weak mark 170` sends the
+  mark tone 30 dB below the space tone, past the 22.9 dB by which the mark filter rejects the space
+  tone, so the mark channel inverts and the space filter has to carry the bits. That worked while
+  the bench fed the demodulator directly - 0.0 % with the 170 Hz filter, 100 % with the 850 Hz one -
+  and it stopped working when the radio's AGC went into the loop: the AGC now sets the level the ATC
+  compares against, the mark channel keeps the right polarity, and the row decodes at 0.0 % with
+  either space filter. Measured the same way, `wmark car300` also decodes at 0.0 % with the 850 Hz
+  filter. So the synthetic loopback no longer grades any shift, and the shift setting is graded by
+  the live capture above, not by this table. A live capture, of course, still needs the tones on the
+  modem's own frequencies.
 * Inside the ATC branch the variable names are the opposite of what they hold. `mark_mag`/`mark_env`
   carry the **space** filter output and `space_mag`/`space_env` the **915 Hz mark** output, because
   the block starts by exchanging them to cancel the naming convention of the FlDigi formula it was
@@ -96,29 +121,41 @@ CER is measured after aligning away the lead-in junk, so it describes the modem 
 | clean, 170 / 425 / 850 Hz shift | 0.0 |
 | AWGN 20, 10, 7 dB | 0.0 |
 | QSB 0.4 Hz, 6 dB deep | 0.0 |
-| QSB 2 Hz, 10 dB deep | **58.3** (loses most of the message) |
-| weak mark, 30 dB below the space tone | 0.0 with the 170 Hz space filter, **100.0** with the 850 Hz one |
-| weak mark + carrier 300 Hz above the space tone at +20 dB | 0.0 (**100.0** with the 850 Hz space filter, **18.8** with the carrier at +30 dB) |
+| QSB 2 Hz, 10 dB deep | **6.2** (3/48, and **2.3** in `rtty-long`) |
+| weak mark, 30 dB below the space tone | 0.0, with the 170 Hz space filter or the 850 Hz one |
+| weak mark + carrier 300 Hz above the space tone at +20 dB | 0.0 (0.0 with the 850 Hz filter too, **31.2** with the carrier at +30 dB) |
 | reference error: 1 and 3 ppm on 20 m (14 and 42 Hz), 2 ppm on 10 m (56 Hz), 1 ppm on 6 m (50 Hz) | 0.0 |
 | reference error: 1 ppm on 20 m on the 450 Hz / 50 Bd signal (14 Hz) | 0.0 |
 | reference error: 56 Hz (4 ppm at 14 MHz) at 10 dB, at 7 dB and under 0.5 Hz / 6 dB QSB | 0.0 |
+| input level -10, 0 and +10 dB | 0.0 at each: the AGC holds the modem where it should be |
+| input level -30 dB | 0.0 (0/48, and 0/392 in `rtty-long`) |
 
 The message is 48 characters, so one wrong character is 2.1 % and a "0.0" row only says *under
 2.1 %*. Every row prints `wrong/total` for that reason, and `make -C support/digi rtty-long` sends
 eight copies of the text - 392 characters with the spaces between them - through the same cases and
 the same limits: a clean row is then under 0.26 %, which separates a decoder that is exactly right
 from one that is quietly worse. Measured, every row that is clean at 48 characters is clean at 392,
-so the loopback has no residual errors left to find; the fast fading row is skipped there because
-its rate says how long the signal was exposed to fading (58.3 % at 48 characters, 94.9 % at 392 with
-the same decoder), not how well it decodes.
+so the loopback has no residual errors left to find. The two rows that are not clean are clean in
+neither length and carry a limit in both: fast fading at 6.2 % short and 2.3 % long, and a station
+sent at 45.45 Bd but decoded as 50 Bd at 70.8 % and 69.4 %.
 
-That reframes "a better RTTY decoder": SNR handling is not the weak point, **dynamic range is** -
-under fast fading, and under a strong signal next door. The demodulator has no input level control
-of its own, so it inherits whatever the audio AGC is doing, and the bench reproduces both failures
-without a radio or an antenna. The carrier row shows the second cliff directly: an unmodulated
-carrier 300 Hz above the space tone is harmless at +20 dB over the wanted signal and costs every
-character at +30 dB, with the weak mark tone in the same row holding the bits on the space filter
-so the cliff is the filter's rejection and not the mark channel's.
+The AGC changes what this table says, and the honest version is that the earlier one was partly a
+harness artefact. The demodulator has no input level control of its own; it inherits whatever the
+audio AGC does. The bench used to feed the modem directly and assume the rest, then ran the AGC on
+a +-1 float signal - which is 72 dB below the ADC-count level the AGC is written for (`max_input`
+and `out_target` are both `ADC_CLIP_WARN_THRESHOLD`, 4096, and the firmware's audio buffer carries
+converter counts). Fed in its own units, from a cold start for every case, the AGC does its job: a
+station 30 dB down decodes as well as one at nominal level, 0.0 % (0/48 and 0/392) at -30, -10, 0
+and +10 dB. The level rows therefore record the AGC working, not the modem being level proof.
+
+Two things still break it, and they are measured with the same chain. Fast fading, 2 Hz at 10 dB
+deep, used to lose most of the message (58.3 %) when the level was left to chance; through the AGC
+it costs 6.2 % (3/48) at 45.45 Bd and 2.3 % (9/392) over the long message. A strong signal next door
+is the remaining cliff: an unmodulated carrier 300 Hz above the space tone is harmless at +20 dB
+over the wanted signal and costs **31.2 %** at +30 dB, with the weak mark tone in the same row
+holding the bits on the space filter. That is a filter rejection limit, not a level one - which is
+what makes it the interesting failure, since the AGC cannot help with it. It reproduces without a
+radio or an antenna.
 
 ## Tuning error, and what our own reference is worth
 
@@ -144,10 +181,10 @@ negative / positive error:
 | error | 170 Hz shift | 170 Hz, mark 30 dB down | 450 Hz / 50 Bd |
 |---|---|---|---|
 | 14 Hz | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 |
-| 50 Hz | 0.0 / 0.0 | **14.6** / 0.0 | 0.0 / 0.0 |
-| 70 Hz | 0.0 / 0.0 | **97.9** / 0.0 | 0.0 / 0.0 |
-| 85 Hz | **93.8 / 93.8** | **97.9 / 100** | 0.0 / 0.0 |
-| 100 Hz | **87.5 / 87.5** | **87.5 / 97.9** | 0.0 / 0.0 |
+| 50 Hz | 0.0 / 0.0 | **16.7** / 0.0 | 0.0 / 0.0 |
+| 70 Hz | 0.0 / 0.0 | **100** / 0.0 | 0.0 / 0.0 |
+| 85 Hz | **93.8 / 93.8** | **100 / 100** | 0.0 / 0.0 |
+| 100 Hz | **87.5 / 87.5** | **89.6 / 97.9** | 0.0 / 0.0 |
 | 140 Hz | 87.5 / 87.5 | 87.5 / 95.8 | **100 / 97.9** |
 
 The window is between 70 and 85 Hz with equal tones (41..50 % of the shift) and closes at 28 Hz

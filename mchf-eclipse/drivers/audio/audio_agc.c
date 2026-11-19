@@ -593,3 +593,19 @@ void AudioAgc_RunAgcWdsp(int16_t blockSize, float32_t (*agcbuffer)[AUDIO_BLOCK_S
         }
     }
 }
+
+#ifdef HOST_BENCH
+/**
+ * Put the AGC back into the state it has after a fresh AudioAgc_SetupAgcWdsp().
+ *
+ * The host bench runs many signals through one AGC, one after another, and the AGC carries its
+ * gain, its ring buffer and its hang counter from a transmission into the next one. That makes a
+ * measured level depend on which case ran before it, which is not something the radio does: the
+ * operator tunes to a station and the AGC starts cold. Clearing the initialised flag makes the next
+ * setup run the same one-time initialisation the radio runs.
+ */
+void AudioAgc_ResetAgcWdsp(void)
+{
+    agc_wdsp.initialised = false;
+}
+#endif

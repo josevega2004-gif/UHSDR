@@ -1,3 +1,4 @@
 digi_bench
 *.wav
 *.pgm
+*.o

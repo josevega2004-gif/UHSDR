@@ -6,8 +6,9 @@
  *   make rtty-tune  tuning error the RTTY demodulator survives, in Hz and in ppm per band
  *
  * The RTTY numbers come from drivers/audio/rtty.c itself: the firmware modulator generates the
- * signal, the firmware demodulator reads it back, and only the channel between them is invented
- * here. See README.md for what is stubbed and why that still counts.
+ * signal, the firmware demodulator reads it back, and the firmware's audio AGC sits between the
+ * channel and the demodulator, where the radio puts it. Only the channel is invented here. See
+ * README.md for what is stubbed and why that still counts.
  */
 #include <math.h>
 #include <stdio.h>
@@ -17,6 +18,8 @@
 #include "bench.h"
 #include "rtty.h"
 #include "softdds.h"
+#include "audio_agc.h"
+#include "audio_driver.h"   // POST_AGC_GAIN_SCALING_DECIMATE_4, the gain after the AGC
 
 #define RATE            12000.0f          // Rtty_Modem_Init() pins the demodulator at 12 kHz
 #define TXRATE          48000.0f          // the modulator is fed at 4x that: one bit is
@@ -95,9 +98,8 @@ typedef struct
     float       rf_hz;       // the RF frequency ppm is measured at; a ppm is not a fixed number of
                              // audio Hz, it is ppm * rf_hz of them: 1 ppm is 3.5 Hz on 80 m,
                              // 14 Hz on 20 m, 28 Hz on 10 m and 50 Hz on 6 m
-    bool        short_only;  // the rate says how long the signal was on, not how well it decodes:
-                             // the long message is exposed to six times as much fading, so this
-                             // row is pinned in the short matrix and skipped in the long one
+    float       in_db;       // how loud the station arrives, relative to the modulator's own level;
+                             // the AGC is what turns this knob into no change at all
 } rtty_case_t;
 
 // The demodulator emits one or two characters of junk while it locks on, which is a property of
@@ -131,8 +133,62 @@ static void weaken_tone(float32_t* x, size_t n, float freq, float width, float d
     }
 }
 
-static float score_aligned(const char* expected, const char* got)
+// The radio's audio path into the demodulator, as audio_driver.c builds it for a 12 ksps RX
+// buffer: the impulse blanker, the WDSP AGC the operator has selected, then the fixed post-AGC
+// gain every non-AM mode gets, then the notch/peak/lowshelf biquad and only then the modem. The
+// bench models the two that set the level - the AGC and the fixed gain - because they are what the
+// demodulator's thresholds see. The biquad is a passthrough until a notch, peak or shelf is picked
+// (the firmware loads biquad_passthrough for "no filter"), and an operator's station filter is not
+// what this bench measures; the impulse blanker needs an impulse to fire on and no case sends one.
+//
+// agc_wdsp_conf is loaded from EEPROM in the firmware, before AudioAgc_AgcWdsp_Init() reads it, so
+// a host build has to state the factory values audio_agc.h documents as the defaults itself.
+static void radio_agc_setup(void)
 {
+    agc_wdsp_conf.mode = AGC_WDSP_MODE_DEFAULT;
+    agc_wdsp_conf.slope = AGC_WDSP_SLOPE_DEFAULT;
+    agc_wdsp_conf.hang_enable = AGC_WDSP_HANG_ENABLE_DEFAULT;
+    agc_wdsp_conf.thresh = AGC_WDSP_THRESH_DEFAULT;
+    agc_wdsp_conf.hang_thresh = AGC_WDSP_HANG_THRESH_DEFAULT;
+    agc_wdsp_conf.hang_time = AGC_WDSP_HANG_TIME_DEFAULT;
+    agc_wdsp_conf.tau_hang_decay = AGC_WDSP_TAU_HANG_DECAY_DEFAULT;
+    agc_wdsp_conf.tau_decay[0] = AGC_WDSP_TAU_DECAY_0_DEFAULT;
+    agc_wdsp_conf.tau_decay[1] = AGC_WDSP_TAU_DECAY_1_DEFAULT;
+    agc_wdsp_conf.tau_decay[2] = AGC_WDSP_TAU_DECAY_2_DEFAULT;
+    agc_wdsp_conf.tau_decay[3] = AGC_WDSP_TAU_DECAY_3_DEFAULT;
+    agc_wdsp_conf.tau_decay[4] = AGC_WDSP_TAU_DECAY_4_DEFAULT;
+    agc_wdsp_conf.tau_decay[5] = AGC_WDSP_TAU_DECAY_5_DEFAULT;
+    AudioAgc_AgcWdsp_Init();
+    AudioAgc_SetupAgcWdsp(RATE, false);
+}
+
+// AudioAgc_RunAgcWdsp() works one sample at a time and takes a pointer to AUDIO_BLOCK_SIZE samples,
+// so the buffer is walked in blocks of that size; the firmware calls it once per decimated
+// interrupt, which is a smaller block, and the result does not depend on where the blocks fall.
+//
+// The AGC's own unit is the ADC count: max_input and out_target are both ADC_CLIP_WARN_THRESHOLD
+// (4096), because the firmware's audio buffer carries raw converter counts. A +-1 float sample
+// handed straight to it would sit 72 dB below that design level and its thresholds would mean
+// something else entirely, so the chain is entered in the radio's units and the result divided back
+// into the bench's. What the demodulator then sees is the AGC's relative gain, at the scale the
+// rest of this bench is written in.
+//
+// The AGC delays its output by half its ring (48 samples at 12 ksps, 4 ms). That is inside the
+// lead-in the score skips; its gain ramp is not necessarily, and the level rows are what say so.
+static void radio_agc(float32_t* x, size_t n)
+{
+    const float post_agc_gain = POST_AGC_GAIN_SCALING_DECIMATE_4 * 0.333f;   // audio_driver.c
+    const float adc_full_scale = (float) ADC_CLIP_WARN_THRESHOLD;            // audio_driver.h: 4096
+    for (size_t i = 0; i < n; i += AUDIO_BLOCK_SIZE)
+    {
+        const int16_t block = (int16_t) ((n - i) < AUDIO_BLOCK_SIZE ? (n - i) : AUDIO_BLOCK_SIZE);
+        for (int16_t k = 0; k < block; k++) x[i + k] *= adc_full_scale;
+        AudioAgc_RunAgcWdsp(block, (float32_t (*)[AUDIO_BLOCK_SIZE]) (void*) (x + i), false);
+        for (int16_t k = 0; k < block; k++) x[i + k] = x[i + k] * post_agc_gain / adc_full_scale;
+    }
+}
+
+static float score_aligned(const char* expected, const char* got){
     float best = 100.0f;
     const size_t need = strlen(expected);
     size_t best_wrong = need;               // a total failure counts every character, not none
@@ -227,6 +283,23 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
     Bench_RngSeed(0xC0FFEEu);
     Bench_AddNoise(buf, n, c->snr_db, 0.0f);
 
+    // how loudly the station arrives. The AGC is what should make this irrelevant, so this is the
+    // knob the level rows turn; it is applied to the receiver's input, before the AGC.
+    if (c->in_db != 0.0f)
+    {
+        const float g = powf(10.0f, c->in_db / 20.0f);
+        for (size_t i = 0; i < n; i++) buf[i] *= g;
+    }
+
+    // the receiver: a cold AGC, the fixed post-AGC gain, then the demodulator. Cold, because the
+    // AGC carries its gain, ring buffer and hang counter from one transmission into the next, so a
+    // level row would otherwise measure whatever the case before it left in the gain and its
+    // position in the table would be part of the result - the same order dependency the WAV check
+    // had. The radio starts a new station from this state, and every case does too.
+    AudioAgc_ResetAgcWdsp();
+    AudioAgc_SetupAgcWdsp(RATE, false);
+    radio_agc(buf, n);
+
     // RX: the firmware demodulator, characters collected by the UI stand-in
     for (size_t i = 0; i < n; i++)
     {
@@ -238,11 +311,11 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
 
 static int rtty_table(const char* msg, bool long_mode)
 {
-    // The .max_cer field is the character error rate each case has to stay within. All but the fast
-    // fading case decode without a single wrong character, so a few characters of slack leave room
-    // for libm and rounding differences between build hosts while still failing on a demodulator
-    // change that costs text. The fast fading case loses most of the message, so its limit only
-    // catches it getting worse.
+    // The .max_cer field is the character error rate each case has to stay within. Almost every case
+    // decodes without a single wrong character, so a few characters of slack leave room for libm and
+    // rounding differences between build hosts while still failing on a demodulator change that
+    // costs text. The fast fading row and the wrong speed row are the exceptions, and their limits
+    // are set from what they measure rather than from the clean 0 %.
     static const rtty_case_t cases[] =
     {
         // the space filter under a strong adjacent carrier: an unmodulated carrier 300 Hz above the
@@ -263,8 +336,11 @@ static int rtty_table(const char* msg, bool long_mode)
         { .label = "snr 7 170",    .shift = 170, .snr_db = 7.0f,   .max_cer = 5.0f },
         { .label = "qsb 10 170",   .shift = 170, .snr_db = 10.0f, .qsb_rate = 0.5f,
           .qsb_depth = 6.0f, .max_cer = 5.0f },
+        // 2 Hz, 10 dB deep, at 10 dB SNR. The AGC is what makes this row decodable at all: measured
+        // 6.2 % (3/48) short and 2.3 % (9/392) long, with the receiver's AGC in the loop, against
+        // 58.3 % when the bench fed the demodulator directly and left the level to chance.
         { .label = "qsb fast 10",  .shift = 170, .snr_db = 10.0f, .qsb_rate = 2.0f,
-          .qsb_depth = 10.0f, .max_cer = 70.0f, .short_only = true },
+          .qsb_depth = 10.0f, .max_cer = 10.0f },
         // the real services: DWD DDH/DDK are F1B 50 Baud with +/-225 Hz (450 Hz total) on
         // 4583/7646/10100.8/11039/14467.3 kHz and +/-42.5 Hz (85 Hz) on 147.3 kHz, per the DWD
         // table on http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts.
@@ -296,24 +372,25 @@ static int rtty_table(const char* msg, bool long_mode)
           .ppm = 1.0f, .rf_hz = 50e6f },
         { .label = "dwd 450 1ppm", .shift = 450, .snr_db = 20.0f, .baud = 50, .max_cer = 5.0f,
           .ppm = 1.0f, .rf_hz = 14e6f },
+        // the same clean signal at four input levels, 40 dB apart, which is the level sensitivity the
+        // AGC exists to remove. Measured through the radio's AGC, cold, at every one of them:
+        // 0.0 % (0/48) and 0.0 % (0/392). The demodulator itself would not decode a station 30 dB
+        // down - see the note in README.md on how the AGC has to be fed in ADC counts for this to
+        // mean anything - so this is the AGC doing its job, not the modem being level proof.
+        { .label = "level -30",    .shift = 170, .snr_db = 20.0f, .in_db = -30.0f, .max_cer = 5.0f },
+        { .label = "level -10",    .shift = 170, .snr_db = 20.0f, .in_db = -10.0f, .max_cer = 5.0f },
+        { .label = "level +0",     .shift = 170, .snr_db = 20.0f, .max_cer = 5.0f },
+        { .label = "level +10",    .shift = 170, .snr_db = 20.0f, .in_db = 10.0f, .max_cer = 5.0f },
     };
     const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
 
-    printf("RTTY loopback of drivers/audio/rtty.c (per case: 45.45 or 50 Bd, 1.5 stop bits, tx 48 kHz -> rx 12 kHz)\n");
+    printf("RTTY loopback of drivers/audio/rtty.c through the radio's audio AGC\n");
+    printf("(per case: 45.45 or 50 Bd, 1.5 stop bits, tx 48 kHz -> rx 12 kHz)\n");
     printf("%-16s %7s %8s %6s  %s\n", "case", "CER %", "err/len", "lead", "decoded");
     char got[8192];
     int failures = 0;
     for (size_t i = 0; i < n_cases; i++)
     {
-        if (long_mode && cases[i].short_only)
-        {
-            // its rate is a function of how long the signal is on, so a longer message measures a
-            // different thing rather than measuring this one better: 94.9 % here against 58.3 %
-            // in the short matrix, with the same decoder
-            printf("%-16s skipped: how much it loses depends on how long the signal is on\n",
-                   cases[i].label);
-            continue;
-        }
         int eot = 0;
         float cer = rtty_run(&cases[i], msg, long_mode, got, sizeof(got), &eot);
         char counted[32];
@@ -328,15 +405,14 @@ static int rtty_table(const char* msg, bool long_mode)
             failures++;
         }
     }
-    printf("\nnote: these loopback CER figures cannot grade the selected shift. The mark filter\n"
-           "      (915 Hz, 3 dB band 865-965 Hz) rejects the space tone by 23 dB at 170 Hz shift and\n"
-           "      by more at every wider shift, but by only 10 dB at 85 Hz, so on a clean two-tone\n"
-           "      synthetic recording the ATC decides from the mark channel alone whatever shift is\n"
-           "      selected - except in the weak mark row, where the mark channel is inverted and the\n"
-           "      space filter has to carry the bits (0.0 %% with the right one, 100 %% with 850 Hz).\n"
-           "      On live radio that is not true: a DDH 8 capture decodes only at 425/450 Hz\n"
-           "      shift and fails at 85/170/200/850. See support/digi/README.md. An unsupported shift\n"
-           "      is still mapped to 170.\n");
+    printf("\nnote: these loopback CER figures cannot grade the selected shift, and with the radio's\n"
+           "      AGC in the loop they no longer even try. The two rows that used to fail with the\n"
+           "      wrong space filter - wmark car300 and weak mark - now decode at 0.0 %% with the\n"
+           "      850 Hz filter as well, because the AGC sets the level the ATC compares against and\n"
+           "      the mark channel keeps the right polarity. On live radio the shift matters a great\n"
+           "      deal: a DDH 8 capture decodes only at 425/450 Hz shift and fails at 85/170/200/850.\n"
+           "      That capture, not this table, is what grades the shift setting. See\n"
+           "      support/digi/README.md. An unsupported shift is still mapped to 170.\n");
     if (failures == 0)
     {
         printf("\nall %zu cases within their character error rate limits\n", n_cases);
@@ -724,6 +800,10 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
     {
         if (rtty_shifts[k].value == (float32_t)shift) rtty_ctrl_config.shift_idx = (rtty_shift_t)k;
     }
+    // a file is a fresh receiver: reset before init, as rtty_run does, because the init is what
+    // puts the filter state and its pointers back. Without this the decode starts from whatever
+    // the last case left behind, so the check quietly depended on which case ran before it.
+    Rtty_BenchResetDecoder();
     Rtty_Modem_Init(12000);
     Bench_TextReset();
 
@@ -941,6 +1021,10 @@ static int selftest(void)
 int main(int argc, char** argv)
 {
     const char* what = argc > 1 ? argv[1] : "test";
+    // every mode that feeds the modem goes through the receiver's AGC, so it is set up once, before
+    // any case. rtty-wav is left out on purpose: it decodes a recording that already went through a
+    // receiver's AGC, and running it through a second one would not be the radio's path.
+    if (strcmp(what, "rtty-wav") && strcmp(what, "wefax")) radio_agc_setup();
     if (!strcmp(what, "test")) return selftest();
     if (!strcmp(what, "rtty")) { return rtty_table(RTTY_TABLE_MSG, false); }
     if (!strcmp(what, "rtty-long"))

@@ -56,6 +56,11 @@ typedef struct
 
 extern agc_wdsp_params_t agc_wdsp_conf;
 
+#ifdef HOST_BENCH
+// the host bench starts every case from a cold AGC; the radio build has no need to, since it
+// re-initialises on a decimation change and never runs two signals through one AGC in a row
+void AudioAgc_ResetAgcWdsp(void);
+#endif
 void AudioAgc_RunAgcWdsp(int16_t blockSize, float32_t (*agcbuffer)[AUDIO_BLOCK_SIZE], const bool use_stereo );
 void AudioAgc_SetupAgcWdsp(float32_t sample_rate, bool remove_dc);
 void AudioAgc_AgcWdsp_Init(void);
