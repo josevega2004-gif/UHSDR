@@ -1544,19 +1544,100 @@ for owner, words in sorted(previous_keys.items()):
                  'translated address with the range of the block, so a block has to be contiguous '
                  'in the record.' % (PREVIOUS_LAYOUT_RECORD, owner, ', '.join(map(str, sorted(words)))))
 
+current_keys = {}
+for word, owner in current_map.items():
+    current_keys.setdefault(layout_owner_key(owner), []).append(word)
+
 old_layout_rows = []            # (word, kind, lo, hi, owner) for every word of the current record
 claimed_previous = set()
-for word, owner in sorted(current_map.items()):
-    words = previous_keys.get(layout_owner_key(owner))
+for key, cur_words in sorted(current_keys.items()):
+    cur_words = sorted(cur_words)
+    words = sorted(previous_keys.get(key, []))
     if not words:
-        old_layout_rows.append((word, 'none', 0, 0, owner))
+        for word in cur_words:
+            old_layout_rows.append((word, 'none', 0, 0, current_map[word]))
         continue
     claimed_previous.update(words)
-    if len(words) == 1:
-        old_layout_rows.append((word, 'one', words[0], words[0], owner))
-    else:
-        old_layout_rows.append((word, 'block', min(words), max(words), owner))
+    # A value stored in several consecutive words under one EEPROM name - the touchscreen
+    # calibration is one 32 bit value in two words - is compared word by word in order. Anything
+    # else with several words is a block whose words are positions, and only the range of the
+    # block can be compared.
+    runs = (cur_words == list(range(cur_words[0], cur_words[0] + len(cur_words))) and
+            words == list(range(words[0], words[0] + len(words))) and
+            len(words) == len(cur_words) and key.startswith('EEPROM_'))
+    for offset, word in enumerate(cur_words):
+        if runs:
+            old_layout_rows.append((word, 'one', words[offset], words[offset], current_map[word]))
+        elif len(words) == 1 and len(cur_words) == 1:
+            old_layout_rows.append((word, 'one', words[0], words[0], current_map[word]))
+        else:
+            old_layout_rows.append((word, 'block', min(words), max(words), current_map[word]))
 previous_only = len(set(previous_map) - claimed_previous)
+
+# The band memories and the power factor rows are stored per band, and the bands were renumbered.
+# A record names those words by position - EEPROM_BAND8_5W is the ninth slot, not 8m - so the
+# range check above cannot see a translation that trades two bands: swapping 10m and 6m keeps
+# every word inside its block. Both plans are declared, the previous one in the record and the
+# current one in the BAND_MODE enum and the table macros, so every band word gets the exact old
+# address of its band instead.
+previous_text = (Path(__file__).resolve().parent / PREVIOUS_LAYOUT_RECORD).read_text(encoding='utf-8')
+plan = re.search(r'(?m)^#bands\s+(.+)$', previous_text)
+if not plan:
+    sys.exit('%s does not declare its band plan in a "#bands" line. Without it the per band words '
+             'can only be compared with the range of their block, and a translation that trades '
+             'two bands passes.' % PREVIOUS_LAYOUT_RECORD)
+old_bands = plan.group(1).split()
+
+enum_next = 0
+current_bands = []
+for m in re.finditer(r'(?m)^\s*(BAND_MODE_\w+)\s*(?:=\s*(\d+))?\s*,',
+                     open(root + 'drivers/ui/radio_management.h', encoding='utf-8',
+                          errors='surrogateescape').read()):
+    if m.group(1) == 'BAND_MODE_MAX':
+        break
+    enum_next = int(m.group(2)) if m.group(2) else enum_next
+    current_bands.append((enum_next, m.group(1)))
+    enum_next += 1
+current_bands = [name for value, name in current_bands if value < MAX_BANDS]
+if len(current_bands) != MAX_BANDS:
+    sys.exit('%d bands below MAX_BANDS %d were found in the BAND_MODE enum of radio_management.h, '
+             'the band plan of the current layout cannot be read' % (len(current_bands), MAX_BANDS))
+if len(old_bands) != len(previous_keys['band_MODE_A']):
+    sys.exit('%s declares %d bands but its per band memories have %d slots, so the plan and the map '
+             'belong to different layouts'
+             % (PREVIOUS_LAYOUT_RECORD, len(old_bands), len(previous_keys['band_MODE_A'])))
+
+old_index = {band: slot for slot, band in enumerate(old_bands)}
+old_bases = {key: min(previous_keys[key]) for key in
+             ('band_5W', 'band_FULL', 'band_MODE_A', 'band_FREQ_HIGH_A', 'band_FREQ_LOW_A',
+              'band_MODE_B', 'band_FREQ_HIGH_B', 'band_FREQ_LOW_B')}
+
+
+def band_target(band, key):
+    """the word the previous layout stored this band's value at, or none if it had no such band"""
+    if band not in old_index:
+        return ('none', 0, 0)
+    return ('one', old_bases[key] + old_index[band], old_bases[key] + old_index[band])
+
+
+band_overrides = {}
+for kind_key, block_key in (('5W', 'band_5W'), ('FULL', 'band_FULL')):
+    table_band = {}
+    for m in re.finditer(r'UI_C_EEPROM_BAND_%s_PF\(\s*(\d+)\s*,\s*(\d+)\s*,' % kind_key, clean_cfg_c):
+        table_band[int(m.group(1))] = 'BAND_MODE_' + m.group(2)
+    if sorted(table_band) != list(range(len(table_band))):
+        sys.exit('the %s power factor rows are not numbered 0..%d, the band of each row cannot be '
+                 'read from the table macros' % (kind_key, len(table_band) - 1))
+    for slot, band in table_band.items():
+        band_overrides[hdr_define('EEPROM_BAND0_%s' % kind_key) + slot] = band_target(band, block_key)
+vfo_base = hdr_define('EEPROM_BAND0_MODE_A')
+for block, block_key in enumerate(('band_MODE_A', 'band_FREQ_HIGH_A', 'band_FREQ_LOW_A',
+                                   'band_MODE_B', 'band_FREQ_HIGH_B', 'band_FREQ_LOW_B')):
+    for slot, band in enumerate(current_bands):
+        band_overrides[vfo_base + block * MAX_BANDS + slot] = band_target(band, block_key)
+
+old_layout_rows = [(word, *(band_overrides.get(word) or (kind, lo, hi)), owner)
+                   for word, kind, lo, hi, owner in old_layout_rows]
 
 old_defines = []
 start = clean_cfg_c.find('#define CONFIG_LAYOUT_OLD_NO_VALUE')
@@ -1748,11 +1829,13 @@ L2('           "from translating them again\\n\\n", probed);')
 L2('    return 0;')
 L2('}')
 
-print('  previous layout translation: %d words of the current map, %d translated onto a recorded '
-      'word of the previous layout, %d of them a band block, %d values the previous layout did '
-      'not have, %d words of the previous layout left without a current value'
-      % (len(old_layout_rows), sum(1 for r in old_layout_rows if r[1] != 'none'),
-         sum(1 for r in old_layout_rows if r[1] == 'block'),
+print('  previous layout translation: %d words of the current map, %d with the exact word the '
+      'previous layout stored them at (%d of them per band, from the %d band plans), %d compared '
+      'with the range of their block, %d values the previous layout did not have, %d words of the '
+      'previous layout left without a current value'
+      % (len(old_layout_rows), sum(1 for r in old_layout_rows if r[1] == 'one'),
+         sum(1 for w in band_overrides if w in dict((r[0], r) for r in old_layout_rows)),
+         len(old_bands), sum(1 for r in old_layout_rows if r[1] == 'block'),
          sum(1 for r in old_layout_rows if r[1] == 'none'), previous_only))
 
 print('  EEPROM address map: %d table rows (after expanding %d row macros) and %d multi word '

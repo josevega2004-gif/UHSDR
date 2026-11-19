@@ -9,6 +9,13 @@
 # every ConfigEntry_Int32 row under the row name, and the two blocks that only have a base
 # define - the six per band memories and the 25 filter path memories.
 #
+#
+# The band plan of that layout, in slot order. The map names the per band words by position, so
+# without this line the translation check could only compare a band block with its own range and a
+# branch that trades two bands would pass. The last slot is general coverage, which had a memory
+# there but is not a selectable band in the current layout.
+#bands BAND_MODE_80 BAND_MODE_60 BAND_MODE_40 BAND_MODE_30 BAND_MODE_20 BAND_MODE_17 BAND_MODE_15 BAND_MODE_12 BAND_MODE_10 BAND_MODE_6 BAND_MODE_4 BAND_MODE_2 BAND_MODE_70 BAND_MODE_23 BAND_MODE_2200 BAND_MODE_630 BAND_MODE_160 BAND_MODE_GEN
+#
 # One "word owner" line per claimed word. This file is history, not generated: nothing rewrites
 # it, and a word of it moving means the address translation is compared with the wrong layout.
 0 EEPROM_ZERO_LOC
