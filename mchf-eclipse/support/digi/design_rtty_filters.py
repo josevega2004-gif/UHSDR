@@ -22,10 +22,14 @@ centre of the band, which is what makes the filter reach unity gain at the tone 
   python3 support/digi/design_rtty_filters.py          check the constants in rtty.c
   python3 support/digi/design_rtty_filters.py --print  print the blocks to paste into rtty.c
 
-Exit status is non zero when a block is not the one the design produces, character for character, or
-when a label is not the centre of the band its comment documents. The comparison is exact on purpose:
-a tolerance would let a table drift away from its design in steps that each look harmless, and the
-blocks in rtty.c are kept as the script prints them so that the file stays its own provenance.
+Exit status is non zero when a block is not the one the design produces, character for character,
+when a label is not the centre of the band its comment documents, or when the design itself is not a
+band pass: -3 dB at both documented edges, unity at the centre, and attenuation that keeps falling
+outward. The last three matter because the comparison above can only prove that rtty.c agrees with
+the formula; a formula that is wrong in the same way everywhere would be certified by it. The block
+comparison is exact on purpose: a tolerance would let a table drift away from its design in steps
+that each look harmless, and the blocks in rtty.c are kept as the script prints them so that the
+file stays its own provenance.
 """
 
 import cmath
@@ -85,7 +89,53 @@ def design(edge_lo, edge_hi):
     centre = 0.5 * (edge_lo + edge_hi)
     q = cmath.exp(-2j * math.pi * centre / FS)
     gain = abs(((1 - q) ** 2 * (1 + q) ** 2) / sum(c * q ** i for i, c in enumerate(poly)))
-    return coeffs, gain
+    return coeffs, gain, poly
+
+
+EDGE_DB = -3.0103          # 1/sqrt(2), where a Butterworth band pass puts its -3 dB edges
+EDGE_TOLERANCE_DB = 0.05
+CENTRE_TOLERANCE = 1e-6
+FLOOR = 1e-12              # below this the response is rounding, not a stopband
+
+
+def magnitude(poly, gain, freq):
+    """|H| at one frequency: RttyDecoder_bandPassFreq() divides the input by gain"""
+    q = cmath.exp(-2j * math.pi * freq / FS)
+    return abs((1 - q) ** 2 * (1 + q) ** 2
+               / sum(c * q ** i for i, c in enumerate(poly))) / gain
+
+
+def design_faults(poly, gain, edge_lo, edge_hi):
+    """what this design is not: the band pass its comment documents"""
+    faults = []
+    for edge in (edge_lo, edge_hi):
+        level = 20.0 * math.log10(max(magnitude(poly, gain, edge), FLOOR))
+        if abs(level - EDGE_DB) > EDGE_TOLERANCE_DB:
+            faults.append('%.2f dB at %.0f Hz, a band pass is %.2f dB at its documented edge'
+                          % (level, edge, EDGE_DB))
+    centre = 0.5 * (edge_lo + edge_hi)
+    level = magnitude(poly, gain, centre)
+    if abs(level - 1.0) > CENTRE_TOLERANCE:
+        faults.append('%.6f at the centre %.0f Hz, where the gain makes it 1' % (level, centre))
+    # outward from each edge the response may only fall; a design that turns around has a passband
+    # in the stopband, which a table that merely matches the formula would never show
+    for edge, stop in ((edge_lo, 20.0), (edge_hi, 0.49 * FS)):
+        step = (stop - edge) / 512.0
+        previous = magnitude(poly, gain, edge)
+        previous_f = edge
+        for k in range(1, 513):
+            freq = edge + k * step
+            level = magnitude(poly, gain, freq)
+            if previous < FLOOR:
+                break
+            if level > previous * (1 + 1e-9):
+                faults.append('the attenuation turns around at %.0f Hz: %.1f dB there after %.1f dB '
+                              'at %.0f Hz'
+                              % (freq, 20 * math.log10(level), 20 * math.log10(previous),
+                                 previous_f))
+                break
+            previous, previous_f = level, freq
+    return faults
 
 
 def parse(source):
@@ -120,11 +170,15 @@ def main(argv):
     found = parse(source)
     failures = []
 
+    worst_edge = 0.0
     for name, label, gain, coeffs, edge_lo, edge_hi, stored in found:
-        want_coeffs, want_gain = design(edge_lo, edge_hi)
+        want_coeffs, want_gain, want_poly = design(edge_lo, edge_hi)
         centre = 0.5 * (edge_lo + edge_hi)
+        worst_edge = max(worst_edge, max(
+            abs(20 * math.log10(max(magnitude(want_poly, want_gain, edge), FLOOR)) - EDGE_DB)
+            for edge in (edge_lo, edge_hi)))
 
-        notes = []
+        notes = design_faults(want_poly, want_gain, edge_lo, edge_hi)
         if len(coeffs) != 4:
             # block() and the comparison both need four taps, so say this instead of indexing
             notes.append('%d coefficients, a fourth order denominator has 4' % len(coeffs))
@@ -167,8 +221,10 @@ def main(argv):
         print('and replace the constants in drivers/audio/rtty.c.')
         return 1
 
-    print('\nfilter bank: %d filters are exactly the blocks the design produces (order 2 Butterworth, '
-          'prewarped bilinear, %d kHz)' % (len(found), int(FS / 1000)))
+    print('\nfilter bank: %d filters are exactly the blocks the design produces, and the design is '
+          'the band pass its comments document' % len(found))
+    print('every edge is within %.3f dB of -3.01 dB, every centre is unity, every stopband only '
+          'falls (order 2 Butterworth, prewarped bilinear, %d kHz)' % (worst_edge, int(FS / 1000)))
     return 0
 
 
