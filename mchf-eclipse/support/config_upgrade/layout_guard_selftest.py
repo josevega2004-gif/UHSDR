@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Self-test of the layout guard in gen_config_upgrade.py.
+"""Self-test of the configuration checks in gen_config_upgrade.py.
 
 The guard only earns its place if it still fails on the changes it exists to catch, so this applies
-one mutation at a time to the working tree, runs the generator against it, and checks the verdict:
+one mutation at a time and checks the verdict:
 
   1. a stored value moves to another word      -> the check fails, the recorder refuses to record it
   2. a stored value is only renamed           -> the check passes, the recorder takes the new name,
@@ -15,40 +15,68 @@ one mutation at a time to the working tree, runs the generator against it, and c
                                                  record, and a second run leaves it untouched
   6. the parser loses a stored word            -> the check fails
   7. the record does not parse                 -> the check fails
+  8. two rows claim one eeprom id              -> the check fails
+  9. two rows store into one variable          -> the check fails
+ 10. the menu offers more than the row stores  -> the check fails
+ 11. the whole marker bump, one edit at a time -> the check fails until all three edits are there
 
 An assertion may look at the exit code and at the data a verdict has to name: the settings that
-moved, the marker that was recorded, the record that did not parse. It may not look at the wording:
-the sentences are there to be rewritten, the verdicts are not, and a needle on a phrase turns every
-improvement of a message into a failing matrix. A traceback is never a verdict either: the generator
-reports through sys.exit(), so a crash has to fail a case that expects a failure rather than pass it.
+were named, the marker that was recorded, the record that did not parse. It may not look at the
+wording: the sentences are there to be rewritten, the verdicts are not, and a needle on a phrase
+turns every improvement of a message into a failing matrix. A traceback is never a verdict either:
+the generator reports through sys.exit(), so a crash has to fail a case that expects a failure
+rather than pass it.
 
-The five cases were run by hand after every change to the guard; this is that matrix, scripted.
-
-Every mutation is undone with "git checkout --" before the next case, and again in a finally that also
-runs on Ctrl-C or SIGTERM, so an interrupted run is no way to leave the tree mutated. That works
-because the checkout is required to be clean: it refuses to start while any of the files it rewrites
-differs from HEAD, and HEAD is then the only thing those files have to match.
+Every case runs in a temporary copy of the files the checks read - the headers, the sources, the
+Makefile and support/config_upgrade itself - and the copy is thrown away afterwards. The checkout
+this runs in is never written to, so an interrupted run cannot leave it mutated, a dirty tree is no
+reason to refuse, and a case cannot lose work that was not committed. Each case is followed by
+putting the fixture's files back, so the cases stay independent of each other.
 """
+import os
 import re
-import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-GEN = ROOT / 'support/config_upgrade/gen_config_upgrade.py'
-HEADER = ROOT / 'drivers/ui/ui_configuration.h'
-TABLE = ROOT / 'drivers/ui/ui_configuration.c'
-EMITTED = ROOT / 'support/config_upgrade/config_upgrade.c'
-# every record file, by name, because which one this build uses is only known once the header is
-# read, and a run that was killed may have left that header saying anything
-RECORD_GLOB = ':(glob)support/config_upgrade/layout-*.map'
-REL = [str(path.relative_to(ROOT)) for path in (GEN, HEADER, TABLE, EMITTED)] + [RECORD_GLOB]
+SOURCE_ROOT = Path(__file__).resolve().parents[2]
+FIXTURE = None
+ROOT = SOURCE_ROOT
+GEN = HEADER = TABLE = EMITTED = RECORD = None
+MARKER = 0
+RECORD_NAME = ''
+KNOWN_MARKERS = []
+SNAPSHOT = {}
 
 FAILS = 1          # sys.exit('message') in the generator, and make reports that as 2
 
 failures = []
+
+
+def build_fixture():
+    """a copy of what the checks read: every header and source, the Makefile, the harness itself
+
+    build/ and basesw/ are left out - the generator skips them and they are far larger than
+    everything else. support/config_upgrade is copied whole, because the runs rewrite the emitted
+    harness and the records there.
+    """
+    global FIXTURE
+    FIXTURE = Path(tempfile.mkdtemp(prefix='layout-guard-'))
+    root = FIXTURE / SOURCE_ROOT.name
+    for dirpath, dirs, files in os.walk(SOURCE_ROOT):
+        dirs[:] = [d for d in dirs if d not in ('build', 'basesw', '.git')]
+        here = Path(dirpath)
+        rel = here.relative_to(SOURCE_ROOT)
+        (root / rel).mkdir(parents=True, exist_ok=True)
+        for name in files:
+            if name.endswith(('.h', '.c', '.mak')) or name == 'Makefile':
+                shutil.copy2(here / name, root / rel / name)
+    shutil.copytree(SOURCE_ROOT / 'support/config_upgrade', root / 'support/config_upgrade',
+                    dirs_exist_ok=True)
+    return root
 
 
 def layout_record_of_this_build():
@@ -75,67 +103,28 @@ def layout_record_of_this_build():
     return marker, entries[marker], sorted(entries)
 
 
-def git(*args):
-    return subprocess.run(['git', '-C', str(ROOT), *args], capture_output=True, text=True)
-
-
-def checkout_command():
-    """the command that puts the files this test rewrites back, usable from any directory"""
-    return 'git -C %s checkout -- %s' % (shlex.quote(str(ROOT)),
-                                         ' '.join(shlex.quote(path) for path in REL))
-
-
-def uncommitted():
-    """what git reports for the files this test rewrites, empty when a run cannot lose work"""
-    try:
-        status = git('status', '--porcelain', '--', *REL)
-    except OSError as err:
-        sys.exit('cannot ask git whether the files this self-test rewrites are clean (%s). Run it '
-                 'from a git checkout, or commit or stash those files first.' % err)
-    if status.returncode != 0:
-        reason = status.stderr.strip() or status.stdout.strip()
-        if 'not a git repository' in reason:
-            sys.exit('this is not a git checkout, so the self-test cannot tell whether the files it '
-                     'rewrites carry work that is not committed. Run it in the repository checkout.')
-        sys.exit('git could not report the state of the files this self-test rewrites: %s\n'
-                 'Commit or stash them first.' % reason)
-    return [line for line in status.stdout.splitlines() if line.strip()]
+def use_fixture():
+    """point every path at a fresh copy of the tree and remember what to put back"""
+    global ROOT, GEN, HEADER, TABLE, EMITTED, RECORD, MARKER, RECORD_NAME, KNOWN_MARKERS
+    ROOT = build_fixture()
+    GEN = ROOT / 'support/config_upgrade/gen_config_upgrade.py'
+    HEADER = ROOT / 'drivers/ui/ui_configuration.h'
+    TABLE = ROOT / 'drivers/ui/ui_configuration.c'
+    EMITTED = ROOT / 'support/config_upgrade/config_upgrade.c'
+    MARKER, RECORD_NAME, KNOWN_MARKERS = layout_record_of_this_build()
+    RECORD = ROOT / 'support/config_upgrade' / RECORD_NAME
+    records = sorted((ROOT / 'support/config_upgrade').glob('layout-*.map'))
+    for path in (GEN, HEADER, TABLE, EMITTED, *records):
+        SNAPSHOT[path] = path.read_bytes()
 
 
 def restore():
-    """put the files this test rewrites back the way HEAD has them"""
-    done = git('checkout', '--', *REL)
-    if done.returncode != 0:
-        sys.exit('could not put the files this test rewrites back to HEAD:\n%s\nRun\n  %s'
-                 % ((done.stderr.strip() or done.stdout.strip()), checkout_command()))
-
-
-def refuse_if_dirty():
-    """stop before reading anything: a killed run leaves one of these files saying whatever its case
-
-    wrote, so the discovery below would trip over the mutation and report that instead of the way
-    out. Interrupting this test is only safe because HEAD is what everything is put back to.
-    """
-    dirty = uncommitted()
-    if not dirty:
-        return
-    names = [line[3:].strip().strip('"') for line in dirty]
-    sys.exit('refusing to run: this self-test rewrites these files in place and they already '
-             'differ from HEAD:\n%s\n'
-             'If a previous run was interrupted, put them back with\n'
-             '  %s\n'
-             'Otherwise commit or stash that work first, for example\n'
-             '  git -C %s stash push -u -- %s\n'
-             'and run "make layout-guard-selftest" again.'
-             % ('\n'.join('  ' + line for line in dirty), checkout_command(),
-                shlex.quote(str(ROOT)), ' '.join(shlex.quote(name) for name in names)))
-
-
-# before the marker and the record are looked up, not after: a killed run can leave either of them
-# saying something this build would not, and this refusal is what makes an interruption recoverable
-refuse_if_dirty()
-MARKER, RECORD_NAME, KNOWN_MARKERS = layout_record_of_this_build()
-RECORD = ROOT / 'support/config_upgrade' / RECORD_NAME
+    """put the fixture's files back the way the checkout has them"""
+    for path, data in SNAPSHOT.items():
+        path.write_bytes(data)
+    for path in (ROOT / 'support/config_upgrade').glob('layout-*.map'):
+        if path not in SNAPSHOT:
+            path.unlink()          # a record a case created for a marker this build does not write
 
 
 def record_owners():
@@ -155,7 +144,8 @@ def run_check():
 
     One case needs it, because what it perturbs is firmware C that only the compiled harness can
     see. make reports a failing recipe as 2, the program itself returns 1, so the assertion there
-    is on any failure rather than on one exit code."""
+    is on any failure rather than on one exit code.
+    """
     proc = subprocess.run(['make', '-C', str(ROOT), 'config-upgrade-check'],
                           capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
@@ -296,6 +286,74 @@ def case_broken_record():
     expect('a record with a line it cannot read', run(), FAILS, RECORD_NAME)
 
 
+def case_duplicate_id():
+    """two rows on one word: the second silently overwrites what the first loaded and wrote"""
+    source = TABLE.read_text(encoding='utf-8')
+    anchor = 'EEPROM_FREQ_STEP,&df.selected_idx'
+    assert anchor in source, 'the table row this case rewrites is gone, update this case'
+    TABLE.write_text(source.replace(anchor, 'EEPROM_SPEC_SCOPE_SPEED,&df.selected_idx'),
+                     encoding='utf-8')
+    expect('two rows claiming one eeprom id', run(), FAILS, 'EEPROM_SPEC_SCOPE_SPEED')
+
+
+def case_shared_variable():
+    """two ids loading into one variable: each of them mirrors what the other stored"""
+    source = TABLE.read_text(encoding='utf-8')
+    anchor = 'EEPROM_NB_SETTING,&ts.dsp.nb_setting'
+    assert anchor in source, 'the table row this case rewrites is gone, update this case'
+    TABLE.write_text(source.replace(anchor, 'EEPROM_NB_SETTING,&ts.scope_speed'),
+                     encoding='utf-8')
+    expect('two rows storing into one variable', run(), FAILS,
+           'EEPROM_NB_SETTING', 'EEPROM_SPEC_SCOPE_SPEED')
+
+
+def case_menu_wider_than_stored():
+    """the menu offers a range the row does not store, so the value is reset at the next start"""
+    source = TABLE.read_text(encoding='utf-8')
+    row = ('{ ConfigEntry_UInt8, EEPROM_SPEC_SCOPE_SPEED,&ts.scope_speed,'
+           'SPECTRUM_SCOPE_SPEED_DEFAULT,0,SPECTRUM_SCOPE_SPEED_MAX}')
+    assert row in source, 'the table row this case rewrites is gone, update this case'
+    TABLE.write_text(source.replace(row, row.replace('SPECTRUM_SCOPE_SPEED_DEFAULT', '0')
+                                    .replace('SPECTRUM_SCOPE_SPEED_MAX', '1')), encoding='utf-8')
+    expect('a stored range narrower than the menu', run(), FAILS, 'EEPROM_SPEC_SCOPE_SPEED')
+
+
+def case_marker_bump_procedure():
+    """the whole bump, edit by edit: the map changes, then the marker, then the history
+
+    The procedure the header comment prescribes, pinned. Moving a value to a free word is a real
+    map change, so it fails without a marker; the marker alone fails while the previous one is no
+    longer recognised by the migration; and with all three edits plus a fresh record the check
+    passes, which is what makes the documented sequence trustworthy.
+    """
+    text = HEADER.read_text(encoding='utf-8')
+    moved = re.sub(r'(?m)^(#define\s+EEPROM_AM_PEP_WARN\s+)382\b', r'\g<1>390', text)
+    assert moved != text, 'the define this case moves is gone, update this case'
+    HEADER.write_text(moved, encoding='utf-8')
+    expect('a map change without a marker bump', run(), FAILS, 'EEPROM_AM_PEP_WARN')
+
+    bumped = MARKER + 1
+    while bumped in KNOWN_MARKERS:
+        bumped += 1
+    HEADER.write_text(re.sub(r'(#define\s+CONFIG_LAYOUT_VERSION_MAGIC\s+)(0x[0-9A-Fa-f]+|\d+)',
+                             lambda m: m.group(1) + '0x%X' % bumped, moved), encoding='utf-8')
+    expect('the marker bumped, the previous one unrecognised', run(), FAILS, '0x%X' % bumped)
+
+    table = TABLE.read_text(encoding='utf-8')
+    guard = 'layout_version != CONFIG_LAYOUT_VERSION_MAGIC'
+    assert guard in table, 'the migration check this case extends is gone, update this case'
+    TABLE.write_text(table.replace(guard, 'layout_version != 0x%X && %s' % (MARKER, guard)),
+                     encoding='utf-8')
+    source = GEN.read_text(encoding='utf-8')
+    source = source.replace('LAYOUT_HISTORY = [',
+                            'LAYOUT_HISTORY = [\n    (0x%X, \'layout-0x%X.map\'),'
+                            % (bumped, bumped), 1)
+    GEN.write_text(source, encoding='utf-8')
+
+    expect('the new pair recorded', run('--record-layout'), 0, 'layout-0x%X.map' % bumped)
+    expect('the whole bump', run(), 0)
+
+
 CASES = (
     ('1. a value moves to another word', case_renumbering),
     ('2. a value is only renamed', case_rename),
@@ -304,6 +362,10 @@ CASES = (
     ('5. the parser learns a stored word', case_parser_addition),
     ('6. the parser loses a stored word', case_parser_regression),
     ('7. the record does not parse', case_broken_record),
+    ('8. two rows claim one eeprom id', case_duplicate_id),
+    ('9. two rows store into one variable', case_shared_variable),
+    ('10. the menu offers more than the row stores', case_menu_wider_than_stored),
+    ('11. the marker bump, edit by edit', case_marker_bump_procedure),
 )
 
 
@@ -312,6 +374,7 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda *_: sys.exit(1))
     try:
+        use_fixture()
         for title, case in CASES:
             print(title)
             try:
@@ -320,15 +383,17 @@ def main():
                 print('  FAIL  the case itself raised: %s' % err)
                 failures.append(title)
             restore()
+        # the fixture has to be looked at before it is thrown away: a case that did not put its
+        # files back would make the next case (or a reader here) blame the wrong change
+        left = [path.name for path in SNAPSHOT
+                if path.exists() and path.read_bytes() != SNAPSHOT[path]]
+        if left:
+            print('\nlayout guard self-test: the fixture was left mutated: %s' % ', '.join(left))
+            failures.append('the fixture was left mutated')
     finally:
-        restore()
+        shutil.rmtree(FIXTURE, ignore_errors=True)
     if failures:
         print('\nlayout guard self-test: %d case(s) failed' % len(failures))
-        return 1
-    left = uncommitted()
-    if left:
-        print('\nlayout guard self-test: the tree was left mutated:\n%s'
-              % '\n'.join('  ' + line for line in left))
         return 1
     print('\nlayout guard self-test: all %d cases behave as expected' % len(CASES))
     return 0

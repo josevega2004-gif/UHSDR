@@ -618,17 +618,20 @@ for row in all_rows:
         continue
     table.append(row)
 
-# Every row that a #if branch removes from this list also removes itself from every comparison
-# below, so a surprising drop here has to be noticed instead of quietly weakening the check.
-# Rows are left out either by a #if branch or because their values come from a macro the parser
-# does not expand; both are expected to stay a small part of the table, so a large fall here means
-# the check has quietly stopped looking at the configuration.
-MAX_NOT_COMPARED = 20
-if len(all_rows) - len(table) > MAX_NOT_COMPARED:
-    sys.exit('%d of the %d parsed table rows are not compared (%d behind a branch: %s). A row that '
-             'is not compared is a setting that is not checked.'
-             % (len(all_rows) - len(table), len(all_rows), skipped_branch,
-                ', '.join(sorted(dropped_guards)) or 'none'))
+# The rows this check leaves out, pinned: how many, and which #if conditions removed them. A row
+# behind a guard whose macro some header defines is compared here regardless of which board the
+# build targets, so the union of all configurations is checked at once and only dead code is left
+# out. That union is why a new guard on a macro nobody defines has to be noticed: six rows can
+# silently become seven, and the seventh is a setting nothing looks at any more.
+UNCOMPARED_ROWS = (6, ('defined(OBSOLETE_AGC)', 'defined(OBSOLETE_NR)'))
+if (len(all_rows) - len(table), tuple(sorted(dropped_guards))) != UNCOMPARED_ROWS:
+    sys.exit('the rows of the ConfigEntry table that are not compared changed: %d row(s) behind '
+             '%s, expected %d behind %s. A row is only left out when no header of the tree defines '
+             'the macro its branch tests, that is when it is dead code - every other branch is '
+             'compared. If the change is intended, update UNCOMPARED_ROWS in gen_config_upgrade.py; '
+             'if not, the check just stopped looking at a setting.'
+             % (len(all_rows) - len(table), ', '.join(sorted(dropped_guards)) or 'none',
+                UNCOMPARED_ROWS[0], ', '.join(UNCOMPARED_ROWS[1]) or 'none'))
 
 unresolved = 0
 for cond, ctype, idname, var, d, lo, hi in table:
@@ -753,9 +756,10 @@ for item, block in sorted(case_blocks.items()):
                      '%d..%d' % (idname, var, item, menu_def, stored_lo, stored_hi))
 
 print('  %d rows of the %d in the table are compiled here (%d belong to a branch this '
-      'configuration does not use), %d rows have constants that cannot be resolved without a '
+      'configuration does not use: %s), %d rows have constants that cannot be resolved without a '
       'compiler, %d menu items were compared with their stored range'
-      % (len(table), len(all_rows), skipped_branch, unresolved, compared))
+      % (len(table), len(all_rows), skipped_branch,
+         ', '.join(sorted(dropped_guards)) or 'none', unresolved, compared))
 
 # ---------------------------------------------------------------------------------------------
 # every reachable menu item has to write into something the configuration table stores

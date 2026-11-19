@@ -416,10 +416,11 @@ layout-record:
 .PHONY: layout-guard-selftest
 layout-guard-selftest:
 	# run the layout guard through the changes it exists to catch: a value moving to another word,
-	# a value that was only renamed, a marker bumped without a map change, a parser that learns a
-	# stored word, one that loses a word, and a record that does not parse. It rewrites those
-	# files in place, leaves them as it found them, and refuses to start while any of them differs
-	# from HEAD.
+	# a value that was only renamed, an offset of the previous layout translation moving, a marker
+	# bumped without a map change, a parser that learns a stored word, one that loses a word, a
+	# record that does not parse, two rows on one id, two rows in one variable, a menu wider than
+	# the storage, and the whole marker bump. It applies each change to a temporary copy of the
+	# files the checks read and throws the copy away, so the checkout is never written to.
 	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/layout_guard_selftest.py
 
 .PHONY: config-upgrade-check
@@ -429,7 +430,9 @@ config-upgrade-check:
 	# and that the address translation of the previous layout agrees with the two recorded maps
 	# run from the mchf-eclipse directory, the paths rely on the default ROOTLOC of this makefile
 	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/gen_config_upgrade.py
-	@$(HOSTCC) -O2 -Wall -o $(ROOTLOC)/support/config_upgrade/config_upgrade $(ROOTLOC)/support/config_upgrade/config_upgrade.c
+	# -Werror: the emitted harness is the model of the firmware, a warning in it is a mistake of the
+	# generator, not a style question
+	@$(HOSTCC) -O2 -Wall -Wextra -Werror -o $(ROOTLOC)/support/config_upgrade/config_upgrade $(ROOTLOC)/support/config_upgrade/config_upgrade.c
 	# remove the binary even when the check fails, but keep its exit code
 	@$(ROOTLOC)/support/config_upgrade/config_upgrade; rc=$$?; \
 	 $(RM) $(ROOTLOC)/support/config_upgrade/config_upgrade; \
