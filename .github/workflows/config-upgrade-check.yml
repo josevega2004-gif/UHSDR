@@ -37,6 +37,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # the bench measures the filters, this rebuilds them from the design their comments document:
+      # a coefficient set that drifted off its label still decodes a clean loopback, because the ATC
+      # decides from the mark channel. See support/digi/design_rtty_filters.py.
+      - name: Check the RTTY filter coefficients against their design
+        working-directory: mchf-eclipse
+        run: python3 support/digi/design_rtty_filters.py
+
       - name: Run the digital mode host bench
         working-directory: mchf-eclipse
         run: make digi-bench
