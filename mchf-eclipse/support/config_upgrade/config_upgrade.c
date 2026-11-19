@@ -1709,6 +1709,161 @@ static int check_migration_lifecycle(void)
            "from translating them again\n\n", probed);
     return 0;
 }
+/* ---------------------------------------------------------------------------------------------
+   the shapes a save leaves behind when it does not finish. A word that was never written is not a
+   value: every row has to read its default rather than a number made of a blank or stale
+   neighbour, and an image that carries the current marker must not be translated again */
+static int expect_read(const rrow_t* r, int32_t got, int32_t want, const char* shape)
+{
+    if (got == want)
+    {
+        return 0;
+    }
+    printf("CHECK FAILED: %s (id %u) reads %d instead of %d on %s\n", r->idname, r->id, got, want, shape);
+    return 1;
+}
+
+static int check_interrupted_save(void)
+{
+    image_t img;
+    const rrow_t* partial = NULL;
+    int rc = 0;
+
+    /* a chip that was never written: nothing is stored, so every row loads its default, and the
+       absent marker means the boot translates it - which on an empty image has to change nothing */
+    blank_image(&img);
+    for (unsigned i = 0; i < rrow_count; i++)
+    {
+        rc |= expect_read(&rrows[i], row_read(&img, &rrows[i], false), rrows[i].def,
+                          "a chip that was never written");
+    }
+    if (!needs_migration(&img))
+    {
+        printf("CHECK FAILED: a chip that was never written carries the layout marker, so its words "
+               "are read as if they were current\n");
+        rc = 1;
+    }
+    save_as_current(&img);
+    for (unsigned i = 0; i < rrow_count; i++)
+    {
+        rc |= expect_read(&rrows[i], row_read(&img, &rrows[i], false), rrows[i].def,
+                          "a chip that was never written, after the save that boot causes");
+    }
+
+    /* the marker was written and the save stopped there: the words claim the current layout, so
+       nothing may be translated, and a row the save never reached has to read its default */
+    blank_image(&img);
+    for (unsigned i = 0; i < rrow_count; i += 2)
+    {
+        row_store(&img, &rrows[i], rrows[i].max);
+    }
+    img.present[MARKER_WORD] = true;
+    img.value[MARKER_WORD] = LAYOUT_MAGIC;
+    if (needs_migration(&img))
+    {
+        printf("CHECK FAILED: an image carrying the current layout marker is migrated, so every "
+               "value is read through the translation of the previous layout\n");
+        rc = 1;
+    }
+    for (unsigned i = 0; i < rrow_count; i++)
+    {
+        const int32_t want = (i % 2) ? rrows[i].def : rrows[i].max;
+        rc |= expect_read(&rrows[i], row_read(&img, &rrows[i], false), want,
+                          (i % 2) ? "a half written image, a row the save never reached"
+                                  : "a half written image, a row the save reached");
+    }
+    /* an Int32 row with only its high word written: half a value is not a value */
+    for (unsigned i = 0; i < rrow_count; i++)
+    {
+        if (rrows[i].type != R_INT32)
+        {
+            continue;
+        }
+        blank_image(&img);
+        img.present[rrows[i].id] = true;
+        img.value[rrows[i].id] = 0x1111;
+        rc |= expect_read(&rrows[i], row_read(&img, &rrows[i], false), rrows[i].def,
+                          "an Int32 row whose low word was never written");
+        break;
+    }
+
+    /* the save wrote values and stopped before the marker: the boot migrates, and what it installs
+       are the words the previous layout held. The words the interrupted save wrote are replaced,
+       not mixed into the value that comes back */
+    blank_image(&img);
+    for (unsigned i = 0; i < rrow_count; i++)
+    {
+        const rrow_t* r = &rrows[i];
+        const uint16_t old = UiConfiguration_OldLayoutAddress((uint16_t)r->id);
+        if (r->type == R_INT32 || old == CONFIG_LAYOUT_OLD_NO_VALUE || old >= FIRST_UNUSED)
+        {
+            continue;
+        }
+        img.present[old] = true;
+        img.value[old] = (uint16_t)r->max;
+    }
+    /* a row the interrupted save can reach without writing a word the migration has to read */
+    for (unsigned i = 0; i < rrow_count; i++)
+    {
+        const rrow_t* r = &rrows[i];
+        bool taken = false;
+        if (r->type == R_INT32 || r->id == MARKER_WORD ||
+            UiConfiguration_OldLayoutAddress((uint16_t)r->id) == CONFIG_LAYOUT_OLD_NO_VALUE)
+        {
+            continue;
+        }
+        for (unsigned j = 0; j < rrow_count; j++)
+        {
+            if (rrows[j].type != R_INT32 &&
+                UiConfiguration_OldLayoutAddress((uint16_t)rrows[j].id) == r->id)
+            {
+                taken = true;
+                break;
+            }
+        }
+        if (!taken)
+        {
+            partial = r;
+            break;
+        }
+    }
+    if (partial)
+    {
+        row_store(&img, partial, partial->min);
+    }
+    if (!needs_migration(&img))
+    {
+        printf("CHECK FAILED: a save that stopped before the marker leaves an image that is not "
+               "migrated\n");
+        rc = 1;
+    }
+    save_as_current(&img);
+    if (needs_migration(&img))
+    {
+        printf("CHECK FAILED: after the boot that migrates an interrupted save the configuration is "
+               "still not current, so every boot translates it again\n");
+        rc = 1;
+    }
+    for (unsigned i = 0; i < rrow_count; i++)
+    {
+        const rrow_t* r = &rrows[i];
+        const uint16_t old = UiConfiguration_OldLayoutAddress((uint16_t)r->id);
+        if (r->type == R_INT32 || old == CONFIG_LAYOUT_OLD_NO_VALUE || old >= FIRST_UNUSED)
+        {
+            continue;
+        }
+        rc |= expect_read(r, row_read(&img, r, false), r->max,
+                          "an interrupted save, after the boot that migrates it");
+    }
+
+    if (rc == 0)
+    {
+        printf("interrupted saves: a never written chip and a row the save never reached read their "
+               "defaults, an image with the current marker is not translated, and an image whose "
+               "save stopped before the marker loses the words that save wrote\n\n");
+    }
+    return rc;
+}
 
 int main(void)
 {
@@ -1777,6 +1932,7 @@ int main(void)
     rc |= check_filter_map_save();
     rc |= check_old_layout_translation();
     rc |= check_migration_lifecycle();
+    rc |= check_interrupted_save();
     if (entry_count == 0)
     {
         printf("CHECK FAILED: no entries parsed, the generator matched nothing\n");

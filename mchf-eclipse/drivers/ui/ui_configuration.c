@@ -962,10 +962,20 @@ void UiConfiguration_ReadConfigEntryData(const ConfigEntryDescriptor* ced_ptr, b
     {
     	uint32_t Data;
     	uint16_t DataLo,DataHi;
-    	UiReadSettingEEPROM_UInt16(addr,&DataHi,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
-    	UiReadSettingEEPROM_UInt16(addr+1,&DataLo,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
-    	Data=DataHi<<16|DataLo;
-    	*(int32_t*)ced_ptr->val_ptr=(int32_t)Data;
+    	uint16_t probe;
+    	if(load_default || ConfigStorage_ReadVariable(addr,&probe) != 0 || ConfigStorage_ReadVariable(addr+1,&probe) != 0)
+    	{
+    		/* half of a 32 bit value is not a value: a save that stopped between the two words
+    		   leaves the other one blank or stale, and the composed number is in no range at all */
+    		*(int32_t*)ced_ptr->val_ptr=(int32_t)ced_ptr->val_default;
+    	}
+    	else
+    	{
+    		UiReadSettingEEPROM_UInt16(addr,&DataHi,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+    		UiReadSettingEEPROM_UInt16(addr+1,&DataLo,ced_ptr->val_default,ced_ptr->val_min,ced_ptr->val_max, load_default);
+    		Data=DataHi<<16|DataLo;
+    		*(int32_t*)ced_ptr->val_ptr=(int32_t)Data;
+    	}
     }
     	break;
 //  case ConfigEntry_Bool:
