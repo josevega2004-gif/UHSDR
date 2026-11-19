@@ -84,6 +84,7 @@ typedef struct
     float       qsb_depth;
     uint16_t    baud;        // 0 = 45.45, the rate the modem was designed around; 50 = the DWD
                              // weather teleprinter stations, which are all F1B 50 Baud
+    float       max_cer;     // the character error rate this case has to stay within, in percent
 } rtty_case_t;
 
 // The demodulator emits one or two characters of junk while it locks on, which is a property of
@@ -154,45 +155,34 @@ static float rtty_run(const rtty_case_t* c, const char* msg, char* got, size_t g
 static int rtty_table(void)
 {
     const char* msg = "DE UHSDR BENCH RTTY 12345 TEST 45 BAUD 170 SHIFT";
+    // the last column is the character error rate each case has to stay within. Twelve of these
+    // decode without a single wrong character, so a few characters of slack leave room for libm and
+    // rounding differences between build hosts while still failing on a demodulator change that
+    // costs text. The fast fading case is the exception: it loses lock and lands near 50 %, so its
+    // limit only catches it getting worse.
     static const rtty_case_t cases[] =
     {
-        { "clean 170",     170,  100.0f, 0, 0 },
-        { "snr 20 170",    170,   20.0f, 0, 0 },
-        { "snr 15 170",    170,   15.0f, 0, 0 },
-        { "snr 10 170",    170,   10.0f, 0, 0 },
-        { "snr 10 425",    425,   10.0f, 0, 0 },
-        { "snr 10 850",    850,   10.0f, 0, 0 },
-        { "snr 7 170",      170,   7.0f, 0, 0 },
-        { "qsb 10 170",     170,  10.0f, 0.5f, 6.0f },
-        { "qsb fast 10",    170,  10.0f, 2.0f, 10.0f },
+        { "clean 170",     170,  100.0f, 0, 0, 0, 5.0f },
+        { "snr 20 170",    170,   20.0f, 0, 0, 0, 5.0f },
+        { "snr 15 170",    170,   15.0f, 0, 0, 0, 5.0f },
+        { "snr 10 170",    170,   10.0f, 0, 0, 0, 5.0f },
+        { "snr 10 425",    425,   10.0f, 0, 0, 0, 5.0f },
+        { "snr 10 850",    850,   10.0f, 0, 0, 0, 5.0f },
+        { "snr 7 170",      170,   7.0f, 0, 0, 0, 5.0f },
+        { "qsb 10 170",     170,  10.0f, 0.5f, 6.0f, 0, 5.0f },
+        { "qsb fast 10",    170,  10.0f, 2.0f, 10.0f, 0, 60.0f },
         // the real services: DWD DDH/DDK are F1B 50 Baud with +/-225 Hz (450 Hz total) on
         // 4583/7646/10100.8/11039/14467.3 kHz and +/-42.5 Hz (85 Hz) on 147.3 kHz, per the DWD
         // table on http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts.
         // The fourth case is a 45.45 Bd / 170 Hz signal with the 8472 kHz hydrological broadcast
         // in mind; that station is not on the cited list, so read the case as a representative
         // amateur-rate signal rather than as a description of that service.
-        { "dwd 450 50bd",   450,   20.0f, 0, 0, 50 },
-        { "dwd 450 10bd",   450,   10.0f, 0, 0, 50 },
-        { "ddh47 85 50bd",   85,   20.0f, 0, 0, 50 },
-        { "8472 170 45bd",  170,   20.0f, 0, 0 },
-    };
-
-    // the character error rate each case has to stay within. Twelve of these decode without a
-    // single wrong character, so a few characters of slack leave room for libm and rounding
-    // differences between build hosts while still failing on a demodulator change that costs text.
-    // The fast fading case is the exception: it loses lock and lands near 50 %, so its limit only
-    // catches it getting worse.
-    static const float max_cer[] =
-    {
-        5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 60.0f, 5.0f, 5.0f, 5.0f, 5.0f,
+        { "dwd 450 50bd",   450,   20.0f, 0, 0, 50, 5.0f },
+        { "dwd 450 10bd",   450,   10.0f, 0, 0, 50, 5.0f },
+        { "ddh47 85 50bd",   85,   20.0f, 0, 0, 50, 5.0f },
+        { "8472 170 45bd",  170,   20.0f, 0, 0, 0, 5.0f },
     };
     const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
-    if (sizeof(max_cer) / sizeof(max_cer[0]) != n_cases)
-    {
-        printf("FAIL  %zu cases but %zu limits, update rtty_table()\n", n_cases,
-               sizeof(max_cer) / sizeof(max_cer[0]));
-        return 1;
-    }
 
     printf("RTTY loopback of drivers/audio/rtty.c (per case: 45.45 or 50 Bd, 1.5 stop bits, tx 48 kHz -> rx 12 kHz)\n");
     printf("%-16s %7s %6s  %s\n", "case", "CER %", "lead", "decoded");
@@ -204,10 +194,10 @@ static int rtty_table(void)
         float cer = rtty_run(&cases[i], msg, got, sizeof(got), &eot);
         printf("%-16s %7.1f %6d  %s%s\n", cases[i].label, cer, lead_in_junk, got,
                eot ? "" : "   [transmission cut off before EOT]");
-        if (cer > max_cer[i])
+        if (cer > cases[i].max_cer)
         {
             printf("FAIL  %-16s character error rate %.1f%% is above the %.1f%% this case allows\n",
-                   cases[i].label, cer, max_cer[i]);
+                   cases[i].label, cer, cases[i].max_cer);
             failures++;
         }
     }
@@ -443,7 +433,7 @@ static int selftest(void)
     }
     {
         // zero crossing count of the modulator tone, measured through the same path the bench uses
-        rtty_case_t c = { "probe", 170, 100.0f, 0, 0 };
+        rtty_case_t c = { "probe", 170, 100.0f, 0, 0, 0, 5.0f };
         int eot = 0;
         char got[8192];
         float cer = rtty_run(&c, "DE UHSDR BENCH TEST ONE", got, sizeof(got), &eot);
@@ -453,7 +443,7 @@ static int selftest(void)
         check(eot == 1, "an EOT in the tx buffer asks the radio manager to leave TX");
     }
     {
-        rtty_case_t c = { "snr", 170, 15.0f, 0, 0 };
+        rtty_case_t c = { "snr", 170, 15.0f, 0, 0, 0, 5.0f };
         int eot = 0;
         char got[8192];
         float cer = rtty_run(&c, "DE UHSDR BENCH TEST TWO", got, sizeof(got), &eot);
