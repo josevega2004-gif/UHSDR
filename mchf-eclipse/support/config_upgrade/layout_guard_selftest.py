@@ -7,16 +7,21 @@ one mutation at a time to the working tree, runs the generator against it, and c
   1. a stored value moves to another word      -> the check fails, the recorder refuses to record it
   2. the marker moves, the map does not        -> the check fails
   3. the parser learns about a stored word     -> the check passes and says what to run, and
-                                                 "make layout-record" restores the recorded words exactly
+                                                 "make layout-record" writes the record and then has
+                                                 nothing left to do
   4. the parser loses a stored word            -> the check fails
   5. the record does not parse                 -> the check fails
 
-The five cases were run by hand after every change to the guard; this is that matrix, scripted. Every
-mutation is undone again, also when a case fails, so the tree is left as it was found. Because the
-files are rewritten in place, it refuses to start while any of them differs from HEAD: an interrupted
-run must not be the reason uncommitted work disappears.
+The five cases were run by hand after every change to the guard; this is that matrix, scripted.
+
+Every mutation is undone with "git checkout --" before the next case, and again in a finally that
+also runs on Ctrl-C or SIGTERM, so an interrupted run is no way to leave the tree mutated. That works
+because the checkout is required to be clean: it refuses to start while any of the files it rewrites
+differs from HEAD, and HEAD is then the only thing those files have to match.
 """
 import re
+import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +30,14 @@ ROOT = Path(__file__).resolve().parents[2]
 GEN = ROOT / 'support/config_upgrade/gen_config_upgrade.py'
 HEADER = ROOT / 'drivers/ui/ui_configuration.h'
 EMITTED = ROOT / 'support/config_upgrade/config_upgrade.c'
+# every record file, by name, because which one this build uses is only known once the header is
+# read, and a run that was killed may have left that header saying anything
+RECORD_GLOB = ':(glob)support/config_upgrade/layout-*.map'
+REL = [str(path.relative_to(ROOT)) for path in (GEN, HEADER, EMITTED)] + [RECORD_GLOB]
+
+FAILS = 1          # sys.exit('message') in the generator, and make reports that as 2
+
+failures = []
 
 
 def layout_record_of_this_build():
@@ -51,19 +64,62 @@ def layout_record_of_this_build():
     return marker, entries[marker], sorted(entries)
 
 
+def git(*args):
+    return subprocess.run(['git', '-C', str(ROOT), *args], capture_output=True, text=True)
+
+
+def uncommitted():
+    """what git reports for the files this test rewrites, empty when a run cannot lose work"""
+    try:
+        status = git('status', '--porcelain', '--', *REL)
+    except OSError as err:
+        sys.exit('cannot ask git whether the files this self-test rewrites are clean (%s). Run it '
+                 'from a git checkout, or commit or stash those files first.' % err)
+    if status.returncode != 0:
+        reason = status.stderr.strip() or status.stdout.strip()
+        if 'not a git repository' in reason:
+            sys.exit('this is not a git checkout, so the self-test cannot tell whether the files it '
+                     'rewrites carry work that is not committed. Run it in the repository checkout.')
+        sys.exit('git could not report the state of the files this self-test rewrites: %s\n'
+                 'Commit or stash them first.' % reason)
+    return [line for line in status.stdout.splitlines() if line.strip()]
+
+
+def restore():
+    """put the files this test rewrites back the way HEAD has them"""
+    git('checkout', '--', *REL)
+
+
+def refuse_if_dirty():
+    """stop before reading anything: a killed run leaves one of these files saying whatever its case
+
+    wrote, so the discovery below would trip over the mutation and report that instead of the way
+    out. Interrupting this test is only safe because HEAD is what everything is put back to.
+    """
+    dirty = uncommitted()
+    if not dirty:
+        return
+    names = [line[3:].strip().strip('"') for line in dirty]
+    # -C and absolute paths, so the two commands work from wherever the refusal is read
+    sys.exit('refusing to run: this self-test rewrites these files in place and they already '
+             'differ from HEAD:\n%s\n'
+             'If a previous run was interrupted, put them back with\n'
+             '  git -C %s checkout -- %s\n'
+             'Otherwise commit or stash that work first, for example\n'
+             '  git -C %s stash push -u -- %s\n'
+             'and run "make layout-guard-selftest" again.'
+             % ('\n'.join('  ' + line for line in dirty),
+                shlex.quote(str(ROOT)),
+                ' '.join(shlex.quote(path) for path in REL),
+                shlex.quote(str(ROOT)),
+                ' '.join(shlex.quote(name) for name in names)))
+
+
+# before the marker and the record are looked up, not after: a killed run can leave either of them
+# saying something this build would not, and this refusal is what makes an interruption recoverable
+refuse_if_dirty()
 MARKER, RECORD_NAME, KNOWN_MARKERS = layout_record_of_this_build()
 RECORD = ROOT / 'support/config_upgrade' / RECORD_NAME
-TOUCHED = (GEN, HEADER, RECORD, EMITTED)
-
-FAILS = 1          # sys.exit('message') in the generator, and make reports that as 2
-
-failures = []
-
-
-def record_words(path):
-    """the "word owner" lines of a record, without its generated comment header"""
-    return [line for line in path.read_text(encoding='utf-8').splitlines()
-            if line.strip() and not line.startswith('#')]
 
 
 def run(*args):
@@ -118,21 +174,17 @@ def case_marker_bumped():
 
 def case_parser_addition():
     """a word the table always stored but the parser only just sees: no marker change, no failure"""
-    before_words = record_words(RECORD)
     text = RECORD.read_text(encoding='utf-8')
     rows = [line for line in text.splitlines() if line.strip() and not line.startswith('#')]
-    lost = rows[-1]
-    word, owner = lost.split(None, 1)
-    RECORD.write_text(text.replace(lost + '\n', ''), encoding='utf-8')
+    word, owner = rows[-1].split(None, 1)
+    RECORD.write_text(text.replace(rows[-1] + '\n', ''), encoding='utf-8')
 
     expect('a stored word the record does not know', run(), 0,
            'make layout-record', '%s %s' % (word, owner))
     expect('the recorder writes it down', run('--record-layout'), 0, 'now records')
-    restored = record_words(RECORD) == before_words
-    print('  %s  the recorder restores the recorded words exactly' % ('ok  ' if restored else 'FAIL'))
-    if not restored:
-        failures.append('record restored')
-    expect('the recorder is a no-op afterwards', run('--record-layout'), 0, 'nothing to do')
+    # the recorder only says this when the file it would write is already there, word for word
+    expect('the word is back and the recorder has nothing left to do', run('--record-layout'), 0,
+           'nothing to do')
 
 
 def case_parser_regression():
@@ -164,52 +216,24 @@ CASES = (
 )
 
 
-def uncommitted(paths):
-    """what git reports for these files, so an interrupted run cannot discard uncommitted work"""
-    rel = [str(path.relative_to(ROOT)) for path in paths]
-    try:
-        status = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain', '--', *rel],
-                                capture_output=True, text=True)
-    except OSError as err:
-        sys.exit('cannot ask git whether the files this self-test rewrites are clean (%s). Run it '
-                 'from a git checkout, or commit or stash those files first.' % err)
-    if status.returncode != 0:
-        reason = (status.stderr.strip() or status.stdout.strip())
-        if 'not a git repository' in reason:
-            sys.exit('this is not a git checkout, so the self-test cannot tell whether the files it '
-                     'rewrites carry work that is not committed. Run it in the repository checkout.')
-        sys.exit('git could not report the state of the files this self-test rewrites: %s\n'
-                 'Commit or stash them first.' % reason)
-    return [line for line in status.stdout.splitlines() if line.strip()], rel
-
-
 def main():
-    dirty, rel = uncommitted(TOUCHED)
-    if dirty:
-        names = [line[3:].strip().strip('"') for line in dirty]
-        sys.exit('refusing to run: this self-test rewrites these files in place and they already '
-                 'differ from HEAD, so an interrupted run would discard that work:\n%s\n'
-                 'Commit or stash them first, for example\n'
-                 '  git stash push -u -- %s\n'
-                 'and run "make layout-guard-selftest" again.'
-                 % ('\n'.join('  ' + line for line in dirty), ' '.join(names)))
-    snapshot = {path: path.read_bytes() for path in TOUCHED}
+    # Ctrl-C already unwinds through the finally below; these two would otherwise kill the process
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda *_: sys.exit(1))
     try:
         for title, case in CASES:
             print(title)
             case()
-            for path in TOUCHED:
-                path.write_bytes(snapshot[path])
+            restore()
     finally:
-        for path in TOUCHED:
-            path.write_bytes(snapshot[path])
-    left = [str(path.relative_to(ROOT)) for path in TOUCHED
-            if path.read_bytes() != snapshot[path]]
-    if left:
-        print('  FAIL  these files were not left as they were found: %s' % ', '.join(left))
-        failures.append('tree restored')
+        restore()
     if failures:
         print('\nlayout guard self-test: %d case(s) failed' % len(failures))
+        return 1
+    left = uncommitted()
+    if left:
+        print('\nlayout guard self-test: the tree was left mutated:\n%s'
+              % '\n'.join('  ' + line for line in left))
         return 1
     print('\nlayout guard self-test: all %d cases behave as expected' % len(CASES))
     return 0
