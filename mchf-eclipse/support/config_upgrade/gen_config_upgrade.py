@@ -900,6 +900,44 @@ if clashes:
              % (len(clashes), '\n'.join(lines)))
 
 # -----------------------------------------------------------------------------------------------
+# The filter path memories of the layout before the renumbering sat at
+# EEPROM_FILTER_PATH_MAP_LEGACY_BASE, and UiReadSettingEEPROM_Filter() still reads a configuration of
+# that layout from there. Commit 72933b24 fixed the read side; this is the write side of the rule.
+#
+# The range cannot be reserved as a whole, because it is not free: 21 of its words were handed to
+# ordinary settings when the map was renumbered (manual notch, IQ balance, bass and treble, the SAM
+# PLL, the I2C speeds, the WDSP AGC). Reallocating any of those changes what a stored old image
+# means, and the layout digest below already refuses to accept that without a marker bump and a
+# migration, so they are covered.
+#
+# What is left are the words of the range that no setting owns. Those have to stay free: a radio
+# written by that layout can hold a filter memory at such a word, and because the id of a new row is
+# below the entry count that layout saved, the value is not defaulted - the setting would come up
+# showing a filter index, on migrated radios only, and be overwritten from that menu.
+# -----------------------------------------------------------------------------------------------
+legacy_base = hdr_define('EEPROM_FILTER_PATH_MAP_LEGACY_BASE')
+if legacy_base + filter_words > first_unused:
+    sys.exit('the filter path range of the previous layout, %d..%d, ends above EEPROM_FIRST_UNUSED '
+             '%d, so UiReadSettingEEPROM_Filter() reads words that are not part of the configuration'
+             % (legacy_base, legacy_base + filter_words - 1, first_unused))
+LEGACY_FREE_WORDS = (297, 298, 305, 317)   # unclaimed inside the legacy range, keep them so
+legacy_free = sorted(w for w in range(legacy_base, legacy_base + filter_words) if w not in owners)
+for w in sorted(set(LEGACY_FREE_WORDS) & set(owners)):
+    sys.exit('word %d of the filter path range of the previous layout (%d..%d) is now claimed by %s.\n'
+             'A radio written by that layout can keep a filter memory there, and the new id is below '
+             'the entry count it saved, so the value is not defaulted: the setting would be read back '
+             'as that filter index and overwritten from its own menu. Put the new value above %d '
+             'instead.'
+             % (w, legacy_base, legacy_base + filter_words - 1,
+                '  <->  '.join(sorted({o[0] for o in owners[w]})), legacy_base + filter_words - 1))
+if legacy_free != sorted(LEGACY_FREE_WORDS):
+    sys.exit('the words of the legacy filter path range %d..%d that no setting claims are %s, the '
+             'generator expects %s. A word that became free keeps a filter memory of an old '
+             'configuration and has to stay free as well: update LEGACY_FREE_WORDS here.'
+             % (legacy_base, legacy_base + filter_words - 1, legacy_free,
+                sorted(LEGACY_FREE_WORDS)))
+
+# -----------------------------------------------------------------------------------------------
 # The layout marker in ui_configuration.c is what tells a stored configuration which address map
 # wrote it: UiConfiguration_LayoutMigrationRequired() compares it against CONFIG_LAYOUT_VERSION_MAGIC
 # and migrates when it differs. That only works if the marker changes whenever the meaning of a word
@@ -936,8 +974,9 @@ if layout_digest != BASELINE_LAYOUT_DIGEST:
                 layout_digest, vals['CONFIG_LAYOUT_VERSION_MAGIC'], layout_digest))
 
 print('  EEPROM address map: %d table rows (after expanding %d row macros) and %d multi word '
-      'blocks, %d words claimed, none twice'
-      % (len(map_rows), len(row_macros), len(bulk_blocks), len(owners)))
+      'blocks, %d words claimed, none twice, %d words of the legacy filter range kept free (%s)'
+      % (len(map_rows), len(row_macros), len(bulk_blocks), len(owners),
+         len(LEGACY_FREE_WORDS), ', '.join(str(w) for w in LEGACY_FREE_WORDS)))
 
 # the map is replayed by the generated program as well, so that the order in which the firmware
 # writes it is part of the check and not only the addresses: writing the table first and a block
