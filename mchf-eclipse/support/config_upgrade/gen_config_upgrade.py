@@ -2397,13 +2397,15 @@ A('    }')
 # casts the word to int16_t first, so a negative value survives as long as it is stored that way.
 # -----------------------------------------------------------------------------------------------
 rrow_data = []
+unresolved = []
 for cond, ctype, idname, var, d, lo, hi in map_rows:
     if ctype not in RTYPES:
         sys.exit('%s (&%s) is stored as %s, which the round trip check does not model. Add the type '
                  'to RTYPES in gen_config_upgrade.py.' % (idname, var, ctype))
     dv, mn, mx = resolve(d), resolve(lo), resolve(hi)
     if None in (dv, mn, mx):
-        continue                     # a range built from macros the parser cannot expand
+        unresolved.append('%s (&%s)' % (idname, var))
+        continue
     rtype, words = RTYPES[ctype]
     low, high = RTYPE_LIMITS[rtype]
     # a stored value the firmware has to reject. A row that spans the whole width of its type has
@@ -2413,9 +2415,15 @@ for cond, ctype, idname, var, d, lo, hi in map_rows:
     else:
         outside = mx + 1 if mx < high else (mn - 1 if mn > low else None)
     rrow_data.append((idname, vals[idname], rtype, words, dv, mn, mx, outside))
-if len(rrow_data) < 100:
-    sys.exit('only %d rows of the configuration table have a resolved stored range, the round trip '
-             'check would cover almost nothing' % len(rrow_data))
+# Every row has to be covered, not most of them. The only rows that can drop out here are the ones
+# whose stored range is built from a macro resolve() does not expand, and a dropped row is a setting
+# that nothing round trips. A count floor would let a table that grows hide the losses.
+if unresolved:
+    sys.exit('%d of the %d rows of the configuration table have a stored range this parser cannot '
+             'expand, so the round trip check would skip %s. Teach resolve() the macro or make the '
+             'range a plain constant: a row the check skips is a setting nothing checks.'
+             % (len(unresolved), len(map_rows),
+                ', '.join(unresolved[:4]) + (', ...' if len(unresolved) > 4 else '')))
 
 A('    return rc;')
 A('}')
@@ -2442,8 +2450,6 @@ for idname, eid, rtype, words, dv, mn, mx, outside in rrow_data:
          'R_NO_OUTSIDE' if outside is None else str(outside)))
 A('};')
 A('static const unsigned rrow_count = sizeof(rrows)/sizeof(rrows[0]);')
-A('#define RROW_SKIPPED %du   /* rows whose stored range uses macros this harness cannot expand */'
-  % (len(map_rows) - len(rrow_data)))
 A('')
 AL(r"""
 static void blank_image(image_t* img)
@@ -2666,9 +2672,8 @@ static int check_row_roundtrip(void)
     if (rc == 0)
     {
         printf("round trip: %u probes over %u stored rows, every value comes back the way it was "
-               "written, values outside the range fall back to the default (%u rows are not covered "
-               "because their range uses macros this harness cannot expand)\n\n",
-               probes, rrow_count, RROW_SKIPPED);
+               "written, and a value outside the range falls back to the default\n\n",
+               probes, rrow_count);
     }
     return rc;
 }

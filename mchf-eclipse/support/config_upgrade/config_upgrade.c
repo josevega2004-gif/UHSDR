@@ -1410,7 +1410,6 @@ static const rrow_t rrows[] =
     { "EEPROM_BAND_REGION", 374u, R_UINT8, 1u, 0, 0, 127, 128 },
 };
 static const unsigned rrow_count = sizeof(rrows)/sizeof(rrows[0]);
-#define RROW_SKIPPED 0u   /* rows whose stored range uses macros this harness cannot expand */
 
 static void blank_image(image_t* img)
 {
@@ -1632,9 +1631,8 @@ static int check_row_roundtrip(void)
     if (rc == 0)
     {
         printf("round trip: %u probes over %u stored rows, every value comes back the way it was "
-               "written, values outside the range fall back to the default (%u rows are not covered "
-               "because their range uses macros this harness cannot expand)\n\n",
-               probes, rrow_count, RROW_SKIPPED);
+               "written, and a value outside the range falls back to the default\n\n",
+               probes, rrow_count);
     }
     return rc;
 }
