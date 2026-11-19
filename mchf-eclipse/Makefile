@@ -412,6 +412,13 @@ layout-record:
 	# asks for this command); it refuses when a word moved, that needs a new marker
 	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/gen_config_upgrade.py --record-layout
 
+.PHONY: layout-guard-selftest
+layout-guard-selftest:
+	# run the layout guard through the changes it exists to catch: a value moving to another word,
+	# a marker bumped without a map change, a parser that learns a stored word, one that loses a
+	# word, and a record that does not parse. It mutates the tree and leaves it as it found it.
+	@$(HOSTPYTHON) $(ROOTLOC)/support/config_upgrade/layout_guard_selftest.py
+
 .PHONY: config-upgrade-check
 config-upgrade-check:  
 	# check which values a configuration stored by an older build receives as defaults, see support/config_upgrade

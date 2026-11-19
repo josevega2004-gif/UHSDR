@@ -4,7 +4,7 @@
 # opens headers by computed name, so a hand kept include list is always a subset of the truth. A
 # previous version of this filter omitted ui_menu_structure.c and audio_filter.h, which meant that
 # editing the menu table, the very place a duplicate or missing EEPROM id shows up, ran neither
-# check. Both jobs together take about four seconds, so the filter buys nothing either.
+# check. Both jobs together take about fifteen seconds, so the filter buys nothing either.
 name: Host checks, configuration storage and digital modes
 
 on:
@@ -28,6 +28,13 @@ jobs:
             echo "::error::config_upgrade.c does not match the firmware sources, run make config-upgrade-check and commit the regenerated file"
             exit 1
           }
+
+      # The guard is only worth its lines if it still fails on the changes it exists for: a value
+      # moving to another word, a marker bumped without a map change, a parser that gains or loses a
+      # stored word, and a record that does not parse. It mutates the tree and puts it back.
+      - name: Run the layout guard through the changes it exists to catch
+        working-directory: mchf-eclipse
+        run: make layout-guard-selftest
 
   # The RTTY modem of drivers/audio/rtty.c is compiled for the host and looped back on itself, and
   # a synthetic HF weather fax broadcast is decoded by the reference demodulator. Thresholds, not
