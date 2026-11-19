@@ -570,6 +570,118 @@ static int check_save_order(void)
     return rc;
 }
 
+/* ---------------------------------------------------------------------------------------------
+   the filter path memories: which base a stored configuration is read from.
+
+   UiReadSettingEEPROM_Filter() decides it, and the case that matters is a configuration of the
+   previous layout: words 391..415 then held other ids, so the "has this block ever been written"
+   probe finds data in every old configuration and cannot be asked first.
+*/
+#define FILTER_MAP_BASE   391u
+#define FILTER_MAP_WORDS  25u
+#define FILTER_MAP_LEGACY 297u
+
+/* mirror of UiReadSettingEEPROM_Filter(): the previous layout is handled before the probe, a
+   factory reset reads the current block with defaults, otherwise the probe decides */
+static uint16_t filter_map_base(const image_t* img, bool migrate, bool load_default)
+{
+    if (migrate)
+    {
+        return FILTER_MAP_LEGACY;
+    }
+    if (load_default)
+    {
+        return FILTER_MAP_BASE;
+    }
+    for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+    {
+        if (img->present[FILTER_MAP_BASE + k] && img->value[FILTER_MAP_BASE + k] != 0xFFFF)
+        {
+            return FILTER_MAP_BASE;
+        }
+    }
+    return FILTER_MAP_LEGACY;
+}
+
+static int check_filter_map_migration(void)
+{
+    image_t previous, moved, current;
+    int rc = 0;
+
+    /* a configuration of the previous layout: its filter memories sat at the legacy base, and
+       the words of the current block held the ids that now live at 334..358, so they are written
+       there too - which is exactly why the probe cannot tell the two layouts apart */
+    memset(&previous, 0, sizeof(previous));
+    for (unsigned i = 0; i < sizeof(previous.value)/sizeof(previous.value[0]); i++)
+    {
+        previous.value[i] = 0xFFFF;
+    }
+    for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+    {
+        previous.present[FILTER_MAP_LEGACY + k] = true;
+        previous.value[FILTER_MAP_LEGACY + k] = (uint16_t)(1 + k);   /* the operator memories */
+        previous.present[FILTER_MAP_BASE + k] = true;
+        previous.value[FILTER_MAP_BASE + k] = (uint16_t)(40 + k);    /* another setting of that layout */
+    }
+
+    /* the layout just before this one: block never written, so the probe has to say so */
+    moved = previous;
+    for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+    {
+        erase(&moved, (uint16_t)(FILTER_MAP_BASE + k));
+    }
+
+    /* the current layout: the block holds the operator memories */
+    current = previous;
+    for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+    {
+        erase(&current, (uint16_t)(FILTER_MAP_LEGACY + k));
+        current.value[FILTER_MAP_BASE + k] = (uint16_t)(60 + k);
+    }
+
+    const struct { const char* what; const image_t* img; bool migrate; bool load_default; uint16_t want; } cases[] =
+    {
+        { "configuration of the previous layout",    &previous, true,  false, FILTER_MAP_LEGACY },
+        { "layout before this one, block unwritten", &moved,    false, false, FILTER_MAP_LEGACY },
+        { "current layout, block written",           &current,  false, false, FILTER_MAP_BASE },
+        { "factory reset",                           &current,  false, true,  FILTER_MAP_BASE },
+    };
+
+    for (unsigned c = 0; c < sizeof(cases)/sizeof(cases[0]); c++)
+    {
+        const uint16_t got = filter_map_base(cases[c].img, cases[c].migrate, cases[c].load_default);
+        if (got != cases[c].want)
+        {
+            printf("CHECK FAILED: %s reads the filter path memories from %u, expected %u\n",
+                   cases[c].what, got, cases[c].want);
+            rc = 1;
+        }
+    }
+
+    /* and the previous layout has to deliver the operator memories, not the values of the ids
+       that took those words later */
+    const uint16_t base = filter_map_base(&previous, true, false);
+    for (unsigned k = 0; k < FILTER_MAP_WORDS; k++)
+    {
+        if (previous.value[base + k] != (uint16_t)(1 + k))
+        {
+            printf("CHECK FAILED: previous layout filter memory %u reads %u from word %u, expected %u\n",
+                   k, previous.value[base + k], base + k, 1 + k);
+            rc = 1;
+            break;
+        }
+    }
+
+    if (rc == 0)
+    {
+        printf("filter path memories: previous layout from %u, unwritten block from %u, current from %u, "
+               "factory reset from %u\n\n",
+               filter_map_base(&previous, true, false), filter_map_base(&moved, false, false),
+               filter_map_base(&current, false, false), filter_map_base(&current, false, true));
+    }
+    return rc;
+}
+
 int main(void)
 {
     image_t img;
@@ -633,6 +745,7 @@ int main(void)
     rc |= check_agc_roundtrip();
     rc |= check_upgrade_persistence();
     rc |= check_save_order();
+    rc |= check_filter_map_migration();
     if (entry_count == 0)
     {
         printf("CHECK FAILED: no entries parsed, the generator matched nothing\n");

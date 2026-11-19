@@ -402,6 +402,36 @@ static rtty_lpf_config_t rtty_lp_12khz_50 =
 
 static rtty_mode_config_t  rtty_mode_current_config;
 
+/**
+ * Receive space filter of a shift
+ *
+ * Kept as its own function so that the host bench can measure exactly the filter the demodulator
+ * uses, instead of a copy of this mapping (support/digi builds with -DHOST_BENCH).
+ *
+ * @param shift shift in Hz as stored, unsupported values decode as 170
+ * @return the filter the demodulator runs on the space tone
+ */
+static rtty_bpf_config_t* Rtty_SpaceFilterForShift(uint16_t shift)
+{
+	switch (shift)
+	{
+	case 85:
+		return &rtty_bp_12khz_1000;
+	case 200:
+		return &rtty_bp_12khz_1115;
+	case 425:
+		return &rtty_bp_12khz_1340;
+	case 450:
+		return &rtty_bp_12khz_1365; // this is space or '0'
+	case 850:
+		return &rtty_bp_12khz_1765; // this is space or '0'
+	case 170:
+	default:
+		// all unsupported shifts are mapped to 170
+		return &rtty_bp_12khz_1085; // this is space or '0'
+	}
+}
+
 
 void Rtty_Modem_Init(uint32_t output_sample_rate)
 {
@@ -423,34 +453,76 @@ void Rtty_Modem_Init(uint32_t output_sample_rate)
 	rttyDecoderData.lpfConfig = &rtty_lp_12khz_50;
 
 	// now we handled the specifics
-	switch (rttyDecoderData.config_p->shift)
-	{
-	case 85:
-		rttyDecoderData.bpfSpaceConfig = &rtty_bp_12khz_1000;
-		break;
-	case 200:
-		rttyDecoderData.bpfSpaceConfig = &rtty_bp_12khz_1115;
-		break;
-	case 425:
-		rttyDecoderData.bpfSpaceConfig = &rtty_bp_12khz_1340;
-		break;
-	case 450:
-		rttyDecoderData.bpfSpaceConfig = &rtty_bp_12khz_1365; // this is space or '0'
-		break;
-	case 850:
-		rttyDecoderData.bpfSpaceConfig = &rtty_bp_12khz_1765; // this is space or '0'
-		break;
-	case 170:
-	default:
-		// all unsupported shifts are mapped to 170
-		rttyDecoderData.bpfSpaceConfig = &rtty_bp_12khz_1085; // this is space or '0'
-	}
+	rttyDecoderData.bpfSpaceConfig = Rtty_SpaceFilterForShift(rttyDecoderData.config_p->shift);
 
 	// configure DDS for transmission
 	softdds_setFreqDDS(&rttyDecoderData.tx_dds[0], rttyDecoderData.bpfSpaceConfig->freq, output_sample_rate, 0);
 	softdds_setFreqDDS(&rttyDecoderData.tx_dds[1], rttyDecoderData.bpfMarkConfig->freq, output_sample_rate, 0);
 
 }
+
+#ifdef HOST_BENCH
+/* ---------------------------------------------------------------------------------------------
+   Host bench hooks. support/digi builds this file with -DHOST_BENCH, the firmware never defines
+   it. They expose the receive filter bank so that the bench can check every filter against the
+   frequency its own label claims - the check that was missing when rtty_bp_12khz_1765 turned out
+   to be an 1865 Hz design. The loopback decodes through the mark channel, so it did not notice.
+* ------------------------------------------------------------------------------------------- */
+
+unsigned Rtty_BenchFilterCount(void)
+{
+	return 1 + RTTY_SHIFT_NUM;              // the mark filter plus one space filter per shift
+}
+
+uint16_t Rtty_BenchFilterLabel(unsigned idx)
+{
+	if (idx == 0)
+	{
+		return rtty_bp_12khz_915.freq;
+	}
+	return Rtty_SpaceFilterForShift(rtty_shifts[idx - 1].value)->freq;
+}
+
+/**
+ * Magnitude of one receive filter at a frequency, measured by running its own recursion
+ * @param idx 0 = mark, 1..RTTY_SHIFT_NUM = space filter of rtty_shifts[idx - 1]
+ * @param hz frequency in the 12 kHz audio domain
+ * @return response of the filter to a unit amplitude sine at hz, proportional to |H(hz)|
+ */
+float Rtty_BenchFilterMagnitude(unsigned idx, float hz)
+{
+	const rtty_bpf_config_t* cfg = (idx == 0) ? &rtty_bp_12khz_915
+	                                          : Rtty_SpaceFilterForShift(rtty_shifts[idx - 1].value);
+	rtty_bpf_data_t data = { { 0 }, { 0 } };
+	const unsigned settle = 600, measure = 2000;
+	const double step = 6.283185307179586 * (double)hz / 12000.0;
+	double phase = 0.0, acc = 0.0, wsum = 0.0;
+
+	for (unsigned n = 0; n < settle + measure; n++)
+	{
+		// a wrapping accumulator: computing the phase as hz * n loses every digit of a float32 by
+		// the time n reaches a few thousand, and the bench then measures noise instead of the filter
+		const float32_t s = (float32_t)sin(phase);
+		phase += step;
+		if (phase > 6.283185307179586)
+		{
+			phase -= 6.283185307179586;
+		}
+		const float32_t y = RttyDecoder_bandPassFreq(s, cfg, &data);
+		if (n >= settle)
+		{
+			// Hann taper: a plain RMS over the segment ripples with the fractional number of cycles
+			// in it, which moved the measured peak by up to 5 Hz. The taper makes the estimate
+			// smooth in hz, which is all the peak search needs.
+			const double k = (double)(n - settle);
+			const double w = 0.5 - 0.5 * cos(6.283185307179586 * k / (double)(measure - 1));
+			acc += w * (double)y * (double)y;
+			wsum += w;
+		}
+	}
+	return (float)sqrt(acc / wsum);
+}
+#endif
 
 float32_t decayavg(float32_t average, float32_t input, int weight)
 { // adapted from https://github.com/ukhas/dl-fldigi/blob/master/src/include/misc.h

@@ -376,6 +376,21 @@ static void check(int ok, const char* what)
     if (!ok) failures++;
 }
 
+// one -3 dB crossing of a receive filter, walking outwards from a point inside its passband. The
+// top of these filters is flat to about 1e-5, so float32 arithmetic dithers the peak itself by a
+// few Hz; the half power edges are steep and locate the centre to a fraction of a Hz.
+static float filter_half_power_edge(unsigned idx, float from, float step, float half)
+{
+    float f = from;
+    for (int k = 0; k < 400 && Rtty_BenchFilterMagnitude(idx, f + step) > half; k++)
+    {
+        f += step;
+    }
+    const float a = Rtty_BenchFilterMagnitude(idx, f);          // above half power
+    const float b = Rtty_BenchFilterMagnitude(idx, f + step);   // at or below it
+    return (a > b) ? f + step * (a - half) / (a - b) : f;
+}
+
 static int selftest(void)
 {
     // 1. the oscillator this bench invented (softdds_host.c) must produce the tone the modem asks
@@ -481,6 +496,58 @@ static int selftest(void)
         check(Bench_WavWrite("rtty_roundtrip.wav", rec, n, 12000), "the bench can write a 12 kHz RTTY recording");
         float cer_file = decode_wav("rtty_roundtrip.wav", msg, got, sizeof(got), 170, 45);
         check(cer_file == 0.0f, "a recorded WAV comes back through the file input with zero errors");
+    }
+    {
+        // the receive filter bank has to be tuned to the frequency its own label claims and the
+        // modulator sends. rtty_bp_12khz_1765 was an 1865 Hz design and the loopback never noticed,
+        // because the ATC decides from the mark channel on a clean two-tone signal; this measures
+        // each filter through its own recursion instead of decoding with it.
+        const unsigned n = Rtty_BenchFilterCount();
+        const float mark_hz = (float)Rtty_BenchFilterLabel(0);
+        check(n == 1 + RTTY_SHIFT_NUM, "the filter bank holds a mark filter plus one space filter per shift");
+        for (unsigned i = 0; i < n; i++)
+        {
+            const float label = (float)Rtty_BenchFilterLabel(i);
+            float peak = 0.0f, peak_hz = label;
+            for (float hz = label - 150.0f; hz <= label + 150.0f; hz += 1.0f)
+            {
+                const float m = Rtty_BenchFilterMagnitude(i, hz);
+                if (m > peak) { peak = m; peak_hz = hz; }
+            }
+            const float half = peak * 0.70710678f;
+            const float lo = filter_half_power_edge(i, peak_hz, -1.0f, half);
+            const float hi = filter_half_power_edge(i, peak_hz, +1.0f, half);
+            const float centre = (lo + hi) * 0.5f;
+            char what[176];
+            if (i == 0)
+            {
+                snprintf(what, sizeof(what),
+                         "mark filter: -3 dB %.0f..%.0f Hz, centre %.0f Hz, label %.0f Hz",
+                         lo, hi, centre, label);
+            }
+            else
+            {
+                snprintf(what, sizeof(what),
+                         "%u Hz shift space filter: -3 dB %.0f..%.0f Hz, centre %.0f Hz, label %.0f Hz",
+                         (unsigned)rtty_shifts[i - 1].value, lo, hi, centre, label);
+            }
+            // these biquads are designed so the middle of the half power band is the labelled
+            // frequency to within 0.1 Hz; the filter this check exists for was 100 Hz away
+            check(fabsf(centre - label) <= 2.0f, what);
+
+            // the label is not independent of the filter: it is the .freq the modulator tunes its
+            // DDS to, so comparing the two only ties the receiver to the transmitter. A space
+            // filter has to be the mark plus the shift, which is what catches a label and a design
+            // that were moved together.
+            if (i != 0)
+            {
+                const float shift = (float)rtty_shifts[i - 1].value;
+                snprintf(what, sizeof(what),
+                         "%u Hz shift space filter: label %.0f Hz is the %.0f Hz mark plus the shift",
+                         (unsigned)shift, label, mark_hz);
+                check(fabsf(label - (mark_hz + shift)) <= 0.5f, what);
+            }
+        }
     }
     printf("%s\n", failures ? "SELF CHECKS FAILED" : "all self checks passed");
     return failures ? 1 : 0;
