@@ -157,6 +157,38 @@ holding the bits on the space filter. That is a filter rejection limit, not a le
 what makes it the interesting failure, since the AGC cannot help with it. It reproduces without a
 radio or an antenna.
 
+## Symbol clock, `clk` rows
+
+The receiver's bit clock is not free running: it is a DPLL that nudges itself by **1/32 of a bit**
+on every transition (`DPLLBitPhase +/- oneBitSampleCount/32`), so a transmitter whose clock is off
+is followed rather than fought - up to the point where the phase runs away from it.
+`Rtty_BenchTxBitScale()` is the hook that asks how far: it scales the modulator's bit length, which
+is `oneBitSampleCount * 4` samples of its 48 kHz output, and leaves the receiver's own bit clock
+where it was. Measured at 20 dB SNR, 170 Hz shift, in 0.5 % steps around the edges:
+
+| TX symbol clock | CER %, short (48 char) | CER %, `rtty-long` (392 char) |
+|---|---|---|
+| -7, -6, -5, -4, -3, +3, +4, +5, +6, +7, +7.5, **+8** % | 0.0 (0/48) at every one | 0.0 (0/392) at every one |
+| **+8.5 %** | **6.2** (3/48) | **8.9** (35/392) |
+| +8.75 %, +9 % | 18.8, 14.6 | 17.3, 23.5 |
+| **-7.5 %** | **20.8** (10/48) | **15.8** (62/392) |
+| -8, -8.5, -9 % | 64.6 to 68.8 | 65.1 to 69.4 |
+| 45.45 Bd decoded as 50 Bd (-9.1 %) | **70.8** (34/48) | **69.4** (272/392) |
+
+The window is about **+8 % / -7 %**, and it is not symmetric: the decoder follows a transmitter
+that is fast up to +8 % and a slow one only to -7 %. The failure either way is a cliff rather than a slope -
++8 % is exact and +8.5 % already costs characters - and past it the text collapses to a handful of
+surviving characters. Why the DPLL tolerates one direction more than the other is measured but not
+explained here.
+
+Four rows pin that edge instead of sampling the tolerance evenly: `clk +8 %` and `clk -7 %` inside,
+exact in both matrices, and `clk +8.5 %` and `clk -7.5 %` at it, where the bench asserts the failure
+with a floor rather than a ceiling (minimum 3 % and 10 %) so a demodulator change cannot quietly
+widen the window. The wrong-speed row is the far side of the same curve - a 45.45 Bd station handed
+to the radio as 50 Bd sends bits 10 % longer than the clock expects - and it is pinned the same way,
+with a minimum of 50 %. A change that made either of those decode would be a different demodulator,
+not a better one.
+
 ## Tuning error, and what our own reference is worth
 
 The demodulator has **no automatic frequency control**. `bpfMarkConfig` is always the 915 Hz

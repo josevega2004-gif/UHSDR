@@ -466,6 +466,10 @@ void Rtty_Modem_Init(uint32_t output_sample_rate)
 
 }
 
+// TX symbol clock, as a multiplier on the bit length: 1.0 is the rate the receiver expects, 0.99 is
+// a transmitter one percent fast. Only the host bench changes it; the radio build leaves it at 1.0.
+static float rtty_tx_bit_scale = 1.0f;
+
 #ifdef HOST_BENCH
 /* ---------------------------------------------------------------------------------------------
    Host bench hooks. support/digi builds this file with -DHOST_BENCH, the firmware never defines
@@ -558,6 +562,21 @@ void Rtty_BenchOffsetTx(float hz, uint32_t output_sample_rate)
 {
 	softdds_setFreqDDS(&rttyDecoderData.tx_dds[0], rttyDecoderData.bpfSpaceConfig->freq + hz, output_sample_rate, 0);
 	softdds_setFreqDDS(&rttyDecoderData.tx_dds[1], rttyDecoderData.bpfMarkConfig->freq + hz, output_sample_rate, 0);
+}
+
+/**
+ * Stretch or shrink the transmitter's bits, which is what a symbol clock that is off does.
+ *
+ * The modulator holds a bit for oneBitSampleCount * 4 samples of its 48 kHz output, so a scale
+ * below 1 sends shorter bits, i.e. a faster transmitter than the receiver has been told to expect.
+ * A receiver set to 50 Bd hearing a 45.45 Bd station is the same knob with scale 45.45/50: the
+ * receiver's decimation and DPLL stay on 50 Bd and the bits arrive 10 % long.
+ *
+ * @param scale bit length multiplier, 1.0 = the receiver's own rate
+ */
+void Rtty_BenchTxBitScale(float scale)
+{
+	rtty_tx_bit_scale = scale;
 }
 #endif
 
@@ -924,7 +943,7 @@ int16_t Rtty_Modulator_GenSample()
 {
 	if (rtty_tx.char_bit_samples == 0)
 	{
-		rtty_tx.char_bit_samples = rttyDecoderData.oneBitSampleCount * 4;
+		rtty_tx.char_bit_samples = (uint32_t) roundf((float) (rttyDecoderData.oneBitSampleCount * 4) * rtty_tx_bit_scale);
 
 		rtty_tx.char_bits >>= 1;
 		if (rtty_tx.char_bit_idx == 0)

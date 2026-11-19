@@ -90,6 +90,7 @@ uint16_t Rtty_BenchFilterLabel(unsigned idx);
 float    Rtty_BenchFilterMagnitude(unsigned idx, float hz);
 void     Rtty_BenchResetDecoder(void);
 void     Rtty_BenchOffsetTx(float hz, uint32_t output_sample_rate);
+void     Rtty_BenchTxBitScale(float scale);
 #endif
 
 #endif

@@ -100,6 +100,11 @@ typedef struct
                              // 14 Hz on 20 m, 28 Hz on 10 m and 50 Hz on 6 m
     float       in_db;       // how loud the station arrives, relative to the modulator's own level;
                              // the AGC is what turns this knob into no change at all
+    float       tx_clock;    // the transmitter's symbol clock error in percent, positive = faster
+                             // than the receiver expects, so the bits arrive short
+    float       min_cer;     // a floor for the cases that have to keep failing: a wrong speed
+                             // setting decodes badly, and a change that made it decode would be
+                             // a different modem, not a better one
 } rtty_case_t;
 
 // The demodulator emits one or two characters of junk while it locks on, which is a property of
@@ -232,6 +237,9 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
     Rtty_BenchResetDecoder();
     Rtty_Modem_Init((uint32_t) TXRATE);
     Rtty_BenchOffsetTx(tune, (uint32_t) TXRATE);
+    // the transmitter's symbol clock against the receiver's: a station 1 % fast sends 1 % shorter
+    // bits, and the hook only touches how long the modulator holds a bit
+    Rtty_BenchTxBitScale(1.0f / (1.0f + c->tx_clock / 100.0f));
     char feed[640];
     snprintf(feed, sizeof(feed), "%s", msg);
     strncat(feed, "\004", sizeof(feed) - strlen(feed) - 1);
@@ -357,6 +365,22 @@ static int rtty_table(const char* msg, bool long_mode)
         { .label = "dwd 450 50bd", .shift = 450, .snr_db = 20.0f, .baud = 50, .max_cer = 5.0f },
         { .label = "dwd 450 10bd", .shift = 450, .snr_db = 10.0f, .baud = 50, .max_cer = 5.0f },
         { .label = "ddh47 85 50bd", .shift = 85, .snr_db = 20.0f, .baud = 50, .max_cer = 5.0f },
+        // the transmitter's symbol clock, which is not the receiver's. The demodulator's bit clock
+        // is a DPLL that nudges itself by 1/32 of a bit on every transition, so it follows a clock
+        // error until the phase runs away from it. Probed in 0.5 % steps, the edges are +8 % and
+        // -7 %: clean up to there in both matrices, and gone at +8.5 % (6.2 % short, 8.9 % long)
+        // and -7.5 % (20.8 % short, 15.8 % long). The asymmetry is measured, not explained. The two
+        // inside rows pin the tolerance, the two edge rows pin the failure from above zero so a
+        // demodulator change cannot quietly widen the window, and the last row is not drift but an
+        // operator setting: 45.45 Bd decoded with the radio set to 50 Bd, the same hook at 45.45/50.
+        { .label = "clk +8 %",     .shift = 170, .snr_db = 20.0f, .tx_clock = 8.0f,  .max_cer = 5.0f },
+        { .label = "clk +8.5 %",   .shift = 170, .snr_db = 20.0f, .tx_clock = 8.5f,
+          .max_cer = 100.0f, .min_cer = 3.0f },
+        { .label = "clk -7 %",     .shift = 170, .snr_db = 20.0f, .tx_clock = -7.0f, .max_cer = 5.0f },
+        { .label = "clk -7.5 %",   .shift = 170, .snr_db = 20.0f, .tx_clock = -7.5f,
+          .max_cer = 100.0f, .min_cer = 10.0f },
+        { .label = "45.45 as 50",  .shift = 170, .snr_db = 20.0f, .baud = 50, .tx_clock = -9.09f,
+          .max_cer = 100.0f, .min_cer = 50.0f },
         // a reference error, not a shift error: both tones slide by the same number of Hz, which
         // is 14 Hz per ppm on 20 m, 28 on 10 m and 50 on 6 m. The modem has no AFC, so these rows
         // say how much of it the fixed filters survive - measured, 170 Hz shift with equal tones
@@ -402,6 +426,13 @@ static int rtty_table(const char* msg, bool long_mode)
         {
             printf("FAIL  %-16s character error rate %.1f%% is above the %.1f%% this case allows\n",
                    cases[i].label, cer, cases[i].max_cer);
+            failures++;
+        }
+        if (cer < cases[i].min_cer)
+        {
+            printf("FAIL  %-16s character error rate %.1f%% is below the %.1f%% this case has to stay\n"
+                   "      above: a wrong speed setting is supposed to cost the text\n",
+                   cases[i].label, cer, cases[i].min_cer);
             failures++;
         }
     }
@@ -951,6 +982,7 @@ static int selftest(void)
         snprintf(feed, sizeof(feed), "%s", msg);
         strncat(feed, "\004", sizeof(feed) - strlen(feed) - 1);
         Bench_TxFeed(feed);
+        Rtty_BenchTxBitScale(1.0f);   // this recording is the modem's own clock, not a case's
         Rtty_Modulator_StartTX();
         for (size_t k = 0; k < n; k++)
         {
