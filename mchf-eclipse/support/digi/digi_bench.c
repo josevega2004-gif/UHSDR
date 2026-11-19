@@ -100,6 +100,8 @@ typedef struct
                              // 14 Hz on 20 m, 28 Hz on 10 m and 50 Hz on 6 m
     float       in_db;       // how loud the station arrives, relative to the modulator's own level;
                              // the AGC is what turns this knob into no change at all
+    uint16_t    rx_shift;    // the shift setting, when it is not the signal's own (0 = same): this
+                             // is how a case grades a wrong setting without moving the signal too
     float       tx_clock;    // the transmitter's symbol clock error in percent, positive = faster
                              // than the receiver expects, so the bits arrive short
     float       min_cer;     // a floor for the cases that have to keep failing: a wrong speed
@@ -227,9 +229,12 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
 
     rtty_ctrl_config.speed_idx = c->baud == 50 ? RTTY_SPEED_50 : RTTY_SPEED_45;
 
+    // the receiver's shift setting: its own, unless the case is grading someone else's signal
+    const uint16_t sel_shift = c->rx_shift ? c->rx_shift : c->shift;
+
     for (int i = 0; i < RTTY_SHIFT_NUM; i++)
     {
-        if (rtty_shifts[i].value == (float32_t) c->shift) rtty_ctrl_config.shift_idx = (rtty_shift_t) i;
+        if (rtty_shifts[i].value == (float32_t) sel_shift) rtty_ctrl_config.shift_idx = (rtty_shift_t) i;
     }
 
     // TX: the firmware modulator produces the waveform, EOT ends it. The receiver starts from a
@@ -237,6 +242,10 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
     Rtty_BenchResetDecoder();
     Rtty_Modem_Init((uint32_t) TXRATE);
     Rtty_BenchOffsetTx(tune, (uint32_t) TXRATE);
+    // the signal keeps the shift it was sent with; without this the transmitter would follow the
+    // receiver's setting, the loopback would decode its own mistake, and the case could not fail
+    if (c->rx_shift && c->rx_shift != c->shift)
+        Rtty_BenchTxSpaceTone(915.0f + (float) c->shift + tune, (uint32_t) TXRATE);
     // the transmitter's symbol clock against the receiver's: a station 1 % fast sends 1 % shorter
     // bits, and the hook only touches how long the modulator holds a bit
     Rtty_BenchTxBitScale(1.0f / (1.0f + c->tx_clock / 100.0f));
@@ -328,12 +337,13 @@ static int rtty_table(const char* msg, bool long_mode)
     {
         // the space filter under a strong adjacent carrier: an unmodulated carrier 300 Hz above the
         // space tone at +20 dB over the wanted signal. The carrier alone grades nothing - with equal
-        // tones this decodes at 0.0 % even with the 850 Hz space filter, because the mark channel
-        // decides - so the row also sends the mark tone 30 dB down, the condition that puts the bits
-        // on the space filter. Together they fail where the space filter's rejection does: 0.0 % with
-        // the 170 Hz filter, 100 % with the 850 Hz one, and 18.8 % with the carrier raised to +30 dB.
-        // That level is the dynamic range the README calls the weak point, and it moves with how well
-        // the space filter rejects a carrier 300 Hz outside its passband.
+        // tones this decodes at 0.0 % (0/48 and 0/392) at 170 Hz and at 850 Hz and at +30 dB too,
+        // because the mark channel decides - so the row also sends the mark tone 30 dB down, the
+        // condition that puts the bits on the space filter. Together they fail where the space
+        // filter's rejection does: at the matching 170 Hz filter 0.0 % at +20 dB and 31.2 % (15/48,
+        // 11.7 % long) with the carrier raised to +30 dB, and that level is the dynamic range the
+        // README calls the weak point. At 850 Hz the setting has already cost the text - 97.9 %
+        // (47/48) at either carrier level - so the carrier adds nothing there.
         { .label = "wmark car300", .shift = 170, .snr_db = 20.0f, .mark_db = 30.0f,
           .adj_hz = 300.0f, .adj_db = 20.0f, .max_cer = 5.0f },
         { .label = "clean 170",    .shift = 170, .snr_db = 100.0f, .max_cer = 5.0f },
@@ -355,11 +365,11 @@ static int rtty_table(const char* msg, bool long_mode)
         // The space filter is only graded by a case where the mark channel cannot decide. Weakening
         // the space tone does not do it: the 915 Hz filter still reads mark at 0 dB and space 22.9 dB
         // down (the README figure for this shift), so the mark channel keeps the right polarity and
-        // the row decodes with any space filter at all - measured, 0.0 % with the 850 Hz filter too.
-        // Weakening the MARK tone past that 22.9 dB inverts the mark channel, which then reads the
-        // space tone 22.9 dB down as louder than the mark tone 30 dB down, and the decision has to
-        // come from the space filter: this row decodes at 0.0 % with the 170 Hz filter and at 100 %
-        // with the 850 Hz one. It is the only row in the table that grades the shift.
+        // the space filter is not what decides. Weakening the MARK tone past that 22.9 dB inverts the
+        // mark channel, which then reads the space tone 22.9 dB down as louder than the mark tone
+        // 30 dB down, and the decision has to come from the space filter: this row decodes at 0.0 %
+        // with the 170 Hz filter and at 97.9 % (47/48) with the 850 Hz one. It is the only row in the
+        // table that grades the shift.
         { .label = "weak mark 170", .shift = 170, .snr_db = 20.0f, .mark_db = 30.0f,
           .max_cer = 5.0f },
         { .label = "dwd 450 50bd", .shift = 450, .snr_db = 20.0f, .baud = 50, .max_cer = 5.0f },
@@ -401,6 +411,13 @@ static int rtty_table(const char* msg, bool long_mode)
         // 0.0 % (0/48) and 0.0 % (0/392). The demodulator itself would not decode a station 30 dB
         // down - see the note in README.md on how the AGC has to be fed in ADC counts for this to
         // mean anything - so this is the AGC doing its job, not the modem being level proof.
+        // a receiver set to the wrong shift while the signal stays where it belongs. This is the
+        // row that grades the setting: measured 0.0 % with the right space filter and 97.9 %
+        // (47/48) here. The mark tone 30 dB down is what makes it work - a clean two-tone signal
+        // decodes at 0.0 % with every setting, because the mark channel carries the bits whatever
+        // the space filter does, and that is measured rather than assumed.
+        { .label = "shift 170/850", .shift = 170, .snr_db = 20.0f, .mark_db = 30.0f,
+          .rx_shift = 850, .max_cer = 100.0f, .min_cer = 50.0f },
         { .label = "level -30",    .shift = 170, .snr_db = 20.0f, .in_db = -30.0f, .max_cer = 5.0f },
         { .label = "level -10",    .shift = 170, .snr_db = 20.0f, .in_db = -10.0f, .max_cer = 5.0f },
         { .label = "level +0",     .shift = 170, .snr_db = 20.0f, .max_cer = 5.0f },
@@ -436,18 +453,65 @@ static int rtty_table(const char* msg, bool long_mode)
             failures++;
         }
     }
-    printf("\nnote: these loopback CER figures cannot grade the selected shift, and with the radio's\n"
-           "      AGC in the loop they no longer even try. The two rows that used to fail with the\n"
-           "      wrong space filter - wmark car300 and weak mark - now decode at 0.0 %% with the\n"
-           "      850 Hz filter as well, because the AGC sets the level the ATC compares against and\n"
-           "      the mark channel keeps the right polarity. On live radio the shift matters a great\n"
-           "      deal: a DDH 8 capture decodes only at 425/450 Hz shift and fails at 85/170/200/850.\n"
-           "      That capture, not this table, is what grades the shift setting. See\n"
-           "      support/digi/README.md. An unsupported shift is still mapped to 170.\n");
+    printf("\nnote: the shift setting is graded by the shift 170/850 row, not by the rest of the\n"
+           "      table. A clean two-tone signal decodes at 0.0 %% whatever space filter is selected,\n"
+           "      because the mark channel carries the bits; that row takes the mark tone 30 dB down\n"
+           "      so the space filter has to decide, and there the wrong setting costs the text:\n"
+           "      97.9 %% with the 850 Hz space filter against 0.0 %% with the 170 Hz one, the same\n"
+           "      figure the weak mark row in this table measures.\n"
+           "      \"digi_bench rtty-shift\" prints the whole setting curve. On live radio the shift\n"
+           "      matters beyond this: a DDH 8 capture decodes only at 425/450 Hz shift. An\n"
+           "      unsupported shift is still mapped to 170.\n");
     if (failures == 0)
     {
         printf("\nall %zu cases within their character error rate limits\n", n_cases);
     }
+    return failures ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ *  how much the shift setting matters
+ * ------------------------------------------------------------------ */
+// The signal is always 170 Hz shift at 45.45 Bd and only the receiver's setting moves, which is what
+// a radio tuned to a station and set wrong actually does. Two columns, because the clean signal
+// does not grade the setting at all: the mark channel carries the bits whatever the space filter
+// does, so every setting decodes it (measured). Taking the mark tone 30 dB down puts the decision on
+// the space filter, and then only the setting that matches the signal works.
+static int rtty_shift(void)
+{
+    static const uint16_t settings[] = { 85, 170, 200, 425, 450, 850 };
+    const char* msg = "DE UHSDR BENCH RTTY 12345 TEST 45 BAUD 170 SHIFT";
+    const size_t n_set = sizeof(settings) / sizeof(settings[0]);
+    char got[8192];
+    int failures = 0;
+
+    printf("RTTY shift setting against a 170 Hz / 45.45 Bd signal: only the setting moves.\n"
+           "\"clean\" is that signal at full level, \"weak mark\" has its mark tone 30 dB down.\n\n");
+    printf("%8s %9s %11s\n", "setting", "clean %", "weak mark %");
+    for (size_t k = 0; k < n_set; k++)
+    {
+        rtty_case_t c = { .shift = 170, .snr_db = 20.0f, .rx_shift = settings[k] };
+        int eot = 0;
+        const float clean = rtty_run(&c, msg, false, got, sizeof(got), &eot);
+        c.mark_db = 30.0f;
+        const float weak = rtty_run(&c, msg, false, got, sizeof(got), &eot);
+        printf("%8u %9.1f %11.1f\n", (unsigned) settings[k], clean, weak);
+        if (settings[k] == 170 && weak > 5.0f)
+        {
+            printf("FAIL  the setting that matches the signal has to decode it, %.1f %% is above 5 %%\n", weak);
+            failures++;
+        }
+        if (settings[k] == 850 && weak < 50.0f)
+        {
+            printf("FAIL  a setting 680 Hz away has to cost the text, %.1f %% is below 50 %%\n", weak);
+            failures++;
+        }
+    }
+    printf("\nthe clean column is why this row needs the weak mark: with both tones at full level the\n"
+           "mark channel decides and every setting decodes. The weak mark column is the setting\n"
+           "working: 170 Hz and 200 Hz decode, every setting further away costs the text.\n");
+    if (!failures) printf("\nthe shift setting is graded: %u settings, and only the 170/200 Hz pair\n"
+                       "decodes the signal\n", (unsigned) n_set);
     return failures ? 1 : 0;
 }
 
@@ -1073,6 +1137,7 @@ int main(int argc, char** argv)
         }
         return rtty_table(msg, true);
     }
+    if (!strcmp(what, "rtty-shift")) { return rtty_shift(); }
     if (!strcmp(what, "rtty-tune")) { return rtty_tune(); }
     if (!strcmp(what, "wefax")) return wefax_table();
     if (!strcmp(what, "rtty-wav") && argc > 2)
@@ -1086,6 +1151,6 @@ int main(int argc, char** argv)
         if (cer >= 0.0f) printf("CER       : %.1f%% (after aligning the lead in)\n", cer);
         return 0;
     }
-    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-tune|wefax|rtty-wav <file.wav> [shift] [expected text] [45|50 baud]]\n");
+    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax|rtty-wav <file.wav> [shift] [expected text] [45|50 baud]]\n");
     return 2;
 }

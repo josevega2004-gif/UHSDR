@@ -565,6 +565,22 @@ void Rtty_BenchOffsetTx(float hz, uint32_t output_sample_rate)
 }
 
 /**
+ * Put the transmitter's space tone at an absolute frequency, leaving mark where it is.
+ *
+ * Both tones normally follow the receiver's shift setting, which is fine for a loopback but wrong
+ * for grading the setting: a receiver set to the wrong shift would send the wrong signal too, and
+ * the test could never fail. This lets a signal be sent at one shift while the receiver's space
+ * filter sits at another, which is what a station on the air looks like to a radio set wrong.
+ *
+ * @param hz centre of the space tone in the 12 kHz audio domain
+ * @param output_sample_rate the rate Rtty_Modem_Init() was last given
+ */
+void Rtty_BenchTxSpaceTone(float hz, uint32_t output_sample_rate)
+{
+	softdds_setFreqDDS(&rttyDecoderData.tx_dds[0], hz, output_sample_rate, 0);
+}
+
+/**
  * Stretch or shrink the transmitter's bits, which is what a symbol clock that is off does.
  *
  * The modulator holds a bit for oneBitSampleCount * 4 samples of its 48 kHz output, so a scale

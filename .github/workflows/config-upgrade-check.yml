@@ -98,6 +98,13 @@ jobs:
       # a received signal can be several ppm off, and the modem has no AFC: the pair simply sits
       # away from the fixed 915 Hz / 915 + shift filters. This walks it off in Hz, prints the ppm
       # each offset means on 3.5/14/28/50 MHz, and fails if the asserted window has shrunk.
+      # the shift setting moves the receiver's space filter and nothing else here: the signal stays at
+      # 170 Hz shift. A clean signal decodes whatever the setting is (the mark channel carries the
+      # bits), so the guard takes the mark tone 30 dB down, and then only 170/200 Hz decode.
+      - name: Run the RTTY shift setting curve
+        working-directory: mchf-eclipse
+        run: make -C support/digi rtty-shift
+
       - name: Run the RTTY tuning error sweep
         working-directory: mchf-eclipse
         run: make -C support/digi rtty-tune

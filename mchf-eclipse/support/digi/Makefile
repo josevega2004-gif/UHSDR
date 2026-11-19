@@ -5,6 +5,7 @@
 #                limit), firmware modem looped back on itself
 #   make rtty-long  the same matrix with eight copies of the message: 0.26 % is one character
 #   make wefax   synthetic HF weather fax broadcast through the reference demodulator
+#   make rtty-shift  does the shift setting still matter: one signal, every setting
 #   make rtty-tune  how many Hz of tuning error the demodulator survives, and what that is in ppm
 #
 # drivers/audio/rtty.c and drivers/audio/audio_agc.c are compiled from the real sources: the
@@ -59,6 +60,9 @@ rtty-long: digi_bench
 
 wefax: digi_bench
 	@./digi_bench wefax
+
+rtty-shift: digi_bench
+	@./digi_bench rtty-shift
 
 rtty-tune: digi_bench
 	@./digi_bench rtty-tune
