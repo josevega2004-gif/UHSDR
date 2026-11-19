@@ -29,6 +29,21 @@ jobs:
             exit 1
           }
 
+      # A record that lags the table only prints a notice in the check above, so a word that became
+      # visible without the record being refreshed keeps this job green while the committed map no
+      # longer describes what the firmware stores. Rewriting the record of the current marker from
+      # the table and looking at what that changed is the same rule as the harness file above.
+      - name: Record the layout map of the current marker
+        working-directory: mchf-eclipse
+        run: make layout-record
+
+      - name: Fail if that changed a committed record
+        run: |
+          git diff --exit-code -- ':(glob)mchf-eclipse/support/config_upgrade/layout-*.map' || {
+            echo "::error::a recorded layout map does not match the table, run make layout-record and commit it with the change that made it stale"
+            exit 1
+          }
+
       # The guard is only worth its lines if it still fails on the changes it exists for: a value
       # moving to another word, a marker bumped without a map change, a parser that gains or loses a
       # stored word, and a record that does not parse. It rewrites those files in place, puts them
