@@ -861,8 +861,19 @@ static bool UiConfiguration_FilterMapNotStoredYet()
 void UiReadSettingEEPROM_Filter(bool load_default)
 {
     int idx, mem_idx;
-    uint16_t base = UiConfiguration_LayoutAddress(EEPROM_FILTER_PATH_MAP_BASE);
-    if (base == EEPROM_FILTER_PATH_MAP_BASE && !load_default && UiConfiguration_FilterMapNotStoredYet())
+    uint16_t base = EEPROM_FILTER_PATH_MAP_BASE;
+
+    if (config_layout_migration_active)
+    {
+        // A configuration of the previous layout kept its filter memories at the legacy base, which
+        // is also the current position of that layout, so they are read from there and written to
+        // the current block by the next save. The probe below must not decide this: it reads the
+        // current block, and in the previous layout those words held the ids that now live at
+        // 334..358 (scope, touchscreen calibration, CW decoder, entry count), so it would find
+        // data there and report the block as already stored.
+        base = EEPROM_FILTER_PATH_MAP_LEGACY_BASE;
+    }
+    else if (!load_default && UiConfiguration_FilterMapNotStoredYet())
     {
         base = EEPROM_FILTER_PATH_MAP_LEGACY_BASE;  // the memories of a configuration stored before the block moved
     }

@@ -50,10 +50,12 @@ the size of the CW lift, measured rather than guessed.
   170**; mark is 915 Hz, space above it. A stored value outside that list decodes as 170.
 * **The shift setting matters much more on live radio than on a synthetic loopback.** Mark is
   hard-wired to the 915 Hz bandpass (`rtty_bp_12khz_915`) and the space filter is picked from the
-  shift. Measured on the real coefficient tables, that 915 Hz filter (3 dB band 1034-1136 Hz, about
-  102 Hz wide) rejects the space tone by 20 dB at 170 Hz shift, 23 dB at 200, 35 dB at 425/450 and
-  45 dB at 850, so on a clean generated two-tone recording the ATC comparison can decide from the
-  mark channel alone - which is why decoding a 170 Hz-shift *synthetic* recording returns 0.0% CER
+  shift. Evaluated on the real coefficient tables as `|H(e^jw)|` of the `xv`/`yv` recursion, that
+  915 Hz filter peaks at 913.5 Hz with its 3 dB band at 865-965 Hz (about 100 Hz wide), and rejects
+  the space tone by 22.9 dB at 170 Hz shift, 26.1 dB at 200, 43.1 dB at 425, 44.7 dB at 450 and
+  83.9 dB at 850, but by only 10.2 dB at 85. On a clean generated two-tone recording the ATC
+  comparison can therefore decide from the mark channel alone - which is why decoding a 170 Hz-shift
+  *synthetic* recording returns 0.0% CER
   whichever shift is selected, as the code's own comment predicts (*"works quite well with
   mark-only/space-only"*). **Do not generalise that.** The same test on a live DDH 8 capture gives:
 
@@ -131,7 +133,7 @@ For scoring decoders against live propagation instead of only synthetic channels
 public receivers cover MF and shortwave and can be driven programmatically:
 
 ```
-http://na5b.com:8901/                    NA5B, Texas       (US NAVTEX is 512 kHz, not 518!)
+http://na5b.com:8901/                    NA5B, Texas       (used for the capture below; US NAVTEX is 512 kHz, not 518!)
 http://websdr.ewi.utwente.nl:8901/       Twente, NL        (in range of European 518 kHz stations)
 ```
 
@@ -146,6 +148,13 @@ tuning   text frame:  GET /~~param?f=<Hz>&band=<x>&lo=<Hz>&hi=<Hz>&mode=<n>&name
 `lo`/`hi` are the audio passband edges (1400..2000 Hz is already the right shape for SITOR/NAVTEX
 or weather-fax tones). `name` is shown to the receiver's operator, so fill something honest in.
 These are shared receivers with a limited number of user slots: short sessions only.
+
+The DDH 8 capture quoted below was taken from NA5B. The station list, baud rates and shifts came
+from the DWD table on the Franks-Weather page,
+http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts - 50 Bd with 225 Hz
+either side of the carrier on 4583/7646/10100.8/11039/14467.3 kHz, and 50 Bd with 42.5 Hz on
+147.3 kHz. The receiver's own tuning readout is what turns those numbers into the audio pair the
+modem sees; do not take the dial frequency for the tone pair.
 
 What is proven here and what is not:
 
@@ -176,7 +185,8 @@ What is proven here and what is not:
 
 ## First live decode through this harness
 
-DDH 8, 14467.3 kHz, F1B, 50 Bd, +/-225 Hz (captured 11:41 UTC, 30 s at 12 kHz):
+DDH 8, 14467.3 kHz, F1B, 50 Bd, +/-225 Hz (captured from the NA5B WebSDR at 11:41 UTC, 30 s at
+12 kHz; schedule and parameters from the Franks-Weather DWD table cited above):
 
 ```
 decoded: MSOHWWM PPUWWNW  6  8  3  MSO  12 WNW  6  8  4  MMO 23 Z A  34  3  MO 23 12Z SSW  5  2

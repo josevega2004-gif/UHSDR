@@ -381,10 +381,15 @@ static rtty_bpf_config_t rtty_bp_12khz_1340 =
 // for 850Hz shift --> 915 + 850Hz = space = 1765Hz
 // 3dB bandwidth 100Hz
 // order 2 Butterworth, freqs: 1715 - 1815 Hz, centre: 1765Hz
+// The coefficients that were here before this line were designed for 1865 Hz, i.e. 100 Hz above
+// the label and above the tone the modulator sends for this shift, so the space channel of an
+// 850 Hz-shift transmission was filtered at the wrong frequency. Regenerated with the same method
+// as the other filters in this bank (bilinear transform of the order 2 Butterworth prototype at
+// 12 kHz, edges 1715/1815, unity gain at 1765 Hz).
 static rtty_bpf_config_t rtty_bp_12khz_1765 =
 {
-		.gain = 1.513365057e+03,
-		.coeffs = { -0.9286270862, 2.1190223173, -3.1352567157, 2.1989754113 },
+		.gain = 1.513365059e+03,
+		.coeffs = { -0.9286270861, 2.2802267531, -3.3262458862, 2.3662622716 },
 		.freq = 1765
 };
 

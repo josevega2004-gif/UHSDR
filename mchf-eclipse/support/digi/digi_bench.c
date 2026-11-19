@@ -165,9 +165,12 @@ static void rtty_table(void)
         { "snr 7 170",      170,   7.0f, 0, 0 },
         { "qsb 10 170",     170,  10.0f, 0.5f, 6.0f },
         { "qsb fast 10",    170,  10.0f, 2.0f, 10.0f },
-        // the real services, as published: DWD DDH/DDK are F1B 50 Baud with +/-225 Hz (450 Hz
-        // total) on 4583/7646/10100.8/11039/14467.3 kHz and +/-42.5 Hz (85 Hz) on 147.3 kHz,
-        // the 8472 kHz hydrological broadcast is 45.45 Bd with 170 Hz shift
+        // the real services: DWD DDH/DDK are F1B 50 Baud with +/-225 Hz (450 Hz total) on
+        // 4583/7646/10100.8/11039/14467.3 kHz and +/-42.5 Hz (85 Hz) on 147.3 kHz, per the DWD
+        // table on http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts.
+        // The fourth case is a 45.45 Bd / 170 Hz signal with the 8472 kHz hydrological broadcast
+        // in mind; that station is not on the cited list, so read the case as a representative
+        // amateur-rate signal rather than as a description of that service.
         { "dwd 450 50bd",   450,   20.0f, 0, 0, 50 },
         { "dwd 450 10bd",   450,   10.0f, 0, 0, 50 },
         { "ddh47 85 50bd",   85,   20.0f, 0, 0, 50 },
@@ -185,11 +188,12 @@ static void rtty_table(void)
                eot ? "" : "   [transmission cut off before EOT]");
     }
     printf("\nnote: these loopback CER figures cannot grade the selected shift. The mark filter\n"
-           "      (915 Hz, 3 dB band 1034-1136 Hz) rejects the space tone by 20 dB or more for every\n"
-           "      shift except 85 Hz, so on a clean two-tone synthetic recording the ATC decides from\n"
-           "      the mark channel alone whatever shift is selected. On live radio that is not true:\n"
-           "      a DDH 8 capture decodes only at 425/450 Hz shift and fails at 85/170/200/850. See\n"
-           "      support/digi/README.md. An unsupported shift is still mapped to 170.\n");
+           "      (915 Hz, 3 dB band 865-965 Hz) rejects the space tone by 23 dB at 170 Hz shift and\n"
+           "      by more at every wider shift, but by only 10 dB at 85 Hz, so on a clean two-tone\n"
+           "      synthetic recording the ATC decides from the mark channel alone whatever shift is\n"
+           "      selected. On live radio that is not true: a DDH 8 capture decodes only at 425/450 Hz\n"
+           "      shift and fails at 85/170/200/850. See support/digi/README.md. An unsupported shift\n"
+           "      is still mapped to 170.\n");
 }
 
 /* ------------------------------------------------------------------ *
@@ -272,18 +276,36 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
     if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); printf("short read\n"); return -1.0f; }
     fclose(f);
 
-    uint32_t rate = 0, ch = 1, i = 12; const uint8_t* data = 0; uint32_t dlen = 0;
+    uint32_t rate = 0, ch = 1, bits = 0, tag = 0, i = 12; const uint8_t* data = 0; uint32_t dlen = 0;
     while (i + 8 <= (size_t)sz)
     {
         uint32_t clen = rd32(buf + i + 4);
-        if (!memcmp(buf + i, "fmt ", 4)) { ch = rd16(buf + i + 10); rate = rd32(buf + i + 12); }  /* fmt data: tag,channels,rate,...,bits */
+        if (clen > (size_t)sz - i - 8) break;       /* a chunk cannot claim more than the file holds */
+        if (!memcmp(buf + i, "fmt ", 4))
+        {
+            if (clen < 16) { free(buf); printf("the fmt chunk of %s is too short to describe a PCM stream\n", path); return -1.0f; }
+            tag  = rd16(buf + i + 8);               /* 1 = PCM, 3 = float, 0xfffe = extensible */
+            ch   = rd16(buf + i + 10);
+            rate = rd32(buf + i + 12);
+            bits = rd16(buf + i + 22);
+        }
         else if (!memcmp(buf + i, "data", 4)) { data = buf + i + 8; dlen = clen; }
         else break;
         i += 8 + clen + (clen & 1);
     }
-    if (!data || !rate || !dlen) { free(buf); printf("not a 16 bit PCM WAV with a data chunk\n"); return -1.0f; }
+    if (!data || !rate || !dlen) { free(buf); printf("not a PCM WAV with a data chunk\n"); return -1.0f; }
+    if (tag != 1 || bits != 16 || !ch)
+    {
+        /* an 8/24/32 bit or float export would be decoded as noise here, and the CER would blame
+           the modem for a file this reader cannot read */
+        free(buf);
+        printf("%s: format %u, %u bit, %u channel(s); this reader decodes 16 bit PCM only\n",
+               path, tag, bits, ch);
+        return -1.0f;
+    }
 
     size_t frames = (size_t)dlen / (2 * ch);
+    if (!frames) { free(buf); printf("%s: the data chunk holds no complete frame\n", path); return -1.0f; }
     float peak = 0.0f;
     for (size_t k = 0; k < frames; k++)
     {
@@ -325,10 +347,11 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
     {
         double src = (double)k * (double)rate / 12000.0;
         size_t a = (size_t)src;
-        double fr = src - (double)a;
-        if (a + 1 >= frames) a = frames > 1 ? frames - 2 : 0;
+        if (a >= frames) a = frames - 1;
+        size_t b = (a + 1 < frames) ? a + 1 : a;    /* the last frame reads itself, never past the data */
+        double fr = (b == a) ? 0.0 : src - (double)a;
         float s0 = (float)(int16_t)rd16(data + a * 2 * ch) / 32768.0f;
-        float s1 = (float)(int16_t)rd16(data + (a + 1) * 2 * ch) / 32768.0f;
+        float s1 = (float)(int16_t)rd16(data + b * 2 * ch) / 32768.0f;
         Rtty_Demodulator_ProcessSample((float32_t)((s0 + (float)fr * (s1 - s0)) * gain));
     }
     free(buf);
