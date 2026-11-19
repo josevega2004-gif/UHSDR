@@ -47,3 +47,10 @@ jobs:
       - name: Run the digital mode host bench
         working-directory: mchf-eclipse
         run: make digi-bench
+
+      # the shift and SNR matrix is the only demodulator regression table there is: 45.45 and 50 Bd
+      # across the six shifts, down to 7 dB SNR and with fading. The bench run above loops back once;
+      # this one fails above the per case character error rate limit.
+      - name: Run the RTTY shift and SNR character error rate matrix
+        working-directory: mchf-eclipse
+        run: make -C support/digi rtty

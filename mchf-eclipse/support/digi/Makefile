@@ -1,7 +1,8 @@
 # Host bench for the UHSDR digital modes. Builds nothing into the radio.
 #
 #   make test    self checks (used by CI)
-#   make rtty    RTTY character error rate, firmware modem looped back on itself
+#   make rtty    RTTY shift/SNR character error rate matrix (used by CI, fails above the per case
+#                limit), firmware modem looped back on itself
 #   make wefax   synthetic HF weather fax broadcast through the reference demodulator
 #
 # drivers/audio/rtty.c is compiled from the real source. The shim/ directory replaces only the

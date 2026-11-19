@@ -338,15 +338,15 @@ static rtty_bpf_config_t rtty_bp_12khz_915 =
 // order 2 Butterworth, freqs: 1315-1415 Hz, centre 1365Hz
 static rtty_bpf_config_t rtty_bp_12khz_1365 =
 {
-		.gain = 1.513365019e+03,
-		.coeffs = { -0.9286270861, 2.8583904591, -4.1263569881, 2.9662407442 },
+		.gain = 1.513365021e+03,
+		.coeffs = { -0.9286270861, 2.8583904592, -4.1263569882, 2.9662407443 },
 		.freq = 1365
 };
 // order 2 Butterworth, freqs: 1035-1135 Hz, centre: 1085Hz
 static rtty_bpf_config_t rtty_bp_12khz_1085 =
 {
 		.gain = 1.513364927e+03,
-		.coeffs = { -0.9286270861, 3.1900687350, -4.6666321298, 3.3104336142 },
+		.coeffs = { -0.9286270861, 3.1900687349, -4.6666321297, 3.3104336142 },
 		.freq = 1085
 };
 // order 2 Butterworth, freqs: 1065-1165 Hz, centre: 1115Hz
@@ -363,7 +363,7 @@ static rtty_bpf_config_t rtty_bp_12khz_1115 =
 // order 2 Butterworth, freqs: 975-1025 Hz, centre: 1000Hz
 static rtty_bpf_config_t rtty_bp_12khz_1000 =
 {
-		.gain = 5.944465260e+03,
+		.gain = 5.944465261e+03,
 		.coeffs = { -0.9636529842, 3.3693752166, -4.9084595657, 3.4323354886 },
 		.freq = 1000
 };
@@ -373,8 +373,8 @@ static rtty_bpf_config_t rtty_bp_12khz_1000 =
 // order 2 Butterworth, freqs: 1290 - 1390 Hz, centre: 1340Hz
 static rtty_bpf_config_t rtty_bp_12khz_1340 =
 {
-		.gain = 1.513365018e+03,
-		.coeffs = { -0.9286270862, 2.8906128091, -4.1762457780, 2.9996788796 },
+		.gain = 1.513365017e+03,
+		.coeffs = { -0.9286270861, 2.8906128090, -4.1762457779, 2.9996788796 },
 		.freq = 1340
 };
 
@@ -388,7 +388,7 @@ static rtty_bpf_config_t rtty_bp_12khz_1340 =
 // 12 kHz, edges 1715/1815, unity gain at 1765 Hz).
 static rtty_bpf_config_t rtty_bp_12khz_1765 =
 {
-		.gain = 1.513365059e+03,
+		.gain = 1.513365053e+03,
 		.coeffs = { -0.9286270861, 2.2802267531, -3.3262458862, 2.3662622716 },
 		.freq = 1765
 };

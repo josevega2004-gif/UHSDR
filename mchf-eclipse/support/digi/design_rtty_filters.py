@@ -22,10 +22,10 @@ centre of the band, which is what makes the filter reach unity gain at the tone 
   python3 support/digi/design_rtty_filters.py          check the constants in rtty.c
   python3 support/digi/design_rtty_filters.py --print  print the blocks to paste into rtty.c
 
-Exit status is non zero when a constant, a gain or a label no longer matches its documented design.
-The printed blocks carry full double precision, so pasting one over a constant that was rounded
-slightly differently changes its last digit; the check accepts 1e-9 for that reason, and the five
-coefficients of this bank that were rounded by hand differ from the design by at most 1e-10.
+Exit status is non zero when a block is not the one the design produces, character for character, or
+when a label is not the centre of the band its comment documents. The comparison is exact on purpose:
+a tolerance would let a table drift away from its design in steps that each look harmless, and the
+blocks in rtty.c are kept as the script prints them so that the file stays its own provenance.
 """
 
 import cmath
@@ -44,8 +44,8 @@ GAIN = re.compile(r'\.gain\s*=\s*([-+0-9.eE]+)')
 COEFFS = re.compile(r'\.coeffs\s*=\s*\{([^}]*)\}')
 FREQ = re.compile(r'\.freq\s*=\s*(\d+)')
 
-COEFF_TOL = 1e-9                 # the stored constants carry ten decimals
-GAIN_TOL = 1e-8                  # relative, the stored gains carry ten significant digits
+# the stored block has to be the one design() produces, character for character: a tolerance would
+# let the table drift away from its design in small steps that each look harmless
 
 
 def _mul(p, q):
@@ -103,7 +103,7 @@ def parse(source):
         edge_lo, edge_hi = int(edges[-1][0]), int(edges[-1][1])
         coeffs = [float(v) for v in COEFFS.search(body).group(1).split(',')]
         found.append((m.group(1), int(FREQ.search(body).group(1)),
-                      float(GAIN.search(body).group(1)), coeffs, edge_lo, edge_hi))
+                      float(GAIN.search(body).group(1)), coeffs, edge_lo, edge_hi, m.group(0)))
     if not found:
         sys.exit('no receive filter found in %s, has the filter bank moved?' % RTTC)
     return found
@@ -123,17 +123,16 @@ def main(argv):
     found = parse(source)
     failures = []
 
-    for name, label, gain, coeffs, edge_lo, edge_hi in found:
+    for name, label, gain, coeffs, edge_lo, edge_hi, stored in found:
         want_coeffs, want_gain = design(edge_lo, edge_hi)
         deviation = max(abs(a - b) for a, b in zip(coeffs, want_coeffs))
-        gain_deviation = abs(gain - want_gain) / want_gain
         centre = 0.5 * (edge_lo + edge_hi)
+        expected = block(name, centre, want_gain, want_coeffs, edge_lo, edge_hi).rstrip('\n')
 
         notes = []
-        if deviation > COEFF_TOL:
-            notes.append('coefficients differ by %.1e' % deviation)
-        if gain_deviation > GAIN_TOL:
-            notes.append('gain is %s, the design gives %.9e' % (gain, want_gain))
+        if stored != expected:
+            notes.append('not the block the design produces (largest coefficient difference %.1e, '
+                         'gain %.9e against %.9e)' % (deviation, gain, want_gain))
         if label != centre:
             notes.append('label %d Hz but the documented band %d..%d Hz has its centre at %d'
                          % (label, edge_lo, edge_hi, centre))
@@ -150,8 +149,8 @@ def main(argv):
         elif notes:
             print('FAIL  %-22s %d-%d Hz  %s' % (name, edge_lo, edge_hi, '; '.join(notes)))
         else:
-            print('ok    %-22s %d-%d Hz  centre %4d  coefficients within %.0e of the design'
-                  % (name, edge_lo, edge_hi, centre, deviation))
+            print('ok    %-22s %d-%d Hz  centre %4d  identical to the block the design produces'
+                  % (name, edge_lo, edge_hi, centre))
 
     if emit:
         if failures:
@@ -170,8 +169,8 @@ def main(argv):
         print('and replace the constants in drivers/audio/rtty.c.')
         return 1
 
-    print('\nfilter bank: %d filters match the design (order 2 Butterworth, prewarped bilinear, '
-          '%d kHz)' % (len(found), int(FS / 1000)))
+    print('\nfilter bank: %d filters are exactly the blocks the design produces (order 2 Butterworth, '
+          'prewarped bilinear, %d kHz)' % (len(found), int(FS / 1000)))
     return 0
 
 

@@ -151,7 +151,7 @@ static float rtty_run(const rtty_case_t* c, const char* msg, char* got, size_t g
     return score_aligned(norm_baudot(msg, 0), got);
 }
 
-static void rtty_table(void)
+static int rtty_table(void)
 {
     const char* msg = "DE UHSDR BENCH RTTY 12345 TEST 45 BAUD 170 SHIFT";
     static const rtty_case_t cases[] =
@@ -177,15 +177,39 @@ static void rtty_table(void)
         { "8472 170 45bd",  170,   20.0f, 0, 0 },
     };
 
+    // the character error rate each case has to stay within. Twelve of these decode without a
+    // single wrong character, so a few characters of slack leave room for libm and rounding
+    // differences between build hosts while still failing on a demodulator change that costs text.
+    // The fast fading case is the exception: it loses lock and lands near 50 %, so its limit only
+    // catches it getting worse.
+    static const float max_cer[] =
+    {
+        5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 60.0f, 5.0f, 5.0f, 5.0f, 5.0f,
+    };
+    const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
+    if (sizeof(max_cer) / sizeof(max_cer[0]) != n_cases)
+    {
+        printf("FAIL  %zu cases but %zu limits, update rtty_table()\n", n_cases,
+               sizeof(max_cer) / sizeof(max_cer[0]));
+        return 1;
+    }
+
     printf("RTTY loopback of drivers/audio/rtty.c (per case: 45.45 or 50 Bd, 1.5 stop bits, tx 48 kHz -> rx 12 kHz)\n");
     printf("%-16s %7s %6s  %s\n", "case", "CER %", "lead", "decoded");
     char got[8192];
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    int failures = 0;
+    for (size_t i = 0; i < n_cases; i++)
     {
         int eot = 0;
         float cer = rtty_run(&cases[i], msg, got, sizeof(got), &eot);
         printf("%-16s %7.1f %6d  %s%s\n", cases[i].label, cer, lead_in_junk, got,
                eot ? "" : "   [transmission cut off before EOT]");
+        if (cer > max_cer[i])
+        {
+            printf("FAIL  %-16s character error rate %.1f%% is above the %.1f%% this case allows\n",
+                   cases[i].label, cer, max_cer[i]);
+            failures++;
+        }
     }
     printf("\nnote: these loopback CER figures cannot grade the selected shift. The mark filter\n"
            "      (915 Hz, 3 dB band 865-965 Hz) rejects the space tone by 23 dB at 170 Hz shift and\n"
@@ -194,6 +218,11 @@ static void rtty_table(void)
            "      selected. On live radio that is not true: a DDH 8 capture decodes only at 425/450 Hz\n"
            "      shift and fails at 85/170/200/850. See support/digi/README.md. An unsupported shift\n"
            "      is still mapped to 170.\n");
+    if (failures == 0)
+    {
+        printf("\nall %zu cases within their character error rate limits\n", n_cases);
+    }
+    return failures ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -557,7 +586,7 @@ int main(int argc, char** argv)
 {
     const char* what = argc > 1 ? argv[1] : "test";
     if (!strcmp(what, "test")) return selftest();
-    if (!strcmp(what, "rtty")) { rtty_table(); return 0; }
+    if (!strcmp(what, "rtty")) { return rtty_table(); }
     if (!strcmp(what, "wefax")) { wefax_table(); return 0; }
     if (!strcmp(what, "rtty-wav") && argc > 2)
     {
