@@ -40,6 +40,8 @@ import sys
 import os
 from pathlib import Path
 
+import layout_digest      # the self digest of a layout record, see layout_digest.py
+
 # the firmware sources are two directories above this script (support/config_upgrade)
 root = str(Path(__file__).resolve().parents[2]) + '/'
 
@@ -1284,9 +1286,14 @@ if len(set(markers)) != len(markers):
              % ', '.join('0x%x' % m for m in sorted({m for m in markers if markers.count(m) > 1})))
 
 def parse_map_file(path, name):
-    """the "word owner" lines of one recorded layout"""
+    """the "word owner" lines of one recorded layout, if the record matches its own digest"""
+    text = path.read_text(encoding='utf-8')
+    fault = layout_digest.problem(text, name)
+    if fault:
+        sys.exit(fault + '\nHistory that can be edited without saying so cannot be the thing the '
+                 'translation is judged against.')
     out = {}
-    for lineno, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+    for lineno, line in enumerate(text.splitlines(), 1):
         line = line.split('#')[0].strip()
         if not line:
             continue
@@ -1323,10 +1330,11 @@ def read_previous_layout(name):
 
 
 def layout_file_text(marker, rows):
-    return '# The id -> word map below word %d that CONFIG_LAYOUT_VERSION_MAGIC 0x%X wrote.\n' \
+    return layout_digest.seal(
+        '# The id -> word map below word %d that CONFIG_LAYOUT_VERSION_MAGIC 0x%X wrote.\n' \
            '# One "word owner" line per claimed word. Rewritten by "make layout-record".\n%s\n' \
-           % (BASELINE_LAYOUT_FIRST_UNUSED, marker,
-              '\n'.join('%d %s' % (word, owner) for word, owner in rows))
+        % (BASELINE_LAYOUT_FIRST_UNUSED, marker,
+           '\n'.join('%d %s' % (word, owner) for word, owner in rows)))
 
 
 def describe(rows):

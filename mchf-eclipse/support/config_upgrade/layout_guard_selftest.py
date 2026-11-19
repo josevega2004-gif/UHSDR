@@ -15,7 +15,8 @@ one mutation at a time and checks the verdict:
                                                  record, and a second run leaves it untouched
   6. the parser loses a stored word            -> the check fails
   7. the record does not parse                 -> the check fails
-  8. two rows claim one eeprom id              -> the check fails
+  8. a record edited without sealing it       -> the check fails, naming the digest
+  9. two rows claim one eeprom id              -> the check fails
   9. two rows store into one variable          -> the check fails
  10. the menu offers more than the row stores  -> the check fails
  11. the whole marker bump, one edit at a time -> the check fails until all three edits are there
@@ -41,6 +42,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import layout_digest      # a record edited on purpose has to say so
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = None
@@ -208,8 +211,8 @@ def case_rename():
     assert rows, 'the record lists no plain EEPROM_ name, this case needs one'
     word, owner = rows[0].split()
     stale = owner + '_BEFORE_RENAME'
-    RECORD.write_text(text.replace('%s %s\n' % (word, owner), '%s %s\n' % (word, stale)),
-                      encoding='utf-8')
+    RECORD.write_text(layout_digest.seal(
+        text.replace('%s %s\n' % (word, owner), '%s %s\n' % (word, stale))), encoding='utf-8')
 
     expect('a stored value the record names differently', run(), 0, '%s %s' % (word, owner))
     expect('the recorder takes the name the table stores', run('--record-layout'), 0, RECORD_NAME)
@@ -254,7 +257,7 @@ def case_parser_addition():
     text = RECORD.read_text(encoding='utf-8')
     rows = [line for line in text.splitlines() if line.strip() and not line.startswith('#')]
     word, owner = rows[-1].split(None, 1)
-    RECORD.write_text(text.replace(rows[-1] + '\n', ''), encoding='utf-8')
+    RECORD.write_text(layout_digest.seal(text.replace(rows[-1] + '\n', '')), encoding='utf-8')
 
     expect('a stored word the record does not know', run(), 0, '%s %s' % (word, owner))
     expect('the recorder writes it down', run('--record-layout'), 0, RECORD_NAME)
@@ -281,9 +284,20 @@ def case_parser_regression():
 
 def case_broken_record():
     """a record that does not parse compares nothing, which is worse than saying nothing"""
-    RECORD.write_text(RECORD.read_text(encoding='utf-8') + 'this line is not a word owner line\n',
-                      encoding='utf-8')
+    RECORD.write_text(layout_digest.seal(RECORD.read_text(encoding='utf-8')
+                                         + 'this line is not a word owner line\n'), encoding='utf-8')
     expect('a record with a line it cannot read', run(), FAILS, RECORD_NAME)
+
+
+def case_record_digest():
+    """a record edited without sealing it: the history would silently redefine what is checked"""
+    text = RECORD.read_text(encoding='utf-8')
+    rows = [line for line in text.splitlines() if line.strip() and not line.startswith('#')]
+    assert rows, 'the record lists no words, this case needs one'
+    word, owner = rows[0].split(None, 1)
+    RECORD.write_text(text.replace('%s %s\n' % (word, owner), '%s %s_HAND_EDITED\n' % (word, owner)),
+                      encoding='utf-8')
+    expect('a record edited by hand', run(), FAILS, RECORD_NAME, 'digest')
 
 
 def case_duplicate_id():
@@ -362,10 +376,11 @@ CASES = (
     ('5. the parser learns a stored word', case_parser_addition),
     ('6. the parser loses a stored word', case_parser_regression),
     ('7. the record does not parse', case_broken_record),
-    ('8. two rows claim one eeprom id', case_duplicate_id),
-    ('9. two rows store into one variable', case_shared_variable),
-    ('10. the menu offers more than the row stores', case_menu_wider_than_stored),
-    ('11. the marker bump, edit by edit', case_marker_bump_procedure),
+    ('8. a record edited by hand', case_record_digest),
+    ('9. two rows claim one eeprom id', case_duplicate_id),
+    ('10. two rows store into one variable', case_shared_variable),
+    ('11. the menu offers more than the row stores', case_menu_wider_than_stored),
+    ('12. the marker bump, edit by edit', case_marker_bump_procedure),
 )
 
 
