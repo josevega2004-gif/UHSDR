@@ -48,8 +48,6 @@ root = str(Path(__file__).resolve().parents[2]) + '/'
 # --record-layout rewrites the LAYOUT_HISTORY entry of the marker this build writes and stops there.
 # It is the one command for a change that only renamed a stored value or made one visible to the
 # table parser: neither moves a word, so neither needs a new marker (see the layout guard below).
-# A renamed value is written down with the name it had, so the translation of the previous layout
-# still finds the value it is meant to move.
 RECORD_LAYOUT = '--record-layout' in sys.argv[1:]
 
 cfg_h = open(root+'drivers/ui/ui_configuration.h', encoding='utf-8', errors='surrogateescape').read()
@@ -1377,13 +1375,9 @@ def plain_name(owner):
 def carry_rename(notes, word, now, was):
     """the rename notes with `word` recording `now`, keeping the name the value carried before
 
-    A value renamed twice keeps the name the previous layout knows it by: the second rename reads
-    the name the record has now, and the note that carried it moves along. That is what makes the
-    notes a chain back to the oldest recorded layout rather than one hop."""
+    A value renamed twice keeps the name the previous layout knows it by: the note already there
+    names the value the record has, so the name it carries is the one that stays."""
     oldest = notes[word][1] if notes.get(word, (None,))[0] == was else was
-    for other, (name, before) in sorted(notes.items()):
-        if name == was and other != word:
-            notes[other] = (now, before)
     notes[word] = (now, oldest)
 
 
@@ -1613,32 +1607,19 @@ def firmware_function(name):
 # renumbering is not that - the guard above refuses a word that changed hands - so following a
 # note cannot hide one. A note that does not describe the value the record has at its word is a
 # record that disagrees with itself, and the translation would be checked against the wrong value.
+older_name = {}         # the word -> the name the previous record has for the value stored there
 for word, (now, was) in sorted(recorded_renames[current_magic].items()):
     owner = rec_map.get(word)
-    if owner is None:
-        sys.exit('%s records that word %d was renamed to %s, but it names no value at that word. '
-                 'The note and the map have to describe the same words.'
-                 % (records[current_magic], word, now))
-    if plain_name(owner) != now:
-        sys.exit('%s records that word %d was renamed to %s, but it names %s there. The note and '
+    if owner is None or plain_name(owner) != now:
+        sys.exit('%s records that word %d was renamed to %s, but it names %s there. A note and '
                  'the map have to describe the same value, otherwise the previous layout '
                  'translation is checked against a value the record does not carry.'
-                 % (records[current_magic], word, now, plain_name(owner)))
+                 % (records[current_magic], word, now,
+                    plain_name(owner) if owner is not None else 'nothing'))
     if now == was:
         sys.exit('%s records that word %d was renamed from %s to itself, which says nothing about '
                  'the value. Drop the note.' % (records[current_magic], word, now))
-
-renamed_values = {layout_owner_key(now): layout_owner_key(was)
-                  for _word, (now, was) in recorded_renames[current_magic].items()}
-
-
-def oldest_name(key):
-    """the name a value had in the layout the previous record describes, along the notes"""
-    seen = set()
-    while key in renamed_values and key not in seen:
-        seen.add(key)
-        key = renamed_values[key]
-    return key
+    older_name[word] = layout_owner_key(was)
 
 
 previous_map = read_previous_layout(PREVIOUS_LAYOUT_RECORD)
@@ -1653,7 +1634,7 @@ for owner, words in sorted(previous_keys.items()):
 
 current_keys = {}
 for word, owner in current_map.items():
-    current_keys.setdefault(oldest_name(layout_owner_key(owner)), []).append(word)
+    current_keys.setdefault(older_name.get(word, layout_owner_key(owner)), []).append(word)
 
 old_layout_rows = []            # (word, kind, lo, hi, owner) for every word of the current record
 claimed_previous = set()
