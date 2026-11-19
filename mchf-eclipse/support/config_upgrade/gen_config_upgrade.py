@@ -480,6 +480,38 @@ def table_rows(text):
                      fields[3], fields[4], fields[5]))
     return rows
 
+RTYPES = {
+    'ConfigEntry_UInt8': ('R_UINT8', 1),
+    'ConfigEntry_UInt16': ('R_UINT16', 1),
+    'ConfigEntry_UInt32_16': ('R_UINT32_16', 1),
+    'ConfigEntry_Int16': ('R_INT16', 1),
+    'ConfigEntry_Int32_16': ('R_INT32_16', 1),
+    'ConfigEntry_Int32': ('R_INT32', 2),
+    'ConfigEntry_UInt8x2': ('R_UINT8X2', 1),
+}
+RTYPE_LIMITS = {                     # what the stored word can hold after the firmware's cast
+    'R_UINT8': (0, 0xFF),
+    'R_UINT16': (0, 0xFFFF),
+    'R_UINT32_16': (0, 0xFFFF),
+    'R_INT16': (-0x8000, 0x7FFF),
+    'R_INT32_16': (-0x8000, 0x7FFF),
+    'R_INT32': (-0x80000000, 0x7FFFFFFF),
+    'R_UINT8X2': (0, 0xFFFF),
+}
+
+
+def as_stored(rtype, value):
+    """what the firmware's read function makes of a value, per its own cast before the range check"""
+    mask, signed = {'R_UINT8': (0xFF, False), 'R_UINT16': (0xFFFF, False),
+                    'R_UINT32_16': (0xFFFF, False), 'R_UINT8X2': (0xFFFF, False),
+                    'R_INT16': (0xFFFF, True), 'R_INT32_16': (0xFFFF, True),
+                    'R_INT32': (0xFFFFFFFF, True)}[rtype]
+    stored = value & mask
+    if signed and stored & (1 << (mask.bit_length() - 1)):
+        stored -= mask + 1
+    return stored
+
+
 # the switches of the default firmware configuration: the board feature switches of
 # hardware/uhsdr_board_config.h are already in const_exprs, what is still missing are the -D
 # options the Makefile uses when nothing else is given, they decide which board the rows below
@@ -604,10 +636,23 @@ for cond, ctype, idname, var, d, lo, hi in table:
     if None in (dv, mn, mx):
         unresolved += 1
         continue
+    if mn > mx:
+        sys.exit('%s (&%s) has the stored range %d..%d, which holds no value at all: the firmware '
+                 'rejects every read of it, so the setting stays at its default %d forever'
+                 % (idname, var, mn, mx, dv))
     if not (mn <= dv <= mx):
         sys.exit('%s (&%s) has default %d outside its stored range %d..%d, a value in the middle of '
                  'the range the menu offers is replaced by the default at the next start'
                  % (idname, var, dv, mn, mx))
+    rtype = RTYPES.get(ctype)
+    if rtype is not None:
+        stored = as_stored(rtype[0], dv)
+        if stored != dv:
+            sys.exit('%s (&%s) has default %d, which %s cannot hold: the firmware assigns the stored '
+                     'word to the type before it range checks it, so this default reads back as %d '
+                     'and the setting never holds what the table asks for. Fit the default to the '
+                     'type, or store it in a wider one'
+                     % (idname, var, dv, ctype, stored))
 
 # one id must not be claimed by two rows of the same configuration: the second one silently
 # overwrites what the first one read and wrote. Rows of different #if branches are not part of the
@@ -1879,24 +1924,6 @@ A('    }')
 # uint8_t BEFORE it range checks it, so 0x0107 is accepted as 7, and UiReadSettingEEPROM_Int32_16()
 # casts the word to int16_t first, so a negative value survives as long as it is stored that way.
 # -----------------------------------------------------------------------------------------------
-RTYPES = {
-    'ConfigEntry_UInt8': ('R_UINT8', 1),
-    'ConfigEntry_UInt16': ('R_UINT16', 1),
-    'ConfigEntry_UInt32_16': ('R_UINT32_16', 1),
-    'ConfigEntry_Int16': ('R_INT16', 1),
-    'ConfigEntry_Int32_16': ('R_INT32_16', 1),
-    'ConfigEntry_Int32': ('R_INT32', 2),
-    'ConfigEntry_UInt8x2': ('R_UINT8X2', 1),
-}
-RTYPE_LIMITS = {                     # what the stored word can hold after the firmware's cast
-    'R_UINT8': (0, 0xFF),
-    'R_UINT16': (0, 0xFFFF),
-    'R_UINT32_16': (0, 0xFFFF),
-    'R_INT16': (-0x8000, 0x7FFF),
-    'R_INT32_16': (-0x8000, 0x7FFF),
-    'R_INT32': (-0x80000000, 0x7FFFFFFF),
-    'R_UINT8X2': (0, 0xFFFF),
-}
 rrow_data = []
 for cond, ctype, idname, var, d, lo, hi in map_rows:
     if ctype not in RTYPES:
