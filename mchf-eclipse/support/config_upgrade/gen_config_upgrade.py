@@ -31,6 +31,7 @@
 
 import re
 import sys
+import hashlib
 
 import os
 from pathlib import Path
@@ -864,6 +865,42 @@ if clashes:
              'as a setting that is never remembered. Give one of them a free word and raise '
              'EEPROM_FIRST_UNUSED if that means the address range grows.'
              % (len(clashes), '\n'.join(lines)))
+
+# -----------------------------------------------------------------------------------------------
+# The layout marker in ui_configuration.c is what tells a stored configuration which address map
+# wrote it: UiConfiguration_LayoutMigrationRequired() compares it against CONFIG_LAYOUT_VERSION_MAGIC
+# and migrates when it differs. That only works if the marker changes whenever the meaning of a word
+# that old firmware already wrote changes. It is checked here by hashing the (word, owner) pairs of
+# the whole area the old firmware could have written, because that is exactly the part a radio can
+# be holding in the wrong shape. Handing out a new id at a fresh word above the baseline is allowed
+# and needs no bump: an old configuration simply has no value there and the entry defaults.
+#
+# The failure this rule exists for is real and was shipped: commit 92418c08 moved the filter path
+# block from 297 to 391 while leaving the marker at 0x5AA5, so radios written by 7a76e65a and by
+# 92418c08 carry the same marker over two different maps. That survived only because
+# UiConfiguration_FilterMapNotStoredYet() tells the two layouts apart by probing the new block.
+# -----------------------------------------------------------------------------------------------
+BASELINE_LAYOUT_FIRST_UNUSED = 416
+BASELINE_LAYOUT_DIGEST = 'a2dd5fa69241'   # shape of the map as of commit 92418c08
+
+layout_map = sorted((w, '|'.join(sorted({o[1] for o in lst})))
+                    for w, lst in owners.items() if w < BASELINE_LAYOUT_FIRST_UNUSED)
+layout_digest = hashlib.sha1(repr(layout_map).encode()).hexdigest()[:12]
+if layout_digest != BASELINE_LAYOUT_DIGEST:
+    sys.exit('the address map of words below %d changed shape (%s -> %s) while '
+             'CONFIG_LAYOUT_VERSION_MAGIC is still 0x%x.\n'
+             'A radio holding a configuration written under the old map cannot tell, so it will be '
+             'read through the wrong addresses. Three things must happen together:\n'
+             '  1. raise CONFIG_LAYOUT_VERSION_MAGIC to a new value;\n'
+             '  2. extend UiConfiguration_LayoutMigrationRequired() to still accept the value the '
+             'previous build wrote, otherwise every healthy radio gets migrated through the '
+             'pre-renumbering translation, which corrupts it - the marker mechanism knows exactly '
+             'one previous layout today;\n'
+             '  3. set BASELINE_LAYOUT_DIGEST here to %s (and BASELINE_LAYOUT_FIRST_UNUSED if the '
+             'range grew).\n'
+             'If the intent is to keep the old map readable instead, move the values back.'
+             % (BASELINE_LAYOUT_FIRST_UNUSED, BASELINE_LAYOUT_DIGEST or '(not set yet)',
+                layout_digest, vals['CONFIG_LAYOUT_VERSION_MAGIC'], layout_digest))
 
 print('  EEPROM address map: %d table rows (after expanding %d row macros) and %d multi word '
       'blocks, %d words claimed, none twice'

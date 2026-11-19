@@ -611,6 +611,20 @@ uint16_t    UiConfiguration_SaveEepromValues(void);
 // address (it held EEPROM_AGC_WDSP_MODE there), so a missing marker identifies a stored
 // configuration which still has to be migrated. See UiConfiguration_LoadEepromValues().
 //
+// INVARIANT: the marker identifies the address map, so it has to change whenever the meaning of a
+// word that earlier firmware already wrote changes - moving or renumbering an id, or moving a block.
+// Handing a new setting a word above the previous EEPROM_FIRST_UNUSED needs no bump, an old
+// configuration has nothing there and the entry defaults.
+//
+// One known violation is in the field: commit 92418c08 moved the filter path block from 297 to 391
+// without changing this value, so a marker of 0x5AA5 covers two maps. It is survivable only because
+// UiConfiguration_FilterMapNotStoredYet() distinguishes them by probing the new block. Do not add a
+// second case this way. Bumping the value is also not enough on its own: the migration in
+// UiConfiguration_LayoutMigrationRequired() knows exactly one previous layout, so a new value here
+// must be paired with accepting the value the previous build wrote, otherwise every healthy radio
+// gets read through the pre-renumbering translation. make config-upgrade-check now refuses a change
+// to the shape of the map while this constant stays put, see BASELINE_LAYOUT_DIGEST.
+//
 #define CONFIG_LAYOUT_VERSION_MAGIC                 0x5AA5
 #define EEPROM_CONFIG_LAYOUT_VERSION                376
 #define EEPROM_AM_TX_SIDEBAND                       378     // AM transmit sideband: both, LSB or USB
