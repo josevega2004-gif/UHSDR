@@ -97,9 +97,12 @@ def defines(text):
 def define_exprs(text):
     """#define constants whose body is a small arithmetic expression, e.g. (1 << 3) or (0x0f|0x10)"""
     out = {}
-    for m in re.finditer(r'^\s*#define\s+(\w+)\s+(\(?[^{}\n]*\)?)\s*(?://.*)?$', text, re.M):
+    for m in re.finditer(r'^[ \t]*#define[ \t]+(\w+)[ \t]+(\(?[^{}\n]*\)?)[ \t]*(?://.*)?$',
+                         text, re.M):
         name, body = m.group(1), m.group(2).strip()
-        if not body or ',' in body or not re.fullmatch(r'[\w\s()\+\-*/%<>|&^~]+', body):
+        # no \s between the name and the body: an include guard has no body, and matching across
+        # the newline made it swallow the definition on the next line
+        if not body or ',' in body or not re.fullmatch(r'[\w\s().\+\-*/%<>|&^~]+', body):
             continue
         if re.search(r'\b(defined|if|else|return|sizeof)\b', body):
             continue
@@ -139,37 +142,105 @@ for header in CONST_HEADERS:
     const_exprs.update(define_exprs(text))
     const_exprs.update(enum_values(text))
 
+# Every other header of the tree as well. A name that two headers define differently is dropped:
+# guessing which definition the build sees would put a wrong range into the check, and a wrong
+# range is worse than a row that is reported as uncovered.
+const_bodies = {}
+for name, body in list(const_exprs.items()):
+    const_bodies.setdefault(name, set()).add(body)
+for dirpath, _dirs, files in os.walk(root):
+    if any(part in dirpath for part in ('/support/', '/basesw/', '/build/', '/.git')):
+        continue
+    for fn in sorted(files):
+        if not fn.endswith('.h'):
+            continue
+        try:
+            text = open(os.path.join(dirpath, fn), encoding='utf-8',
+                        errors='surrogateescape').read()
+        except OSError:
+            continue
+        text = strip_comments(text)
+        for name, body in list(define_exprs(text).items()) + list(enum_values(text).items()):
+            const_bodies.setdefault(name, set()).add(body)
+const_conflicts = {name for name, bodies in const_bodies.items() if len(bodies) > 1}
+for name, bodies in const_bodies.items():
+    if name not in const_conflicts:
+        const_exprs[name] = next(iter(bodies))
+for name in const_conflicts:
+    const_exprs.pop(name, None)
+# stdint.h is not part of the tree, its limits are what a few ranges are written with
+const_exprs.update({'INT8_MIN': '-128', 'INT8_MAX': '127', 'UINT8_MAX': '255',
+                    'INT16_MIN': '-32768', 'INT16_MAX': '32767', 'UINT16_MAX': '65535',
+                    'INT32_MIN': '-2147483648', 'INT32_MAX': '2147483647',
+                    'UINT32_MAX': '4294967295'})
+print('  constants: %d names from the tree headers, %d left out because two headers disagree'
+      % (len(const_exprs), len(const_conflicts)))
+
 def resolve(expr, _seen=None):
     """value of a constant as the compiler would see it, None when it cannot be worked out here"""
     expr = expr.strip()
     expr = re.sub(r'\bCONFIG_UINT8x2_COMBINE\s*\(\s*([^,()]+)\s*,\s*([^,()]+)\s*\)', r'(\1 << 8 | \2)', expr)
+    if re.fullmatch(r'-?(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|\d+)', expr):
+        return int(expr, 0)          # a literal, including the hex and binary ones a header uses
     if re.fullmatch(r'-?\d+', expr):
         return int(expr)
+    if re.fullmatch(r'-?\d*\.\d+(?:[eE][-+]?\d+)?', expr):
+        return int(float(expr))      # a scale factor such as TX_POWER_FACTOR_MAX_INTERNAL
     _seen = _seen or set()
     if expr in _seen:
         return None
     _seen = _seen | {expr}
-    if re.fullmatch(r'\w+', expr) and expr not in vals:
+    if re.fullmatch(r'[A-Za-z_]\w*', expr) and expr not in vals:
         if expr not in const_exprs:
             return None
         v = resolve(const_exprs[expr], _seen)
         if v is not None:
             vals[expr] = v
         return v
-    m = re.fullmatch(r'\(?(\w+)\)?\s*([*+-/|&^]|<<|>>)\s*\(?(\w+)\)?', expr)   # NAME op NAME or NAME op 10
+    m = re.fullmatch(r'\(?(\w+)\)?\s*([*/|&^+\-]|<<|>>)\s*\(?(\w+)\)?', expr)  # NAME op NAME or NAME op 10
     if m:
         a = resolve(m.group(1), _seen)
         btok = m.group(3)
         b = int(btok, 0) if re.fullmatch(r'-?\d+', btok) else resolve(btok, _seen)
-        if a is None or b is None:
+        if a is not None and b is not None:
+            op = m.group(2)
+            try:
+                if op == '*':
+                    return a * b
+                if op == '+':
+                    return a + b
+                if op == '-':
+                    return a - b
+                if op == '/':
+                    return a // b
+                if op == '|':
+                    return a | b
+                if op == '&':
+                    return a & b
+                if op == '^':
+                    return a ^ b
+                if op == '<<':
+                    return a << b
+                if op == '>>':
+                    return a >> b
+            except ZeroDivisionError:
+                return None
+        # an operand that cannot be worked out here: the general evaluation below tries the whole
+        # expression again with every name replaced by its value
+    # an expression of any shape - (A | B) & ~C, a ternary, a cast - with every name in it
+    # replaced by its value. Without this a range written as (FLAGS1_A|FLAGS1_B) stayed unresolved
+    # because those names are constants of a header, not of the file the value is stored in.
+    env = {}
+    for name in set(re.findall(r'\b[A-Za-z_]\w*\b', expr)):
+        if name in vals:
+            env[name] = vals[name]
+            continue
+        v = resolve(name, _seen)
+        if v is None:
             return None
-        try:
-            return {'*': a * b, '+': a + b, '-': a - b, '/': a // b, '|': a | b, '&': a & b,
-                    '^': a ^ b, '<<': a << b, '>>': a >> b}[m.group(2)]
-        except ZeroDivisionError:
-            return None
+        env[name] = v
     try:
-        return int(eval(expr, {'__builtins__': {}}, dict(vals)))
+        return int(eval(expr, {'__builtins__': {}}, env))
     except Exception:
         return None
 
@@ -350,8 +421,26 @@ for key in ('action', 'switch_mode', 'hang_action'):
 # only for the ones somebody remembered.
 
 
+def split_fields(text):
+    """split a table row at the commas that are not inside parentheses"""
+    out, depth, cur = [], 0, ''
+    for ch in text:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            out.append(cur)
+            cur = ''
+        else:
+            cur += ch
+    out.append(cur)
+    return [c.strip() for c in out]
+
 def table_rows(text):
     """rows of the ConfigEntry table together with the #if branch they are compiled from"""
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)   # callers hand over the raw source as well
+    text = re.sub(r'//[^\n]*', '', text)
     rows = []
     stack = []
     for line in text.splitlines():
@@ -370,9 +459,21 @@ def table_rows(text):
             elif keyword == 'endif' and stack:
                 stack.pop()
             continue
-        m = re.match(r'\{\s*(ConfigEntry_\w+)(?:\s*\|\s*\w+)?\s*,\s*(EEPROM_\w+)\s*,\s*&([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+?)\s*\}', s)
-        if m:
-            rows.append((tuple(stack), ) + m.groups())
+        if not s.startswith('{'):
+            continue
+        s = s.rstrip()
+        if s.endswith(','):
+            s = s[:-1].rstrip()
+        if not s.endswith('}'):
+            continue
+        fields = split_fields(s[1:-1])
+        if len(fields) != 6:
+            continue
+        m = re.match(r'(ConfigEntry_\w+)(?:\s*\|\s*\w+)?$', fields[0])
+        if not m or not re.fullmatch(r'EEPROM_\w+', fields[1]) or not fields[2].startswith('&'):
+            continue
+        rows.append((tuple(stack), m.group(1), fields[1], fields[2][1:].strip(),
+                     fields[3], fields[4], fields[5]))
     return rows
 
 # the switches of the default firmware configuration: the board feature switches of
@@ -869,6 +970,20 @@ if not u8_read:
     sys.exit('UiReadSettingEEPROM_UInt8() is gone or its signature changed, the truncation model of '
              'check_row_roundtrip() has nothing to describe')
 u8_body = u8_read.group(1)
+x2_read = re.search(r'UiReadSettingEEPROM_UInt8x2\s*\(\s*uint16_t\s+addr\s*,\s*volatile\s+uint16_t'
+                    r'[^)]*\)\s*\{(.*?)\n\}', clean_cfg_c, re.S)
+if not x2_read:
+    sys.exit('UiReadSettingEEPROM_UInt8x2() is gone or its signature changed, the packed model of '
+             'check_row_roundtrip() has nothing to describe')
+x2_body = x2_read.group(1)
+for needle in ('*val_ptr >> 8', 'min_val >> 8', '*val_ptr & 0xff', 'min_val & 0xff',
+               'default_val & 0xff00', 'default_val & 0x00ff'):
+    if needle not in x2_body:
+        sys.exit('UiReadSettingEEPROM_UInt8x2() no longer repairs its two bytes separately (no %r '
+                 'in the function). check_row_roundtrip() models each byte against its own half of '
+                 'the stored range and expects the other byte to survive, so the model and the '
+                 'firmware have to change together.' % needle)
+
 u8_assign = u8_body.find('*val_ptr = value')
 u8_check = u8_body.find('*val_ptr < min_val')
 if u8_assign < 0 or u8_check < 0 or u8_assign > u8_check:
@@ -991,7 +1106,11 @@ BASELINE_LAYOUT_FIRST_UNUSED = 416
 # wrote through it. Append only. A map shape that appears under a marker already used for another
 # shape is the failure this list exists to prevent - radios carrying the old shape cannot tell.
 LAYOUT_HISTORY = [
-    (0x5AA5, 'a2dd5fa69241'),          # as of commit 92418c08
+    # the packed UInt8x2 row (EEPROM_SMETER_ALPHAS) carries a comma inside
+    # CONFIG_UINT8x2_COMBINE(), which the old table parser could not split, so that word was missing
+    # from the map this digest is computed from. The row has always been in the table and no build
+    # ever stored it anywhere else, so only the recorded digest of that shape is corrected here.
+    (0x5AA5, 'a63f1098d0fc'),          # as of commit 0da3ca61, digest corrected on 2026-11-19
 ]
 
 current_magic = vals['CONFIG_LAYOUT_VERSION_MAGIC']
@@ -1649,6 +1768,7 @@ RTYPES = {
     'ConfigEntry_Int16': ('R_INT16', 1),
     'ConfigEntry_Int32_16': ('R_INT32_16', 1),
     'ConfigEntry_Int32': ('R_INT32', 2),
+    'ConfigEntry_UInt8x2': ('R_UINT8X2', 1),
 }
 RTYPE_LIMITS = {                     # what the stored word can hold after the firmware's cast
     'R_UINT8': (0, 0xFF),
@@ -1657,6 +1777,7 @@ RTYPE_LIMITS = {                     # what the stored word can hold after the f
     'R_INT16': (-0x8000, 0x7FFF),
     'R_INT32_16': (-0x8000, 0x7FFF),
     'R_INT32': (-0x80000000, 0x7FFFFFFF),
+    'R_UINT8X2': (0, 0xFFFF),
 }
 rrow_data = []
 for cond, ctype, idname, var, d, lo, hi in map_rows:
@@ -1670,7 +1791,10 @@ for cond, ctype, idname, var, d, lo, hi in map_rows:
     low, high = RTYPE_LIMITS[rtype]
     # a stored value the firmware has to reject. A row that spans the whole width of its type has
     # none: for an UInt8 row from 0 to 255 every stored word is a legal value after truncation.
-    outside = mx + 1 if mx < high else (mn - 1 if mn > low else None)
+    if rtype == 'R_UINT8X2':
+        outside = None              # "just outside" is a property of one half here, not of the word
+    else:
+        outside = mx + 1 if mx < high else (mn - 1 if mn > low else None)
     rrow_data.append((idname, vals[idname], rtype, words, dv, mn, mx, outside))
 if len(rrow_data) < 100:
     sys.exit('only %d rows of the configuration table have a resolved stored range, the round trip '
@@ -1689,7 +1813,7 @@ A('   one round trip per row of the configuration table. The read rules are thos
 A('   the stored word goes through the type before the range check, which is where a Uint8 row')
 A('   loses its high byte and an Int32_16 row gets its sign back')
 A('*/')
-A('typedef enum { R_UINT8, R_UINT16, R_UINT32_16, R_INT16, R_INT32_16, R_INT32 } rtype_t;')
+A('typedef enum { R_UINT8, R_UINT8X2, R_UINT16, R_UINT32_16, R_INT16, R_INT32_16, R_INT32 } rtype_t;')
 A('typedef struct { const char* idname; uint16_t id; rtype_t type; uint16_t words; int32_t def, min, max, outside; } rrow_t;')
 A('')
 A('#define R_NO_OUTSIDE INT32_MIN')
@@ -1717,13 +1841,16 @@ static void blank_image(image_t* img)
 /* mirror of UiWriteSettingEEPROM_*(): an Int32 row takes two words, high first */
 static void row_store(image_t* img, const rrow_t* r, int32_t value)
 {
-    img->present[r->id] = true;
-    img->value[r->id] = (uint16_t)value;
     if (r->type == R_INT32)
     {
+        img->present[r->id] = true;
+        img->value[r->id] = (uint16_t)(((uint32_t)value) >> 16);      /* high word at the id */
         img->present[r->id + 1] = true;
-        img->value[r->id + 1] = (uint16_t)(((uint32_t)value) & 0xFFFFu);
+        img->value[r->id + 1] = (uint16_t)(((uint32_t)value) & 0xFFFFu);  /* low word follows it */
+        return;
     }
+    img->present[r->id] = true;
+    img->value[r->id] = (uint16_t)value;
 }
 
 /* mirror of UiReadSettingEEPROM_UInt8/UInt16/UInt32_16/Int16/Int32_16/Int32 */
@@ -1735,6 +1862,21 @@ static int32_t row_read(const image_t* img, const rrow_t* r, bool load_default)
     }
     const uint16_t raw = img->value[r->id];
     int32_t v;
+    if (r->type == R_UINT8X2)
+    {
+        /* UiReadSettingEEPROM_UInt8x2() repairs the two bytes separately and never range checks
+           the whole word, so the other half of a repaired word has to survive */
+        uint16_t hi = (raw >> 8) & 0xFF, lo = raw & 0xFF;
+        if (load_default || hi < ((r->min >> 8) & 0xFF) || hi > ((r->max >> 8) & 0xFF))
+        {
+            hi = (r->def >> 8) & 0xFF;
+        }
+        if (load_default || lo < (r->min & 0xFF) || lo > (r->max & 0xFF))
+        {
+            lo = r->def & 0xFF;
+        }
+        return (int32_t)((hi << 8) | lo);
+    }
     switch (r->type)
     {
     case R_UINT8:
@@ -1802,23 +1944,85 @@ static int check_row_roundtrip(void)
             probes++;
         }
 
-        /* an erased word must never come back as a value outside the range */
-        blank_image(&img);
-        row_store(&img, r, -1);
-        img.value[r->id] = 0xFFFF;
-        if (r->type == R_INT32)
+        if (r->type == R_UINT8X2)
         {
-            img.value[r->id + 1] = 0xFFFF;
-        }
-        {
-            const int32_t erased = row_read(&img, r, false);
-            if (erased < r->min || erased > r->max)
+            const int32_t hi_min = (r->min >> 8) & 0xFF, hi_max = (r->max >> 8) & 0xFF;
+            const int32_t lo_min = r->min & 0xFF, lo_max = r->max & 0xFF;
+            const int32_t hi_def = (r->def >> 8) & 0xFF, lo_def = r->def & 0xFF;
+
+            /* one byte out of range is repaired on its own, the other byte has to survive */
+            if (hi_max < 0xFF)
             {
-                printf("CHECK FAILED: %s (id %u) reads an erased word as %d, outside %d..%d\n",
-                       r->idname, r->id, erased, r->min, r->max);
-                rc = 1;
+                const int32_t word = ((hi_max + 1) << 8) | lo_min;
+                blank_image(&img);
+                img.present[r->id] = true;
+                img.value[r->id] = (uint16_t)word;
+                const int32_t got = row_read(&img, r, false);
+                const int32_t want = (hi_def << 8) | lo_min;
+                if (got != want)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads 0x%04X as 0x%04X, the high byte is "
+                           "repaired on its own, so it has to read 0x%04X\n",
+                           r->idname, r->id, word, got, want);
+                    rc = 1;
+                }
+                probes++;
             }
-            probes++;
+            if (lo_max < 0xFF)
+            {
+                const int32_t word = (hi_min << 8) | (lo_max + 1);
+                blank_image(&img);
+                img.present[r->id] = true;
+                img.value[r->id] = (uint16_t)word;
+                const int32_t got = row_read(&img, r, false);
+                const int32_t want = (hi_min << 8) | lo_def;
+                if (got != want)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads 0x%04X as 0x%04X, the low byte is "
+                           "repaired on its own, so it has to read 0x%04X\n",
+                           r->idname, r->id, word, got, want);
+                    rc = 1;
+                }
+                probes++;
+            }
+
+            /* an erased word has to leave both bytes inside their range */
+            blank_image(&img);
+            row_store(&img, r, -1);
+            img.value[r->id] = 0xFFFF;
+            {
+                const int32_t erased = row_read(&img, r, false);
+                if (((erased >> 8) & 0xFF) < hi_min || ((erased >> 8) & 0xFF) > hi_max ||
+                    (erased & 0xFF) < lo_min || (erased & 0xFF) > lo_max)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads an erased word as 0x%04X, outside "
+                           "%02X..%02X (high byte) or %02X..%02X (low byte)\n",
+                           r->idname, r->id, erased, hi_min, hi_max, lo_min, lo_max);
+                    rc = 1;
+                }
+                probes++;
+            }
+        }
+        else
+        {
+            /* an erased word must never come back as a value outside the range */
+            blank_image(&img);
+            row_store(&img, r, -1);
+            img.value[r->id] = 0xFFFF;
+            if (r->type == R_INT32)
+            {
+                img.value[r->id + 1] = 0xFFFF;
+            }
+            {
+                const int32_t erased = row_read(&img, r, false);
+                if (erased < r->min || erased > r->max)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads an erased word as %d, outside %d..%d\n",
+                           r->idname, r->id, erased, r->min, r->max);
+                    rc = 1;
+                }
+                probes++;
+            }
         }
 
         /* the truncation case: a Uint8 row whose range fits a byte accepts 0x0100 | value */

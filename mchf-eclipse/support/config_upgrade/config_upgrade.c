@@ -428,6 +428,7 @@ static const map_row_t map_rows_rt[] = {
     { 352, "EEPROM_ENABLE_PTT_RTS" },
     { 353, "EEPROM_CW_DECODER_THRESH" },
     { 354, "EEPROM_CW_DECODER_BLOCKSIZE" },
+    { 355, "EEPROM_SMETER_ALPHAS" },
     { 357, "EEPROM_TX_IQ_20M_GAIN_BALANCE" },
     { 358, "EEPROM_TX_IQ_20M_PHASE_BALANCE" },
     { 359, "EEPROM_TX_IQ_15M_GAIN_BALANCE" },
@@ -733,13 +734,16 @@ static int check_filter_map_save(void)
    the stored word goes through the type before the range check, which is where a Uint8 row
    loses its high byte and an Int32_16 row gets its sign back
 */
-typedef enum { R_UINT8, R_UINT16, R_UINT32_16, R_INT16, R_INT32_16, R_INT32 } rtype_t;
+typedef enum { R_UINT8, R_UINT8X2, R_UINT16, R_UINT32_16, R_INT16, R_INT32_16, R_INT32 } rtype_t;
 typedef struct { const char* idname; uint16_t id; rtype_t type; uint16_t words; int32_t def, min, max, outside; } rrow_t;
 
 #define R_NO_OUTSIDE INT32_MIN
 static const rrow_t rrows[] =
 {
+    { "EEPROM_SPEC_SCOPE_SPEED", 81u, R_UINT8, 1u, 5, 0, 30, 31 },
+    { "EEPROM_FREQ_STEP", 4u, R_UINT32_16, 1u, 3, 0, 9, 10 },
     { "EEPROM_TX_AUDIO_SRC", 5u, R_UINT8, 1u, 0, 0, 4, 5 },
+    { "EEPROM_TCXO_STATE", 6u, R_UINT8, 1u, 1, 0, 31, 32 },
     { "EEPROM_AUDIO_GAIN", 8u, R_UINT8, 1u, 16, 0, 30, 31 },
     { "EEPROM_RX_CODEC_GAIN", 9u, R_UINT8, 1u, 9, 0, 9, 10 },
     { "EEPROM_NB_SETTING", 76u, R_UINT8, 1u, 0, 0, 15, 16 },
@@ -772,6 +776,7 @@ static const rrow_t rrows[] =
     { "EEPROM_MIC_GAIN", 78u, R_UINT8, 1u, 15, 2, 99, 100 },
     { "EEPROM_LINE_GAIN", 79u, R_UINT8, 1u, 12, 3, 31, 32 },
     { "EEPROM_SIDETONE_FREQ", 80u, R_UINT32_16, 1u, 750, 400, 10000, 10001 },
+    { "EEPROM_SPECTRUM_FILTER", 82u, R_UINT8, 1u, 4, 1, 20, 21 },
     { "EEPROM_METER_COLOUR_UP", 295u, R_UINT8, 1u, 2, 0, 19, 20 },
     { "EEPROM_METER_COLOUR_DOWN", 296u, R_UINT8, 1u, 8, 0, 19, 20 },
     { "EEPROM_SPECTRUM_TRACE_COLOUR", 85u, R_UINT8, 1u, 0, 0, 19, 20 },
@@ -813,6 +818,8 @@ static const rrow_t rrows[] =
     { "EEPROM_XVERTER_DISP", 139u, R_UINT32_16, 1u, 0, 0, 10, 11 },
     { "EEPROM_SPECTRUM_MAGNIFY", 143u, R_UINT8, 1u, 0, 0, 5, 6 },
     { "EEPROM_AM_MODE_DISABLE", 146u, R_UINT16, 1u, 1, 0, 7, 8 },
+    { "EEPROM_SPECTRUM_DB_DIV", 148u, R_UINT8, 1u, 3, 1, 8, 9 },
+    { "EEPROM_SPECTRUM_AGC_RATE", 149u, R_UINT8, 1u, 25, 1, 50, 51 },
     { "EEPROM_METER_MODE", 150u, R_UINT8, 1u, 0, 0, 3, 4 },
     { "EEPROM_ALC_DECAY_TIME", 151u, R_UINT32_16, 1u, 10, 0, 20, 21 },
     { "EEPROM_ALC_POSTFILT_TX_GAIN", 152u, R_UINT32_16, 1u, 1, 1, 25, 26 },
@@ -824,6 +831,8 @@ static const rrow_t rrows[] =
     { "EEPROM_DSP_NOTCH_CONV_RATE", 161u, R_UINT8, 1u, 10, 0, 40, 41 },
     { "EEPROM_TX_AUDIO_COMPRESS", 163u, R_INT16, 1u, 2, -1, 13, 14 },
     { "EEPROM_TX_DISABLE", 165u, R_UINT8, 1u, 0, 0, 1, 2 },
+    { "EEPROM_FLAGS1", 166u, R_UINT16, 1u, 384, 0, 65535, R_NO_OUTSIDE },
+    { "EEPROM_FLAGS2", 276u, R_UINT16, 1u, 72, 0, 65535, R_NO_OUTSIDE },
     { "EEPROM_VERSION_MINOR", 288u, R_UINT16, 1u, 0, 0, 255, 256 },
     { "EEPROM_VERSION_RELEASE", 167u, R_UINT16, 1u, 0, 0, 255, 256 },
     { "EEPROM_VERSION_MAJOR", 172u, R_UINT16, 1u, 0, 0, 255, 256 },
@@ -832,7 +841,23 @@ static const rrow_t rrows[] =
     { "EEPROM_LSB_USB_AUTO_SELECT", 171u, R_UINT8, 1u, 2, 0, 2, 3 },
     { "EEPROM_LCD_BLANKING_CONFIG", 173u, R_UINT8, 1u, 0, 0, 255, R_NO_OUTSIDE },
     { "EEPROM_VFO_MEM_MODE", 141u, R_UINT32_16, 1u, 0, 0, 255, 256 },
+    { "EEPROM_DETECTOR_COUPLING_COEFF_2200M", 91u, R_UINT8, 1u, 100, 50, 150, 151 },
+    { "EEPROM_DETECTOR_COUPLING_COEFF_630M", 92u, R_UINT8, 1u, 100, 50, 150, 151 },
+    { "EEPROM_DETECTOR_COUPLING_COEFF_160M", 289u, R_UINT8, 1u, 100, 50, 150, 151 },
+    { "EEPROM_DETECTOR_COUPLING_COEFF_80M", 93u, R_UINT8, 1u, 100, 50, 150, 151 },
+    { "EEPROM_DETECTOR_COUPLING_COEFF_40M", 94u, R_UINT8, 1u, 100, 50, 150, 151 },
+    { "EEPROM_DETECTOR_COUPLING_COEFF_20M", 95u, R_UINT8, 1u, 100, 50, 150, 151 },
+    { "EEPROM_DETECTOR_COUPLING_COEFF_15M", 96u, R_UINT8, 1u, 100, 50, 150, 151 },
+    { "EEPROM_DETECTOR_COUPLING_COEFF_6M", 290u, R_UINT8, 1u, 100, 50, 150, 151 },
+    { "EEPROM_DETECTOR_COUPLING_COEFF_11M", 375u, R_UINT8, 1u, 100, 50, 150, 151 },
     { "EEPROM_VOLTMETER_CALIBRATE", 174u, R_UINT32_16, 1u, 100, 0, 200, 201 },
+    { "EEPROM_LOW_POWER_CONFIG", 330u, R_UINT8, 1u, 60, 0, 254, 255 },
+    { "EEPROM_WATERFALL_COLOR_SCHEME", 175u, R_UINT8, 1u, 0, 0, 4, 5 },
+    { "EEPROM_WATERFALL_VERTICAL_STEP_SIZE", 176u, R_UINT8, 1u, 2, 1, 5, 6 },
+    { "EEPROM_SPECTRUM_SIZE", 273u, R_UINT8, 1u, 0, 0, 1, 2 },
+    { "EEPROM_WATERFALL_CONTRAST", 178u, R_UINT32_16, 1u, 120, 10, 225, 226 },
+    { "EEPROM_WATERFALL_SPEED", 269u, R_UINT8, 1u, 10, 0, 30, 31 },
+    { "EEPROM_TXRX_SWITCH_AUDIO_MUTE_DELAY", 275u, R_UINT8, 1u, 1, 0, 25, 26 },
     { "EEPROM_FILTER_DISP_COLOUR", 277u, R_UINT8, 1u, 0, 0, 19, 20 },
     { "EEPROM_FM_SUBAUDIBLE_TONE_GEN", 280u, R_UINT32_16, 1u, 0, 0, 56, 57 },
     { "EEPROM_FM_SUBAUDIBLE_TONE_DET", 285u, R_UINT32_16, 1u, 0, 0, 56, 57 },
@@ -847,6 +872,9 @@ static const rrow_t rrows[] =
     { "EEPROM_DISPLAY_DBM", 302u, R_UINT8, 1u, 0, 0, 2, 3 },
     { "EEPROM_DBM_CALIBRATE", 322u, R_INT32_16, 1u, 0, -100, 100, 101 },
     { "EEPROM_DIGI_MODE_CONF", 332u, R_UINT8, 1u, 1, 1, 2, 3 },
+    { "EEPROM_RTTY_SHIFT_IDX", 387u, R_UINT32_16, 1u, 1, 0, 5, 6 },
+    { "EEPROM_RTTY_SPEED_IDX", 388u, R_UINT32_16, 1u, 0, 0, 1, 2 },
+    { "EEPROM_PSK_SPEED_IDX", 389u, R_UINT32_16, 1u, 0, 0, 2, 3 },
     { "EEPROM_BASS_GAIN", 303u, R_INT32_16, 1u, 2, -20, 20, 21 },
     { "EEPROM_TREBLE_GAIN", 304u, R_INT32_16, 1u, 0, -20, 20, 21 },
     { "EEPROM_TX_FILTER", 306u, R_UINT8, 1u, 0, 0, 3, 4 },
@@ -855,20 +883,63 @@ static const rrow_t rrows[] =
     { "EEPROM_SAM_PLL_LOCKING_RANGE", 309u, R_INT32_16, 1u, 2500, 50, 8000, 8001 },
     { "EEPROM_SAM_PLL_STEP_RESPONSE", 310u, R_INT32_16, 1u, 65, 1, 100, 101 },
     { "EEPROM_SAM_PLL_BANDWIDTH", 311u, R_INT32_16, 1u, 250, 15, 1000, 1001 },
+    { "EEPROM_I2C1_SPEED", 312u, R_INT32_16, 1u, 5, 1, 20, 21 },
+    { "EEPROM_I2C2_SPEED", 313u, R_INT32_16, 1u, 5, 1, 20, 21 },
     { "EEPROM_SAM_FADE_LEVELER", 314u, R_UINT8, 1u, 1, 0, 1, 2 },
     { "EEPROM_LINEOUT_GAIN", 315u, R_UINT8, 1u, 73, 1, 80, 81 },
+    { "EEPROM_RTC_CALIB", 325u, R_INT16, 1u, 0, -487, 488, 489 },
     { "EEPROM_CW_DECODER_ENABLE", 347u, R_UINT8, 1u, 1, 0, 1, 2 },
     { "EEPROM_Scope_Graticule_Ypos", 348u, R_UINT16, 1u, 0, 0, 480, 481 },
     { "EEPROM_Freq_Display_Font", 349u, R_UINT8, 1u, 0, 0, 1, 2 },
+    { "EEPROM_BAND0_5W", 97u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND1_5W", 98u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND2_5W", 99u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND3_5W", 100u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND4_5W", 101u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND5_5W", 102u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND6_5W", 103u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND7_5W", 104u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND8_5W", 105u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND9_5W", 106u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND10_5W", 107u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND11_5W", 108u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND12_5W", 109u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND13_5W", 110u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND0_FULL", 112u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND1_FULL", 113u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND2_FULL", 114u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND3_FULL", 115u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND4_FULL", 116u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND5_FULL", 117u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND6_FULL", 118u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND7_FULL", 119u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND8_FULL", 120u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND9_FULL", 121u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND10_FULL", 122u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND11_FULL", 123u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND12_FULL", 124u, R_UINT8, 1u, 0, 0, 0, 1 },
+    { "EEPROM_BAND13_FULL", 125u, R_UINT8, 1u, 0, 0, 0, 1 },
     { "EEPROM_Scope_TRACE_HL_BW", 333u, R_UINT8, 1u, 0, 0, 19, 20 },
     { "EEPROM_Scope_TRACE_HL_BW_BGR", 334u, R_UINT8, 1u, 20, 0, 100, 101 },
+    { "EEPROM_TScal0_High", 335u, R_INT32, 2u, 72816, -2147483648, 2147483647, R_NO_OUTSIDE },
+    { "EEPROM_TScal1_High", 337u, R_INT32, 2u, -5, -2147483648, 2147483647, R_NO_OUTSIDE },
+    { "EEPROM_TScal2_High", 339u, R_INT32, 2u, -1615424, -2147483648, 2147483647, R_NO_OUTSIDE },
+    { "EEPROM_TScal3_High", 341u, R_INT32, 2u, -1, -2147483648, 2147483647, R_NO_OUTSIDE },
+    { "EEPROM_TScal4_High", 343u, R_INT32, 2u, 74886, -2147483648, 2147483647, R_NO_OUTSIDE },
+    { "EEPROM_TScal5_High", 345u, R_INT32, 2u, -1630326, -2147483648, 2147483647, R_NO_OUTSIDE },
     { "EEPROM_NUMBER_OF_ENTRIES", 350u, R_UINT16, 1u, 416, 416, 416, 417 },
+    { "EEPROM_DSP_MODE_MASK", 351u, R_UINT16, 1u, 63, 1, 63, 64 },
     { "EEPROM_ENABLE_PTT_RTS", 352u, R_UINT8, 1u, 0, 0, 1, 2 },
     { "EEPROM_CW_DECODER_THRESH", 353u, R_UINT32_16, 1u, 32000, 1000, 50000, 50001 },
+    { "EEPROM_CW_DECODER_BLOCKSIZE", 354u, R_INT32_16, 1u, 88, 8, 128, 129 },
+    { "EEPROM_SMETER_ALPHAS", 355u, R_UINT8X2, 1u, 12805, 257, 25700, R_NO_OUTSIDE },
     { "EEPROM_VSWR_PROTECTION_THRESHOLD", 369u, R_UINT8, 1u, 1, 1, 10, 11 },
+    { "EEPROM_EXPFLAGS1", 370u, R_UINT16, 1u, 0, 0, 65535, R_NO_OUTSIDE },
+    { "EEPROM_CW_DECODER_FLAGS", 373u, R_UINT16, 1u, 49, 0, 32767, 32768 },
+    { "EEPROM_BAND_REGION", 374u, R_UINT8, 1u, 0, 0, 127, 128 },
 };
 static const unsigned rrow_count = sizeof(rrows)/sizeof(rrows[0]);
-#define RROW_SKIPPED 69u   /* rows whose stored range uses macros this harness cannot expand */
+#define RROW_SKIPPED 0u   /* rows whose stored range uses macros this harness cannot expand */
 
 static void blank_image(image_t* img)
 {
@@ -882,13 +953,16 @@ static void blank_image(image_t* img)
 /* mirror of UiWriteSettingEEPROM_*(): an Int32 row takes two words, high first */
 static void row_store(image_t* img, const rrow_t* r, int32_t value)
 {
-    img->present[r->id] = true;
-    img->value[r->id] = (uint16_t)value;
     if (r->type == R_INT32)
     {
+        img->present[r->id] = true;
+        img->value[r->id] = (uint16_t)(((uint32_t)value) >> 16);      /* high word at the id */
         img->present[r->id + 1] = true;
-        img->value[r->id + 1] = (uint16_t)(((uint32_t)value) & 0xFFFFu);
+        img->value[r->id + 1] = (uint16_t)(((uint32_t)value) & 0xFFFFu);  /* low word follows it */
+        return;
     }
+    img->present[r->id] = true;
+    img->value[r->id] = (uint16_t)value;
 }
 
 /* mirror of UiReadSettingEEPROM_UInt8/UInt16/UInt32_16/Int16/Int32_16/Int32 */
@@ -900,6 +974,21 @@ static int32_t row_read(const image_t* img, const rrow_t* r, bool load_default)
     }
     const uint16_t raw = img->value[r->id];
     int32_t v;
+    if (r->type == R_UINT8X2)
+    {
+        /* UiReadSettingEEPROM_UInt8x2() repairs the two bytes separately and never range checks
+           the whole word, so the other half of a repaired word has to survive */
+        uint16_t hi = (raw >> 8) & 0xFF, lo = raw & 0xFF;
+        if (load_default || hi < ((r->min >> 8) & 0xFF) || hi > ((r->max >> 8) & 0xFF))
+        {
+            hi = (r->def >> 8) & 0xFF;
+        }
+        if (load_default || lo < (r->min & 0xFF) || lo > (r->max & 0xFF))
+        {
+            lo = r->def & 0xFF;
+        }
+        return (int32_t)((hi << 8) | lo);
+    }
     switch (r->type)
     {
     case R_UINT8:
@@ -967,23 +1056,85 @@ static int check_row_roundtrip(void)
             probes++;
         }
 
-        /* an erased word must never come back as a value outside the range */
-        blank_image(&img);
-        row_store(&img, r, -1);
-        img.value[r->id] = 0xFFFF;
-        if (r->type == R_INT32)
+        if (r->type == R_UINT8X2)
         {
-            img.value[r->id + 1] = 0xFFFF;
-        }
-        {
-            const int32_t erased = row_read(&img, r, false);
-            if (erased < r->min || erased > r->max)
+            const int32_t hi_min = (r->min >> 8) & 0xFF, hi_max = (r->max >> 8) & 0xFF;
+            const int32_t lo_min = r->min & 0xFF, lo_max = r->max & 0xFF;
+            const int32_t hi_def = (r->def >> 8) & 0xFF, lo_def = r->def & 0xFF;
+
+            /* one byte out of range is repaired on its own, the other byte has to survive */
+            if (hi_max < 0xFF)
             {
-                printf("CHECK FAILED: %s (id %u) reads an erased word as %d, outside %d..%d\n",
-                       r->idname, r->id, erased, r->min, r->max);
-                rc = 1;
+                const int32_t word = ((hi_max + 1) << 8) | lo_min;
+                blank_image(&img);
+                img.present[r->id] = true;
+                img.value[r->id] = (uint16_t)word;
+                const int32_t got = row_read(&img, r, false);
+                const int32_t want = (hi_def << 8) | lo_min;
+                if (got != want)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads 0x%04X as 0x%04X, the high byte is "
+                           "repaired on its own, so it has to read 0x%04X\n",
+                           r->idname, r->id, word, got, want);
+                    rc = 1;
+                }
+                probes++;
             }
-            probes++;
+            if (lo_max < 0xFF)
+            {
+                const int32_t word = (hi_min << 8) | (lo_max + 1);
+                blank_image(&img);
+                img.present[r->id] = true;
+                img.value[r->id] = (uint16_t)word;
+                const int32_t got = row_read(&img, r, false);
+                const int32_t want = (hi_min << 8) | lo_def;
+                if (got != want)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads 0x%04X as 0x%04X, the low byte is "
+                           "repaired on its own, so it has to read 0x%04X\n",
+                           r->idname, r->id, word, got, want);
+                    rc = 1;
+                }
+                probes++;
+            }
+
+            /* an erased word has to leave both bytes inside their range */
+            blank_image(&img);
+            row_store(&img, r, -1);
+            img.value[r->id] = 0xFFFF;
+            {
+                const int32_t erased = row_read(&img, r, false);
+                if (((erased >> 8) & 0xFF) < hi_min || ((erased >> 8) & 0xFF) > hi_max ||
+                    (erased & 0xFF) < lo_min || (erased & 0xFF) > lo_max)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads an erased word as 0x%04X, outside "
+                           "%02X..%02X (high byte) or %02X..%02X (low byte)\n",
+                           r->idname, r->id, erased, hi_min, hi_max, lo_min, lo_max);
+                    rc = 1;
+                }
+                probes++;
+            }
+        }
+        else
+        {
+            /* an erased word must never come back as a value outside the range */
+            blank_image(&img);
+            row_store(&img, r, -1);
+            img.value[r->id] = 0xFFFF;
+            if (r->type == R_INT32)
+            {
+                img.value[r->id + 1] = 0xFFFF;
+            }
+            {
+                const int32_t erased = row_read(&img, r, false);
+                if (erased < r->min || erased > r->max)
+                {
+                    printf("CHECK FAILED: %s (id %u) reads an erased word as %d, outside %d..%d\n",
+                           r->idname, r->id, erased, r->min, r->max);
+                    rc = 1;
+                }
+                probes++;
+            }
         }
 
         /* the truncation case: a Uint8 row whose range fits a byte accepts 0x0100 | value */
