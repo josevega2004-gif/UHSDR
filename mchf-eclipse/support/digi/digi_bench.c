@@ -926,6 +926,381 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
 }
 
 /* ------------------------------------------------------------------ *
+ *  the capture gate: whether a recording is worth pinning at all
+ * ------------------------------------------------------------------ */
+// Pinning an on air take promises four things: the audio holds the signal, at the pair the modem
+// filters expect, on a bit clock that repeats, with no gap in it. Every one of those has been
+// assumed rather than measured here at least once - a pair 1.5 kHz off, two "tones" that were one
+// carrier's skirt, a take that was mostly noise, and truncation. This verb measures them.
+typedef struct { float* x; size_t n; uint32_t rate; } cap_t;
+
+static int cap_load(const char* path, cap_t* c)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) { printf("cannot open %s\n", path); return 0; }
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t* buf = malloc((size_t)sz);
+    if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz)
+    {
+        free(buf); fclose(f); printf("short read on %s\n", path); return 0;
+    }
+    fclose(f);
+
+    uint32_t rate = 0, ch = 1, bits = 0, tag = 0, i = 12; const uint8_t* data = 0; uint32_t dlen = 0;
+    while (i + 8 <= (size_t)sz)
+    {
+        uint32_t clen = rd32(buf + i + 4);
+        if (clen > (size_t)sz - i - 8) break;
+        if (!memcmp(buf + i, "fmt ", 4))
+        {
+            if (clen < 16) { free(buf); printf("the fmt chunk of %s is too short\n", path); return 0; }
+            tag  = rd16(buf + i + 8);
+            ch   = rd16(buf + i + 10);
+            rate = rd32(buf + i + 12);
+            bits = rd16(buf + i + 22);
+        }
+        else if (!memcmp(buf + i, "data", 4)) { data = buf + i + 8; dlen = clen; }
+        else break;
+        i += 8 + clen + (clen & 1);
+    }
+    if (!data || !rate || !dlen || tag != 1 || bits != 16 || !ch)
+    {
+        free(buf);
+        printf("%s: needs a 16 bit PCM WAV with a data chunk (format %u, %u bit, %u channel(s), %u Hz)\n",
+               path, tag, bits, ch, rate);
+        return 0;
+    }
+    const size_t frames = (size_t)dlen / (2 * ch);
+    c->x = malloc(frames * sizeof(float));
+    if (!frames || !c->x) { free(c->x); free(buf); printf("%s holds no audio\n", path); return 0; }
+    for (size_t k = 0; k < frames; k++)
+    {
+        c->x[k] = (float)(int16_t)rd16(data + k * 2 * ch) / 32768.0f;
+    }
+    c->n = frames;
+    c->rate = rate;
+    free(buf);
+    return 1;
+}
+
+#define GATE_PI 3.14159265358979323846
+
+// magnitude of one frequency inside a window, normalised so windows of different length compare
+static double gate_tone(const float* x, int n, double hz, double sr)
+{
+    double re = 0.0, im = 0.0;
+    const double w = 2.0 * GATE_PI * hz / sr;
+    for (int k = 0; k < n; k++)
+    {
+        re += x[k] * cos(w * (double)k);
+        im -= x[k] * sin(w * (double)k);
+    }
+    return n > 0 ? sqrt(re * re + im * im) / (double)n : 0.0;
+}
+
+// the busiest tone of the passband, skipping the neighbourhood of one already found. A 20 ms window
+// is one bit of the slowest RTTY speed, so it resolves the pair without resolving the bits that
+// make it up; scanning twice rather than keeping two maxima in one pass stops a pair of adjacent
+// bins at the top of a single peak from being read as two tones.
+static double gate_best_tone(const cap_t* c, double skip_hz)
+{
+    const int w = (int)lround(0.020 * c->rate);
+    const int hop = w / 2;
+    const double top = fmin(2200.0, 0.45 * (double)c->rate);
+    double best = 0.0, bf = 0.0;
+    for (double f = 300.0; f <= top; f += 5.0)
+    {
+        if (skip_hz > 0.0 && fabs(f - skip_hz) < 150.0) continue;
+        double acc = 0.0;
+        int frames = 0;
+        for (size_t s = 0; s + (size_t)w <= c->n; s += (size_t)hop)
+        {
+            acc += gate_tone(c->x + s, w, f, c->rate);
+            frames++;
+        }
+        if (!frames) return 0.0;
+        acc /= frames;
+        if (acc > best) { best = acc; bf = f; }
+    }
+    return bf;
+}
+
+static int gate_coarse_pair(const cap_t* c, double* lo, double* hi)
+{
+    const double f1 = gate_best_tone(c, 0.0);
+    if (f1 <= 0.0) return 0;
+    const double f2 = gate_best_tone(c, f1);
+    if (f2 <= 0.0) return 0;
+    *lo = f1 < f2 ? f1 : f2;
+    *hi = f1 < f2 ? f2 : f1;
+    return 1;
+}
+
+typedef struct
+{
+    double lo_hz, hi_hz, lo_spread, hi_spread;   // refined tone frequencies and their spread
+    double f_low, f_high, f_both;                // fraction of 5 ms windows holding one tone or both
+    int windows;
+} gate_pair_t;
+
+// 5 ms is the resolution that separates "this window is one tone" from "this window straddles a
+// transition"; at 20 ms windows a straddling bit reads as both tones and a bad pair looks fine.
+static void gate_pair_stats(const cap_t* c, double clo, double chi, gate_pair_t* g)
+{
+    const int w = (int)lround(0.005 * c->rate);
+    double sl = 0.0, sl2 = 0.0, wl = 0.0, sh = 0.0, sh2 = 0.0, wh = 0.0;
+    g->f_low = g->f_high = g->f_both = 0.0;
+    g->windows = 0;
+    for (size_t s = 0; s + (size_t)w <= c->n; s += (size_t)w)
+    {
+        const double a = gate_tone(c->x + s, w, clo, c->rate);
+        const double b = gate_tone(c->x + s, w, chi, c->rate);
+        const double db = 20.0 * log10((b + 1e-9) / (a + 1e-9));
+        g->windows++;
+        if (fabs(db) < 6.0) { g->f_both += 1.0; continue; }
+        // refine the tone this window actually holds, so a dial offset reads as an offset and not
+        // as a pair the modem cannot filter
+        const double near = db < 0.0 ? clo : chi;
+        double best = 0.0, bf = near;
+        for (double f = near - 40.0; f <= near + 40.0; f += 0.5)
+        {
+            const double m = gate_tone(c->x + s, w, f, c->rate);
+            if (m > best) { best = m; bf = f; }
+        }
+        if (db < 0.0) { g->f_low += 1.0; sl += bf * best; sl2 += bf * bf * best; wl += best; }
+        else          { g->f_high += 1.0; sh += bf * best; sh2 += bf * bf * best; wh += best; }
+    }
+    if (g->windows)
+    {
+        const double n = (double)g->windows;
+        g->f_low /= n; g->f_high /= n; g->f_both /= n;
+    }
+    g->lo_hz = wl > 0.0 ? sl / wl : clo;
+    g->hi_hz = wh > 0.0 ? sh / wh : chi;
+    g->lo_spread = wl > 0.0 ? sqrt(fabs(sl2 / wl - g->lo_hz * g->lo_hz)) : 0.0;
+    g->hi_spread = wh > 0.0 ? sqrt(fabs(sh2 / wh - g->hi_hz * g->hi_hz)) : 0.0;
+}
+
+typedef struct { double period_ms, dispersion_pct; int transitions; } gate_clock_t;
+
+// The tone the signal is on flips at every bit boundary, so the transitions sit on a grid whose step
+// is the bit. Fitting that step over the whole take, then measuring how far the transitions scatter
+// off it, is the difference between a clock and a stretch of audio that happens to have two tones.
+static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_clock_t* k)
+{
+    const int w = (int)lround(0.005 * c->rate);
+    const int hop = (int)lround(0.001 * c->rate);
+    size_t cap = 4096, n = 0;
+    double* t = malloc(cap * sizeof(double));
+    k->transitions = 0; k->period_ms = 0.0; k->dispersion_pct = 0.0;
+    if (!t) return;
+    // A zero crossing of the raw discriminator is a fragile thing to count: a real recording slews
+    // through zero over several windows and noise crosses it whenever neither tone is loud. Counting
+    // a transition only when the signal has settled on the other tone (hysteresis) finds one per bit
+    // change instead of several per slew.
+    // A single hop on the other tone is noise inside a long mark; a transition is the signal staying
+    // there. The confirmation is shorter than a bit, so a real change is never missed.
+    const int confirm = (int)lround(0.003 * c->rate / (double)hop);
+    int state = 0, opp = 0;
+    size_t opp_start = 0;
+    for (size_t s = 0; s + (size_t)w <= c->n; s += (size_t)hop)
+    {
+        const double a = gate_tone(c->x + s, w, lo, c->rate);
+        const double b = gate_tone(c->x + s, w, hi, c->rate);
+        const double g = (b - a) / (b + a + 1e-9);
+        if (fabs(g) < 0.5) continue;                 // mid slew, or neither tone: not a decision
+        const int now = g > 0.0 ? 1 : -1;
+        if (!state) { state = now; continue; }        // the first settled tone starts the record
+        if (now == state) { opp = 0; continue; }
+        if (opp == 0) opp_start = s;
+        if (++opp >= confirm)
+        {
+            if (n == cap) { cap *= 2; t = realloc(t, cap * sizeof(double)); if (!t) return; }
+            t[n++] = ((double)opp_start + 0.5 * (double)w) / (double)c->rate;  // window centre
+            state = now;
+            opp = 0;
+        }
+    }
+    if (n < 16) { free(t); return; }
+    // the search is deliberately wider than the accept window: a recording whose time base is wrong
+    // by 20 % still has a grid, and finding it is what lets the gate say "40 baud, not 50" instead of
+    // reporting the nominal period for a take that has no such period at all
+    const double nominal = 1000.0 / baud;
+    double best_t = nominal, best_r = -1.0;
+    for (double T = nominal * 0.70; T <= nominal * 1.30; T += 0.005)
+    {
+        double re = 0.0, im = 0.0;
+        for (size_t i = 0; i < n; i++)
+        {
+            const double ph = fmod(t[i] * 1000.0, T) / T;
+            re += cos(2.0 * GATE_PI * ph);
+            im += sin(2.0 * GATE_PI * ph);
+        }
+        const double r = sqrt(re * re + im * im) / (double)n;
+        if (r > best_r) { best_r = r; best_t = T; }
+    }
+    double re = 0.0, im = 0.0;
+    for (size_t i = 0; i < n; i++)
+    {
+        const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
+        re += cos(2.0 * GATE_PI * ph);
+        im += sin(2.0 * GATE_PI * ph);
+    }
+    const double mean = atan2(im, re) / (2.0 * GATE_PI);
+    double sq = 0.0;
+    for (size_t i = 0; i < n; i++)
+    {
+        double ph = fmod(t[i] * 1000.0, best_t) / best_t - mean;
+        while (ph > 0.5) ph -= 1.0;
+        while (ph < -0.5) ph += 1.0;
+        sq += ph * ph;
+    }
+    k->period_ms = best_t;
+    k->transitions = (int)n;
+    k->dispersion_pct = 100.0 * sqrt(sq / (double)n);
+    free(t);
+}
+
+typedef struct { double longest_ms, fraction; int gaps; } gate_drop_t;
+
+static int cmp_double(const void* a, const void* b)
+{
+    const double x = *(const double*)a, y = *(const double*)b;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+// a recorder that stalls leaves a stretch of silence in the middle of the take; trimming the ends
+// does not remove it, and every bit clock measured across it is wrong
+static void gate_dropouts(const cap_t* c, gate_drop_t* d)
+{
+    const int w = (int)lround(0.001 * c->rate);
+    const size_t nw = c->n / (size_t)w;
+    d->longest_ms = 0.0; d->fraction = 0.0; d->gaps = 0;
+    if (!nw) return;
+    double* rms = malloc(nw * sizeof(double));
+    double* sorted = malloc(nw * sizeof(double));
+    if (!rms || !sorted) { free(rms); free(sorted); return; }
+    for (size_t i = 0; i < nw; i++)
+    {
+        double acc = 0.0;
+        for (int k = 0; k < w; k++) acc += (double)c->x[i * (size_t)w + (size_t)k] * (double)c->x[i * (size_t)w + (size_t)k];
+        rms[i] = sqrt(acc / (double)w);
+    }
+    memcpy(sorted, rms, nw * sizeof(double));
+    qsort(sorted, nw, sizeof(double), cmp_double);
+    const double median = sorted[nw / 2];
+    const double thr = 0.15 * median;
+    size_t run = 0, longest = 0, below = 0;
+    for (size_t i = 0; i < nw; i++)
+    {
+        if (rms[i] < thr)
+        {
+            below++;
+            if (run == 0) d->gaps++;
+            run++;
+            if (run > longest) longest = run;
+        }
+        else run = 0;
+    }
+    d->longest_ms = (double)longest;
+    d->fraction = (double)below / (double)nw;
+    free(rms); free(sorted);
+}
+
+// Thresholds, set from two measurements that bracket the useful range: a clean 50 baud take generated
+// for this purpose measures 20.000 ms with 0.0 % scatter, and the DDK2 fixture - real audio through
+// the WebSDR client's recorder - measures 18.75 ms with 19 %. The fixture is the realistic case, so
+// the limits sit just outside it: the period and scatter tests catch a wrong baud rate, a doubled or
+// halved recording and a gappy take, while the pair and the bimodality carry the accept/reject
+// decision. A take that cannot clear these is not evidence about the modem either way.
+#define GATE_SINGLE_MIN   0.55   // windows holding one tone
+#define GATE_BOTH_MAX     0.35   // windows holding both: straddled bits plus noise
+#define GATE_PAIR_SLACK   30.0   // Hz between the measured pair and the declared shift
+#define GATE_PERIOD_TOL   0.10   // fraction of a bit
+#define GATE_DISPERSION   25.0   // percent of a bit
+#define GATE_GAP_MS        5.0   // longest hole a take may carry
+
+static int capture_check(const char* path, uint16_t shift, uint16_t baud)
+{
+    cap_t c;
+    if (!cap_load(path, &c)) return 1;
+    printf("capture   : %s\n", path);
+    float peak = 0.0f;
+    for (size_t k = 0; k < c.n; k++) if (fabsf(c.x[k]) > peak) peak = fabsf(c.x[k]);
+    printf("audio     : %u Hz, %.2f s, peak %.2f of full scale\n", c.rate, (double)c.n / (double)c.rate,
+           (double)peak);
+
+    double clo = 0.0, chi = 0.0;
+    if (!gate_coarse_pair(&c, &clo, &chi))
+    {
+        printf("REJECT    : less than two tones in 300..2200 Hz, so there is no pair to measure\n");
+        free(c.x);
+        return 1;
+    }
+    gate_pair_t pair;
+    gate_pair_stats(&c, clo, chi, &pair);
+    const double sep = pair.hi_hz - pair.lo_hz;
+    const double centre = 0.5 * (pair.hi_hz + pair.lo_hz);
+
+    gate_clock_t clock;
+    gate_clock(&c, pair.lo_hz, pair.hi_hz, (double)baud, &clock);
+    gate_drop_t drop;
+    gate_dropouts(&c, &drop);
+
+    printf("tones     : %.0f / %.0f Hz, separation %.0f Hz (declared %u), centre %.0f Hz\n",
+           pair.lo_hz, pair.hi_hz, sep, (unsigned)shift, centre);
+    printf("            spread %.1f / %.1f Hz; offset from the modem's 915/1365 %.0f / %.0f Hz\n",
+           pair.lo_spread, pair.hi_spread, 915.0 - pair.lo_hz, 1365.0 - pair.hi_hz);
+    printf("bimodality: %.2f low, %.2f high, %.2f both (5 ms windows, %d)\n",
+           pair.f_low, pair.f_high, pair.f_both, pair.windows);
+    if (clock.transitions)
+    {
+        printf("clock     : period %.3f ms (%d transitions), scatter %.1f %% of a bit\n",
+               clock.period_ms, clock.transitions, clock.dispersion_pct);
+    }
+    else
+    {
+        printf("clock     : no transition grid: fewer than 16 tone changes\n");
+    }
+    printf("dropouts  : %d gap(s) below 15 %% of the median, longest %.0f ms (%.1f %% of the take)\n",
+           drop.gaps, drop.longest_ms, 100.0 * drop.fraction);
+
+    int bad = 0;
+    const double nominal = 1000.0 / (double)baud;
+    if (fabs(sep - (double)shift) > GATE_PAIR_SLACK)
+    {
+        printf("REJECT    : the pair is %.0f Hz apart, not the %u Hz the modem will filter\n",
+               sep, (unsigned)shift);
+        bad = 1;
+    }
+    if (pair.f_low + pair.f_high < GATE_SINGLE_MIN || pair.f_both > GATE_BOTH_MAX)
+    {
+        printf("REJECT    : %.2f of the take holds one tone and %.2f holds both; that is not a\n"
+               "            two tone signal being switched, whatever its spectrum looks like\n",
+               pair.f_low + pair.f_high, pair.f_both);
+        bad = 1;
+    }
+    if (!clock.transitions || fabs(clock.period_ms - nominal) > nominal * GATE_PERIOD_TOL
+        || clock.dispersion_pct > GATE_DISPERSION)
+    {
+        printf("REJECT    : no %u baud clock (wanted %.2f ms, measured %.2f ms, scatter %.1f %%)\n",
+               (unsigned)baud, nominal, clock.period_ms, clock.dispersion_pct);
+        bad = 1;
+    }
+    if (drop.longest_ms > GATE_GAP_MS)
+    {
+        printf("REJECT    : %.0f ms of silence in the middle of the take\n", drop.longest_ms);
+        bad = 1;
+    }
+    if (!bad)
+    {
+        printf("ACCEPT    : the pair, the bit clock and the continuity are all inside the gate\n");
+    }
+    free(c.x);
+    return bad ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
  *  self checks
  * ------------------------------------------------------------------ */
 static int failures;
@@ -1120,7 +1495,7 @@ int main(int argc, char** argv)
     // every mode that feeds the modem goes through the receiver's AGC, so it is set up once, before
     // any case. rtty-wav is left out on purpose: it decodes a recording that already went through a
     // receiver's AGC, and running it through a second one would not be the radio's path.
-    if (strcmp(what, "rtty-wav") && strcmp(what, "wefax")) radio_agc_setup();
+    if (strcmp(what, "rtty-wav") && strcmp(what, "wefax") && strcmp(what, "capture-check")) radio_agc_setup();
     if (!strcmp(what, "test")) return selftest();
     if (!strcmp(what, "rtty")) { return rtty_table(RTTY_TABLE_MSG, false); }
     if (!strcmp(what, "rtty-long"))
@@ -1140,6 +1515,14 @@ int main(int argc, char** argv)
     if (!strcmp(what, "rtty-shift")) { return rtty_shift(); }
     if (!strcmp(what, "rtty-tune")) { return rtty_tune(); }
     if (!strcmp(what, "wefax")) return wefax_table();
+    // the gate a take has to clear before it is worth decoding, let alone pinning: it measures the
+    // file and never touches the modem, so it cannot be fooled by the modem agreeing with itself
+    if (!strcmp(what, "capture-check") && argc > 2)
+    {
+        const uint16_t shift = argc > 3 ? (uint16_t)atoi(argv[3]) : 450;
+        const uint16_t baud = argc > 4 ? (uint16_t)atoi(argv[4]) : 50;
+        return capture_check(argv[2], shift, baud);
+    }
     if (!strcmp(what, "rtty-wav") && argc > 2)
     {
         char got[8192];
@@ -1159,6 +1542,8 @@ int main(int argc, char** argv)
         }
         return 0;
     }
-    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax|rtty-wav <file.wav> [shift] [expected text] [45|50 baud] [max CER %]]\n");
+    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax"
+                    "|capture-check <file.wav> [shift] [45|50 baud]"
+                    "|rtty-wav <file.wav> [shift] [expected text] [45|50 baud] [max CER %%]]\n");
     return 2;
 }

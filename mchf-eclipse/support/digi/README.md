@@ -8,11 +8,58 @@ make -C support/digi rtty     # RTTY character error rate, modem looped back on 
 make -C support/digi rtty-long  # the same matrix, eight copies of the message (one character 0.26 %)
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
+make -C support/digi capture-check  # is a recording fit to be pinned: pair, bit clock, continuity
 ./digi_bench rtty-tune     # how much tuning error the demodulator survives, in Hz and ppm
+./digi_bench capture-check <file.wav> [shift] [45|50 baud]
 ./digi_bench rtty-wav <file.wav> [shift] ["expected text"] [45|50 baud] [max CER %]
                             # decode a recorded file with the firmware demodulator; the optional
                             # CER limit turns a pinned recording into a graded case
 ```
+
+## The capture gate, `capture-check`
+
+A take is worth pinning only if the audio really holds the signal: two tones the modem's filters can
+use, a bit clock that repeats, and no hole in the middle. Each of those has been assumed rather than
+measured at least once here - a pair 1.5 kHz off the filters, "two tones" that were one carrier's
+skirt, a take that was mostly noise, two transfers that arrived truncated. `capture-check` measures
+them from the file itself, before any decoding, so it cannot be talked into agreeing with the modem.
+
+```
+make -C support/digi capture-check
+  capture   : fixtures/ddk2-4583.wav
+  audio     : 4000 Hz, 13.70 s, peak 0.22 of full scale
+  tones     : 932 / 1374 Hz, separation 442 Hz (declared 450), centre 1153 Hz
+              spread 15.8 / 14.9 Hz; offset from the modem's 915/1365 -17 / -9 Hz
+  bimodality: 0.47 low, 0.39 high, 0.14 both (5 ms windows, 2740)
+  clock     : period 18.750 ms (357 transitions), scatter 18.9 % of a bit
+  dropouts  : 21 gap(s) below 15 % of the median, longest 2 ms (0.2 % of the take)
+  ACCEPT    : the pair, the bit clock and the continuity are all inside the gate
+```
+
+The four numbers, and why each one is measured the way it is:
+
+- **tones** are refined on 5 ms windows that hold one tone only, so a dial offset reports as an
+offset instead of a pair the modem cannot filter. 5 ms matters: at 20 ms a straddling bit reads as
+both tones at once and any pair looks well behaved.
+- **bimodality** is the fraction of those 5 ms windows holding one tone or both. A two tone signal
+being switched reads about 0.86 single tone and 0.14 both, the both being transitions; a single
+carrier or a stretch of noise reads near 0.0 single and 1.0 both, whatever its spectrum looks like.
+- **clock** fits the bit period to the times the signal changes tone, then measures how far those
+transitions scatter off that grid, as a percentage of a bit. A clean take measures 20.000 ms and
+0.0 %; the DDK2 fixture measures 18.75 ms and 19 %, which is what real fading and the client
+recorder's timing cost. The fixture's 6 % short period is worth knowing rather than acting on: a
+recorder that dropped samples would leave exactly that shape, so it is a candidate explanation for
+the take's 2.7 % CER where a synthetic take reads 0.0 %, but this measurement cannot tell it apart
+from fading and is not evidence on its own.
+- **dropouts** are 1 ms slots below 15 % of the median level, reported as a count and the longest
+run. Trimming the ends of a take does not remove a stall in the middle of one.
+
+The limits are set just outside the fixture's own numbers (single tone above 0.55, both below 0.35,
+period within 10 %, scatter under 25 % of a bit, no gap over 5 ms), so a take that fails them is not
+evidence about the modem either way. The gate has already earned its place: a 24 s take of the
+10.1 MHz band whose free decode was `VXTYGJJUKD` reads 234 Hz apart with 0.66 of its windows holding
+both tones and is refused, while a synthetic 50 baud take - the same program, the same filters,
+where the pair really is switched - reads 0.00 both tones and 20.000 ms and is accepted.
 
 `rtty-wav` takes any 16 bit PCM WAV, any sample rate, mono or stereo: it resamples to the 12 kHz
 the demodulator is pinned at and trims gain from the file peak, so a quiet recording still reaches

@@ -76,6 +76,12 @@ rtty-tune: digi_bench
 rtty-ddk2: digi_bench
 	@./digi_bench rtty-wav fixtures/ddk2-4583.wav 450 "CQ CQ CQ DE DDK2 DDH7 DDK9 FREQUENCIES   4583 KHZ   7646 KHZ   10100.8 KHZ" 50 3
 
+# the gate a candidate take has to clear before it is pinned: the pair, the bit clock and the
+# continuity, measured from the audio. Run it on any new recording first; the fixture below is the
+# reference for what an accepted take reads like.
+capture-check: digi_bench
+	@./digi_bench capture-check fixtures/ddk2-4583.wav 450 50
+
 clean:
 	rm -f digi_bench *.o *.wav *.pgm
 # fixtures/ is untouched on purpose: the on air recording is tracked, not a build product
