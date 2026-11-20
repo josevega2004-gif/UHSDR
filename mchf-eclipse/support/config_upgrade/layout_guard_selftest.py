@@ -350,7 +350,9 @@ def case_rename_annotated_value():
     line, and plain_name() ends a name at the first bracket while alias_of() anchors "(was ...)" at
     the end of the line. The suffix therefore has to be appended after the annotation, not in place
     of it: dropping the annotation loses how the word is written, and putting the suffix before it
-    makes alias_of() miss the rename and the translation fail later.
+    makes alias_of() miss the rename, which the generator stage does not see - the record still
+    names the value the table stores - and the compiled translation then fails on the value having
+    "did not exist" in the two records.
     """
     owner = 'EEPROM_XVERTER_OFFSET_HIGH'
     stale = owner + '_RENAMED'
@@ -371,6 +373,17 @@ def case_rename_annotated_value():
         print('  FAIL  the record does not carry %r' % line.strip())
         failures.append('the annotated rename lost its annotation or its alias')
     expect('the compiled check accepts the annotated rename', run_check(), 0)
+
+    # the rule is only worth stating if the other order is refused, and this order is refused late:
+    # without the alias the record still names the value the table stores, so the generator's own
+    # verdict passes and the compiled translation is what fails
+    text = RECORD.read_text(encoding='utf-8')
+    swapped = text.replace(line, '%s %s (was %s) (written outside the table)\n'
+                           % (word, stale, owner))
+    assert swapped != text, 'the record line this case rewrites is gone, update this case'
+    RECORD.write_text(layout_digest.seal(swapped), encoding='utf-8')
+    expect('a suffix placed before the annotation', run_check(), None,
+           'id %s' % word, stale)
 
 
 def case_suffix_names_another_value():
