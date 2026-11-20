@@ -1273,7 +1273,9 @@ LAYOUT_HISTORY = [
     # "make layout-record" rewrites the file of the current marker from the table: it takes a
     # renamed value with it, writes the name the value had as a "(was <name>)" suffix on its own
     # word line so the previous layout translation still finds it, and refuses when a word changed
-    # hands or disappeared.
+    # hands or disappeared. A record written for a marker that has just moved has no history of its
+    # own, so the suffix is taken from the record of the marker before it: a rename that arrives
+    # together with the bump keeps the name the layout in the field knows the value by.
     (0x5AA5, 'layout-0x5AA5.map'),
 ]
 
@@ -1456,15 +1458,38 @@ if RECORD_LAYOUT:
                  'through the wrong addresses.'
                  % (len(relocated) + len(gone), BASELINE_LAYOUT_FIRST_UNUSED,
                     describe(relocated + gone)))
+    # A marker this build writes for the first time has no record of its own yet. A rename that
+    # arrived together with the bump would then be written as a plain name, and the name the
+    # previous layout knows that value by would only exist in the record of the marker before this
+    # one. That record is where the alias is taken from, so a bump does not drop the link the
+    # translation of the previous layout needs. The test is the one below, applied to the older
+    # record: the name now at the word has to be new to it, and the name it had has to be gone from
+    # the table - a value that merely moved to this word is not a rename and gets no suffix.
+    older = rec_map
+    if not older:
+        history = [m for m, _name in LAYOUT_HISTORY]
+        before = history[:history.index(current_magic)] if current_magic in history else []
+        if before:
+            older = recorded[before[-1]]
+    older_names = {plain_name(o) for o in older.values()}
+    now_names = {plain_name(o) for o in current_map.values()}
+
     # A value renamed twice keeps the name the previous layout knows it by: the suffix already on
     # its line is the older name and moves along with the value, rather than the intermediate one
     # replacing it. A suffix that has caught up with the current name is no rename any more.
     fresh = {word for word, _text in renamed}
     rows = []
     for word, owner in layout_map:
-        had = alias_of(rec_map.get(word, ''))
+        had = alias_of(older.get(word, '')) if older else None
         if word in fresh:
-            had = had or plain_name(rec_map[word])
+            had = had or plain_name(older[word])
+        elif older and not rec_map:
+            was = older.get(word)
+            if was is not None:
+                was = alias_of(was) or plain_name(was)
+                if was != plain_name(owner) and plain_name(owner) not in older_names \
+                        and was not in now_names:
+                    had = was
         if had == plain_name(owner):
             had = None
         rows.append((word, owner + (' (was %s)' % had if had else '')))
@@ -1476,9 +1501,12 @@ if RECORD_LAYOUT:
               % (current_magic, len(current_map), BASELINE_LAYOUT_FIRST_UNUSED))
         sys.exit(0)
     path.write_text(text, encoding='utf-8')
+    carried = sum(1 for word, owner in rows if alias_of(owner) and not rec_map)
     print('  layout record: marker 0x%X now records %d words below %d in %s%s. Commit it together '
           'with the change that made it stale; the marker does not move.'
           % (current_magic, len(current_map), BASELINE_LAYOUT_FIRST_UNUSED, records[current_magic],
+             (', carrying %d renamed value(s) forward from the previous record' % carried)
+             if not rec_map else
              (', renaming %s and recording the name it had' %
               (', '.join('%d %s' % (w, current_map[w]) for w, _t in renamed[:3]) +
                (' ...' if len(renamed) > 3 else ''))) if renamed else
@@ -1639,13 +1667,13 @@ if withdrawn:
              'on its word line. Without it the translation is judged against a value the previous '
              'layout did not have, while the firmware still returns the renamed value\'s old '
              'address, so the check fails on the translation and names that instead of this. The '
-             'record of a new marker is written from the table and starts with no suffix, which is '
-             'how a rename committed together with the marker bump gets here.\n'
-             'Sequence the two changes: bump the marker first with the value still under its old '
-             'name, then rename it in its own commit and run "make layout-record", which writes the '
-             'name it had. If the bump is already recorded, add " (was <the old name>)" to that '
-             'word\'s line in %s and reseal it with "python3 '
-             'support/config_upgrade/layout_digest.py %s".\n'
+             'record of a new marker is written from the table, and the recorder carries a rename '
+             'it finds there across the bump: the name the value had at that word in the record of '
+             'the marker before it becomes the "(was <name>)" suffix. This state is a record '
+             'written before that carry existed, or one edited by hand.\n'
+             'Add " (was <the old name>)" to that word\'s line in %s and reseal it with "python3 '
+             'support/config_upgrade/layout_digest.py %s", or delete the new record and run '
+             '"make layout-record" again.\n'
              'If the value really was removed and its word given to a new setting, remove it and '
              'bump first, then add the new setting in a later commit: a lost suffix and a reused '
              'word read the same in the two records, so the guard will not guess between them.'

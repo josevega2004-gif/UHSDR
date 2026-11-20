@@ -21,8 +21,9 @@ one mutation at a time and checks the verdict:
   9. two rows store into one variable          -> the check fails
  10. the menu offers more than the row stores  -> the check fails
  12. the whole marker bump, one edit at a time -> the check fails until all three edits are there
- 13. a rename committed with a marker bump    -> the check fails, naming the word and the
-                                                 sequencing, instead of the translation
+ 13. a rename committed with a marker bump    -> the recorder carries the name the value had
+                                                 from the record of the previous marker, and the
+                                                 check accepts the bump with it
 
 An assertion may look at the exit code and at the data a verdict has to name: the settings that
 were named, the marker that was recorded, the record that did not parse. It may not look at the
@@ -236,28 +237,54 @@ def case_rename():
 
 
 def case_rename_with_a_bump():
-    """a value renamed in the same commit as a marker bump: the new record has no suffix to follow
+    """a value renamed in the same commit as a marker bump: the alias has to cross the bump
 
-    The record of a new marker is written from the table, so a rename that goes in with the bump
-    arrives with the new name on the word line and nothing that says the previous layout knew that
-    word by another name. The firmware still returns the value's old address, so the check used to
-    fail on the translation of a value the previous layout "did not have"; it has to name the word
-    and the sequencing that lost the suffix instead.
+    A bump needs a real map change, so this moves one value to another word and renames a second
+    one in the same edit - which is exactly the case the recorder used to lose, because the new
+    marker's record is written from the table and a bare rename leaves nothing on the line to say
+    what the previous layout called that value. The recorder takes that name from the record of the
+    marker before this one and writes it as the "(was <name>)" suffix, and the check has to accept
+    the bump with it.
     """
-    text = HEADER.read_text(encoding='utf-8')
-    match = re.search(r'(?m)^#define\s+(EEPROM_FREQ_STEP)\s+(\d+)\s*$', text)
+    moved = HEADER.read_text(encoding='utf-8')
+    moved = re.sub(r'(?m)^(#define\s+EEPROM_AM_PEP_WARN\s+)382\b', r'\g<1>390', moved)
+    assert moved != HEADER.read_text(encoding='utf-8'), \
+        'the define this case moves is gone, update this case'
+
+    match = re.search(r'(?m)^#define\s+(EEPROM_FREQ_STEP)\s+(\d+)\s*$', moved)
     assert match, 'the define this case renames is gone, update this case'
     owner, word = match.group(1), match.group(2)
     stale = owner + '_RENAMED'
-    for path in (HEADER, TABLE):
-        source = path.read_text(encoding='utf-8')
-        path.write_text(re.sub(r'\b%s\b' % owner, stale, source), encoding='utf-8')
-    # the record a bump writes: the new name on the same word, and no suffix
-    record = RECORD.read_text(encoding='utf-8')
-    RECORD.write_text(layout_digest.seal(record.replace('%s %s\n' % (word, owner),
-                                                        '%s %s\n' % (word, stale))),
-                      encoding='utf-8')
-    expect('a rename with no suffix to follow it', run(), FAILS, 'word %s' % word, stale)
+    moved = re.sub(r'\b%s\b' % owner, stale, moved)
+
+    bumped = MARKER + 1
+    while bumped in KNOWN_MARKERS:
+        bumped += 1
+    moved = re.sub(r'(#define\s+CONFIG_LAYOUT_VERSION_MAGIC\s+)(0x[0-9A-Fa-f]+|\d+)',
+                   lambda m: m.group(1) + '0x%X' % bumped, moved)
+    HEADER.write_text(moved, encoding='utf-8')
+
+    table = TABLE.read_text(encoding='utf-8')
+    guard = 'layout_version != CONFIG_LAYOUT_VERSION_MAGIC'
+    assert guard in table, 'the migration check this case extends is gone, update this case'
+    table = table.replace(guard, 'layout_version != 0x%X && %s' % (MARKER, guard))
+    TABLE.write_text(re.sub(r'\b%s\b' % owner, stale, table), encoding='utf-8')
+
+    # appended, the way LAYOUT_HISTORY is kept: the record of the marker before this one is what
+    # the alias is carried from
+    source = GEN.read_text(encoding='utf-8')
+    assert '\n]\n' in source, 'LAYOUT_HISTORY is not a list this case can append to'
+    source = source.replace('\n]\n',
+                            "\n    (0x%X, 'layout-0x%X.map'),\n]\n" % (bumped, bumped), 1)
+    GEN.write_text(source, encoding='utf-8')
+
+    expect('the bump, the move and the rename together, before the new record exists',
+           run('--record-layout'), 0, 'layout-0x%X.map' % bumped)
+    written = (ROOT / 'support/config_upgrade' / ('layout-0x%X.map' % bumped)).read_text(encoding='utf-8')
+    if ('%s %s (was %s)\n' % (word, stale, owner)) not in written:
+        print('  FAIL  the new record did not carry the name the value had across the bump')
+        failures.append('the bump dropped the alias')
+    expect('the whole bump with the rename in it', run(), 0)
 
 
 def case_old_layout_translation():
@@ -418,7 +445,7 @@ CASES = (
     ('10. two rows store into one variable', case_shared_variable),
     ('11. the menu offers more than the row stores', case_menu_wider_than_stored),
     ('12. the marker bump, edit by edit', case_marker_bump_procedure),
-    ('13. a rename the previous layout cannot follow', case_rename_with_a_bump),
+    ('13. a rename committed together with a marker bump', case_rename_with_a_bump),
 )
 
 
