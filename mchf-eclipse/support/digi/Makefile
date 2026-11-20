@@ -82,6 +82,13 @@ rtty-ddk2: digi_bench
 capture-check: digi_bench
 	@./digi_bench capture-check fixtures/ddk2-4583.wav 450 50
 
+# the manifest has to keep describing the file it keeps: the stored rate, channels, frame count and
+# byte size are read back out of each WAV header and compared with fixtures/MANIFEST.md. A re-encode,
+# a different trim or a decimation that forgot the manifest fails here rather than leaving the
+# provenance describing a file that no longer has that shape.
+fixture-check:
+	@python3 fixture_check.py
+
 clean:
 	rm -f digi_bench *.o *.wav *.pgm
 # fixtures/ is untouched on purpose: the on air recording is tracked, not a build product

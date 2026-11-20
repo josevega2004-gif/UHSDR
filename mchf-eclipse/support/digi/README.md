@@ -9,6 +9,7 @@ make -C support/digi rtty-long  # the same matrix, eight copies of the message (
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi capture-check  # is a recording fit to be pinned: pair, bit clock, continuity
+make -C support/digi fixture-check  # do fixtures/MANIFEST.md's numbers still describe the wav
 ./digi_bench rtty-tune     # how much tuning error the demodulator survives, in Hz and ppm
 ./digi_bench capture-check <file.wav> [shift] [45|50 baud]
 ./digi_bench rtty-wav <file.wav> [shift] ["expected text"] [45|50 baud] [max CER %]
