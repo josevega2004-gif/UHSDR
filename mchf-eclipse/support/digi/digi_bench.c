@@ -912,6 +912,7 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
         double fr = (b == a) ? 0.0 : src - (double)a;
         float s0 = (float)(int16_t)rd16(data + a * 2 * ch) / 32768.0f;
         float s1 = (float)(int16_t)rd16(data + b * 2 * ch) / 32768.0f;
+        Bench_CharClock = k;             // where a character reported now came from
         Rtty_Demodulator_ProcessSample((float32_t)((s0 + (float)fr * (s1 - s0)) * gain));
     }
     free(buf);
@@ -1089,7 +1090,9 @@ static double wrap_half(double d) { return d - floor(d + 0.5); }
 // The tone the signal is on flips at every bit boundary, so the transitions sit on a grid whose step
 // is the bit. Fitting that step over the whole take, then measuring how far the transitions scatter
 // off it, is the difference between a clock and a stretch of audio that happens to have two tones.
-static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_clock_t* k)
+// The transition times of a take: where the tone changed, as opposed to where a window first saw
+// it. The clock fit and the alignment table both walk these, so they are measured once, here.
+static size_t gate_crossings(const cap_t* c, double lo, double hi, double** out)
 {
     const int w = (int)lround(0.005 * c->rate);
     const int hop = (int)lround(0.001 * c->rate);
@@ -1097,8 +1100,8 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
     const size_t nh = c->n > (size_t)w ? (c->n - (size_t)w) / (size_t)hop + 1 : 0;
     double* t = malloc(cap * sizeof(double));
     double* g = nh ? malloc(nh * sizeof(double)) : NULL;
-    k->transitions = 0; k->period_ms = 0.0; k->dispersion_pct = 0.0;
-    if (!t || !g) { free(t); free(g); return; }
+    *out = NULL;
+    if (!t || !g) { free(t); free(g); return 0; }
     for (size_t s = 0, i = 0; i < nh; s += (size_t)hop, i++)
     {
         const double a = gate_tone(c->x + s, w, lo, c->rate);
@@ -1130,7 +1133,13 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
             const double t0 = ((double)(settled * (size_t)hop) + 0.5 * (double)w) / (double)c->rate;
             const double t1 = ((double)(opp_start * (size_t)hop) + 0.5 * (double)w) / (double)c->rate;
             const double g0 = g[settled], g1 = g[opp_start];
-            if (n == cap) { cap *= 2; t = realloc(t, cap * sizeof(double)); if (!t) { free(g); return; } }
+            if (n == cap)
+            {
+                double* grow = realloc(t, cap * 2 * sizeof(double));
+                if (!grow) { free(t); free(g); return 0; }
+                t = grow;
+                cap *= 2;
+            }
             t[n++] = t0 + (t1 - t0) * (g0 / (g0 - g1));
             state = now;
             settled = opp_start;
@@ -1138,7 +1147,17 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
         }
     }
     free(g);
-    if (n < 16) { free(t); return; }
+    if (n < 16) { free(t); return 0; }
+    *out = t;
+    return n;
+}
+
+static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_clock_t* k)
+{
+    k->transitions = 0; k->period_ms = 0.0; k->dispersion_pct = 0.0;
+    double* t = NULL;
+    const size_t n = gate_crossings(c, lo, hi, &t);
+    if (!t) return;                       // fewer than 16 tone changes: no grid to fit
     // A Baudot character is 7.5 bits long - one start, five data, 1.5 stop - so the transitions at a
     // character boundary sit half a bit away from the ones inside a character. Fitting the plain
     // coherence has to reconcile both phases on one grid, and on the DDK2 fixture that pulls the
@@ -1354,6 +1373,156 @@ static int capture_check(const char* path, uint16_t shift, uint16_t baud)
     }
     free(c.x);
     return bad ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ *  where the errors are: the alignment, with the audio under each character
+ * ------------------------------------------------------------------ */
+// score_aligned() says how many characters are wrong and never which. That grades a modem against
+// a message; it does not explain the result, and "the remaining CER is signal quality" was an
+// assumption here until this table existed. One row per character the decoder reported, with the
+// character it produced and what the audio was doing in that character's own 7.5 bit window:
+//
+//   - both tone levels, in dB of full scale, so a fade in one tone or in both reads as a dip
+//     against the rows around it;
+//   - the transitions in the window, against the 1 to 6 a character of start, data and stop bits
+//     can carry, so a window the signal never reached reads as a near empty one;
+//   - the RMS distance of those transitions from the bit grid, in ms: a clean take sits inside a
+//     millisecond, and keying that has been smeared or delayed reads larger.
+//
+// A character that came out wrong while its window looks like its neighbours is the decoder's; one
+// whose window is empty or half level is the signal's.
+typedef struct { double start_s, end_s; } align_win_t;
+
+static int align_wav(const char* path, const char* expected, uint16_t shift, uint16_t baud)
+{
+    if (!expected || !*expected)
+    {
+        printf("an alignment needs the text the take carries\n");
+        return 2;
+    }
+    char got[8192];
+    Bench_CharCount = 0;
+    if (decode_wav(path, expected, got, sizeof(got), shift, baud) < 0.0f) return 1;
+
+    const char* exp = norm_baudot(expected, 0);
+    const char* dec = got + lead_in_junk;          // the score skips the junk before the lock
+    const size_t ne = strlen(exp), nd = strlen(dec);
+    const double bit_s = 1.0 / (double)baud;
+    const double char_s = 7.5 * bit_s;
+
+    cap_t c;
+    if (!cap_load(path, &c)) return 1;
+    double clo = 0.0, chi = 0.0;
+    if (!gate_coarse_pair(&c, &clo, &chi)) { free(c.x); return 1; }
+    gate_pair_t pair;
+    gate_pair_stats(&c, clo, chi, &pair);
+    double* t = NULL;
+    const size_t nt = gate_crossings(&c, pair.lo_hz, pair.hi_hz, &t);
+
+    // Levenshtein with the edit script kept: each expected character is tied to the one the modem
+    // produced for it, or to none where the modem inserted or dropped one.
+    const size_t W = nd + 1;
+    int* d = malloc((ne + 1) * W * sizeof(int));
+    int* match = malloc((ne + 1) * sizeof(int));
+    if (!d || !match) { free(d); free(match); free(t); free(c.x); return 1; }
+    for (size_t i = 0; i <= ne; i++) d[i * W] = (int)i;
+    for (size_t j = 0; j <= nd; j++) d[j] = (int)j;
+    for (size_t i = 1; i <= ne; i++)
+        for (size_t j = 1; j <= nd; j++)
+        {
+            const int sub = d[(i - 1) * W + (j - 1)] + (exp[i - 1] == dec[j - 1] ? 0 : 1);
+            const int del = d[(i - 1) * W + j] + 1, ins = d[i * W + (j - 1)] + 1;
+            int best = sub < del ? sub : del;
+            if (ins < best) best = ins;
+            d[i * W + j] = best;
+        }
+    for (size_t i = 0; i <= ne; i++) match[i] = -1;
+    for (size_t i = ne, j = nd; i > 0 || j > 0; )
+    {
+        if (i > 0 && j > 0 &&
+            d[i * W + j] == d[(i - 1) * W + (j - 1)] + (exp[i - 1] == dec[j - 1] ? 0 : 1))
+        { match[i - 1] = (int)(j - 1); i--; j--; }
+        else if (i > 0 && d[i * W + j] == d[(i - 1) * W + j] + 1) i--;
+        else j--;
+    }
+
+    printf("\n%3s %3s %3s %9s %9s %5s %7s\n", "#", "exp", "got", "mark dB", "space dB",
+           "trans", "jit ms");
+    double sum_mark = 0.0, sum_space = 0.0, sum_rms = 0.0, last_s0 = 0.0;
+    int good = 0, wrong = 0;
+    for (size_t i = 0; i < ne; i++)
+    {
+        // The window is the decoder's own: it reports a character when it has read it, so the
+        // stretch of audio ending half a character later than that report is the audio the modem
+        // decided on. The timing column is the scatter of the transitions inside that window around
+        // their own phase, not around the window's edge: where the window sits is the decoder's
+        // business, and a window placed half a bit out would otherwise read as half a bit of error.
+        const int jj = match[i];
+        double s0s = last_s0 + char_s;                  // a character the modem dropped still has a slot
+        if (jj >= 0 && (size_t)lead_in_junk + (size_t)jj < (size_t)Bench_CharCount)
+            s0s = (double)Bench_CharAt[lead_in_junk + jj] / 12000.0 - char_s - 0.5 * bit_s;
+        // the character begins with a start bit whose leading edge is a transition: latch the window
+        // onto the nearest one, so the bit centres below are sampled where the bits are
+        {
+            double best_t = s0s, near = 1.0;
+            for (size_t q = 0; q < nt; q++)
+            {
+                const double dd = fabs(t[q] - s0s);
+                if (dd < 0.010 && dd < near) { near = dd; best_t = t[q]; }
+            }
+            s0s = best_t;
+        }
+        last_s0 = s0s;
+        const double s1s = s0s + char_s;
+        size_t s0 = (size_t)lround(s0s * (double)c.rate), s1 = (size_t)lround(s1s * (double)c.rate);
+        if (s1 > c.n) s1 = c.n;
+        if (s0 >= s1) s0 = s1 ? s1 - 1 : 0;
+        const double lo_m = gate_tone(c.x + s0, (int)(s1 - s0), pair.lo_hz, c.rate);
+        const double hi_m = gate_tone(c.x + s0, (int)(s1 - s0), pair.hi_hz, c.rate);
+        const double mark_db = 20.0 * log10(lo_m + 1e-9);
+        const double space_db = 20.0 * log10(hi_m + 1e-9);
+        int trans = 0;
+        double csum = 0.0, ssum = 0.0, sq = 0.0;
+        for (size_t q = 0; q < nt; q++)
+        {
+            if (t[q] < s0s || t[q] >= s1s) continue;
+            trans++;
+            const double ang = 2.0 * GATE_PI * fmod(t[q] - s0s, bit_s) / bit_s;
+            csum += cos(ang); ssum += sin(ang);
+        }
+        if (trans)
+        {
+            const double phase = atan2(ssum, csum) / (2.0 * GATE_PI) * bit_s;   // the window's own grid
+            for (size_t q = 0; q < nt; q++)
+            {
+                if (t[q] < s0s || t[q] >= s1s) continue;
+                const double off = t[q] - s0s - phase;
+                const double r = (off - bit_s * round(off / bit_s)) * 1000.0;
+                sq += r * r;
+            }
+        }
+        const double rms_ms = trans ? sqrt(sq / (double)trans) : NAN;
+        const int j = match[i];
+        const char have_c = j >= 0 ? dec[j] : '-';
+        const int ok = j >= 0 && have_c == exp[i];
+        printf("%3zu %3c %3c %9.1f %9.1f %5d %7.2f %s\n", i + 1, exp[i], have_c,
+               mark_db, space_db, trans, rms_ms, ok ? "" : "*");
+        if (!ok) wrong++;
+        else if (trans) { good++; sum_mark += mark_db; sum_space += space_db; sum_rms += rms_ms; }
+    }
+    printf("\n%zu expected, %zu decoded, %d wrong (%.1f %%); lead in %d characters\n",
+           ne, nd, wrong, ne ? 100.0 * (double)wrong / (double)ne : 0.0, lead_in_junk);
+    if (good)
+    {
+        printf("the %d characters that decoded: mark %.1f dB, space %.1f dB, jitter %.2f ms on average\n",
+               good, sum_mark / good, sum_space / good, sum_rms / good);
+    }
+    printf("%s\n", nt ? "* marks a character the modem did not reproduce as sent"
+                      : "no transitions: nothing to place the windows against");
+
+    free(d); free(match); free(t); free(c.x);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1654,7 +1823,8 @@ int main(int argc, char** argv)
     // every mode that feeds the modem goes through the receiver's AGC, so it is set up once, before
     // any case. rtty-wav is left out on purpose: it decodes a recording that already went through a
     // receiver's AGC, and running it through a second one would not be the radio's path.
-    if (strcmp(what, "rtty-wav") && strcmp(what, "wefax") && strcmp(what, "capture-check")) radio_agc_setup();
+    if (strcmp(what, "rtty-wav") && strcmp(what, "rtty-align") && strcmp(what, "wefax")
+        && strcmp(what, "capture-check")) radio_agc_setup();
     if (!strcmp(what, "test")) return selftest();
     if (!strcmp(what, "rtty")) { return rtty_table(RTTY_TABLE_MSG, false); }
     if (!strcmp(what, "rtty-long"))
@@ -1701,8 +1871,17 @@ int main(int argc, char** argv)
         }
         return 0;
     }
+    // the same recording and the same text as rtty-wav, one row per character: which ones the modem
+    // missed, and whether the audio was there for them
+    if (!strcmp(what, "rtty-align") && argc > 2 && argc > 4)
+    {
+        const uint16_t shift = argc > 3 ? (uint16_t)atoi(argv[3]) : 450;
+        const uint16_t baud = argc > 5 ? (uint16_t)atoi(argv[5]) : 50;
+        return align_wav(argv[2], argv[4], shift, baud);
+    }
     fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax"
                     "|capture-check <file.wav> [shift] [45|50 baud]"
-                    "|rtty-wav <file.wav> [shift] [expected text] [45|50 baud] [max CER %%]]\n");
+                    "|rtty-wav <file.wav> [shift] [expected text] [45|50 baud] [max CER %%]"
+                    "|rtty-align <file.wav> <shift> \"expected text\" [45|50 baud]]\n");
     return 2;
 }

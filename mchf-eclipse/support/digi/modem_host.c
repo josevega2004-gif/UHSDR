@@ -23,8 +23,17 @@ static size_t  tx_pos;
 static bool    tx_off_requested;
 static int     tx_remove_calls;
 
+/* Where in the sample stream each decoded character arrived. The alignment table needs to know
+ * which stretch of audio a character came from, and the decoder is the only thing that knows: it
+ * reports a character when it has finished reading its bits, not on a grid the caller can assume. */
+size_t Bench_CharClock;
+size_t Bench_CharAt[8192];
+int    Bench_CharCount;
+
 void UiDriver_TextMsgPutChar(char ch)
 {
+    if (Bench_CharCount < (int) (sizeof(Bench_CharAt) / sizeof(Bench_CharAt[0])))
+        Bench_CharAt[Bench_CharCount++] = Bench_CharClock;
     if (rx_len + 1 < sizeof(rx_text))
     {
         rx_text[rx_len++] = ch;

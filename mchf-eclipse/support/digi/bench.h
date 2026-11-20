@@ -11,6 +11,9 @@
 /* ---- host stand-ins for the firmware environment (modem_host.c) ---- */
 void        Bench_TextReset(void);
 const char* Bench_TextGet(void);                 // decoded characters handed to UiDriver_TextMsgPutChar
+extern size_t Bench_CharClock;                   // the sample index the decoder is being fed
+extern size_t Bench_CharAt[];                    // where in that stream each decoded character ended
+extern int    Bench_CharCount;
 void        Bench_TxFeed(const char* text);      // characters the modulator may pull from the digi buffer
 bool        Bench_TxOffRequested(void);          // RadioManagement_Request_TxOff() was called
 void        Bench_TxOffClear(void);
