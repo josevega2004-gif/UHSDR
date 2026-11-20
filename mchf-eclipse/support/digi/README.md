@@ -404,8 +404,9 @@ What is proven here and what is not:
 
 ## First live decode through this harness
 
-DDH 8, 14467.3 kHz, F1B, 50 Bd, +/-225 Hz (captured from the NA5B WebSDR at 11:41 UTC, 30 s at
-12 kHz; schedule and parameters from the Franks-Weather DWD table cited above):
+DDH 8, 14467.3 kHz, F1B, 50 Bd, +/-225 Hz (captured from the NA5B WebSDR at 11:41 local time on the
+recording workstation - that clock reading was never logged against UTC, so it is not a UTC time -
+30 s at 12 kHz; schedule and parameters from the Franks-Weather DWD table cited above):
 
 ```
 decoded: MSOHWWM PPUWWNW  6  8  3  MSO  12 WNW  6  8  4  MMO 23 Z A  34  3  MO 23 12Z SSW  5  2
