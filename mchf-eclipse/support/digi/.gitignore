@@ -2,3 +2,5 @@ digi_bench
 *.wav
 *.pgm
 *.o
+# the on-air fixture is the one recording the bench keeps: everything else it writes stays untracked
+!fixtures/*.wav

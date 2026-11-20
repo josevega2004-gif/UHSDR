@@ -1148,9 +1148,17 @@ int main(int argc, char** argv)
         uint16_t baud = argc > 5 ? (uint16_t)atoi(argv[5]) : 45;
         printf("decoding with %u Hz shift, %u baud\n", (unsigned)shift, (unsigned)baud);
         float cer = decode_wav(argv[2], expect, got, sizeof(got), shift, baud);
-        if (cer >= 0.0f) printf("CER       : %.1f%% (after aligning the lead in)\n", cer);
+        if (cer < 0.0f) return 0;
+        printf("CER       : %.1f%% (after aligning the lead in)\n", cer);
+        // the optional limit turns a recording into a graded case: a fixture whose text is pinned has
+        // to keep decoding to that text, otherwise the mode accepts any change to the modem's output
+        if (argc > 6 && cer > (float) atof(argv[6]))
+        {
+            printf("CER is above the %s %% this case pins\n", argv[6]);
+            return 1;
+        }
         return 0;
     }
-    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax|rtty-wav <file.wav> [shift] [expected text] [45|50 baud]]\n");
+    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax|rtty-wav <file.wav> [shift] [expected text] [45|50 baud] [max CER %]]\n");
     return 2;
 }

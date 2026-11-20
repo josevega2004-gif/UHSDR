@@ -7,9 +7,11 @@ make -C support/digi test     # self checks, non zero exit on regression   (also
 make -C support/digi rtty     # RTTY character error rate, modem looped back on itself
 make -C support/digi rtty-long  # the same matrix, eight copies of the message (one character 0.26 %)
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
+make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 ./digi_bench rtty-tune     # how much tuning error the demodulator survives, in Hz and ppm
-./digi_bench rtty-wav <file.wav> [shift] ["expected text"]
-                            # decode a recorded file with the firmware demodulator
+./digi_bench rtty-wav <file.wav> [shift] ["expected text"] [45|50 baud] [max CER %]
+                            # decode a recorded file with the firmware demodulator; the optional
+                            # CER limit turns a pinned recording into a graded case
 ```
 
 `rtty-wav` takes any 16 bit PCM WAV, any sample rate, mono or stereo: it resamples to the 12 kHz
@@ -378,18 +380,27 @@ What is proven here and what is not:
   semantics at every shift and mask (`p` is an `Int16Array`, `qt`/`Kt` are float arrays, and
   `S*Ot + Ot/2` stays float until `>> 4`). **That port is unfinished and unvalidated**; nothing in
   this repository decodes it yet;
-* the recorder route that used to be documented here, `soundapplet.rec_start()` /
-  `rec_finish()`, **does not exist in the current build** - calling it captured an undefined buffer
-  and read back as digital silence (peak 8 of 32767), which is how a silent capture got mistaken for
-  a modem failure. The route that works on today's client, and which needs no user gesture, no DPCM
-  port and no server cooperation, is to tap the node that already holds the PCM: `soundapplet.p` is a
-  `ScriptProcessorNode` whose `onaudioprocess` delivers exactly what the page plays. Wrap it without
-  removing the original handler, average 4:1 to get 48 kHz down to the modem's 12 kHz, hold the
-  floats in an array, then build a 44-byte PCM header around them and trigger a Blob download. The
-  browser's download directory is on the same host as this checkout, so the WAV appears on disk and
-  goes straight into `digi_bench rtty-wav`. Tune with `document.querySelector('input[name=frequency]').value`
-  plus `setfreqif_fut(value)`; keep any in-page `await` under about 13 s or the tool call times out
-  (let the tap accumulate between short calls instead of blocking).
+* **the capture recipe this section used to give is wrong for the build that serves NA5B today**.
+  `soundapplet.rec_start()` / `rec_finish()` **do exist** in this client, and they are the route that
+  works: `rec_start()` allocates a 64 kB chunk and appends one more per audio block the socket
+  delivers (about 4.1 s of audio at 8 kHz), and `rec_finish()` returns
+  `{wavdata: [ArrayBuffer, ...], len, sr}` at the stream rate (`soundapplet.g`, 8000 Hz here). It
+  needs no user gesture, no DPCM port and no server cooperation, and it fills from the WebSocket, so
+  it works whether or not the page is rendering audio. What does **not** work here is the
+  `soundapplet.p` ScriptProcessor tap: this client builds its node with
+  `createScriptProcessor(4096, 0, 1)` - zero input channels - so `onaudioprocess` hands out a **zero
+  length** `inputBuffer` (and a zero length `outputBuffer` in a tab that is not playing), and a tap
+  on it records nothing at all. The "peak 8 of 32767" capture came from that tap, not from the
+  recorder; the recorder was never the problem.
+  Three things do bite in practice. A bare `setfreq()` only moves the displayed frequency, so use
+  `setfreqif_fut('4581.84')` or the receiver stays where it was and the take is hum and rumble
+  rather than FSK. The passband matters as much as the dial: `setmf('usb', 0.85, 1.45)` around the
+  pair drops out-of-band noise by five orders of magnitude in the recording, where the default
+  50-2660 Hz passband leaves the modem fighting it. And getting the bytes out of the browser is the
+  remaining wrinkle: a `fetch` POST from the page to loopback is refused by the private network
+  policy, but a top-level navigation is not, so the page can hand a base64 blob to a local collector
+  as `?d=...` and lose nothing but its own tab. Keep any in-page `await` under about 10 s; the
+  recorder keeps growing between calls, so a longer take is a longer wait, not a longer call.
 
 ## First live decode through this harness
 
@@ -404,6 +415,121 @@ Tuned so the received pair (14467.075 / 14467.525 kHz) lands on the modem's own 
 filters. The same audio decoded at 45.45 Bd instead of 50 gives `6 78 MOTLYMV20UWNW`, so the baud
 setting is what carries it, and the mark/space polarity in `RttyDecoder_demodulator()` is correct -
 an inversion there would have produced letters that are not in the DWD message set at all.
+
+## The on air case, `make rtty-ddk2`
+
+The only case in this bench that is not synthetic. `fixtures/ddk2-4583.wav` is 13.7 s of a real
+**DDK2** transmission (4583 kHz, 00:00-24:00 UTC, F1B, 50 Bd, +/-225 Hz), recorded through the NA5B
+WebSDR client's own recorder on 19 November 2026 at about 20:45 UTC, on a dial of 4581.84 kHz in USB
+with an 850-1450 Hz passband. The take was 38 s at the client's 8 kHz stream rate, decimated 2:1 to
+4 kHz (the pair is below 1.5 kHz, so 4 kHz sampling keeps 500 Hz of margin) and trimmed to the one
+clean repetition, 19.1-32.8 s. The fixture is committed, and `make clean` leaves `fixtures/` alone.
+
+The pinned text is the CQ line the DWD stations send; logs from DDK9 and DDH 8 show the same line
+with the transmitter's own call signs and frequency list:
+
+```
+expected: CQ CQ CQ DE DDK2 DDH7 DDK9 FREQUENCIES   4583 KHZ   7646 KHZ   10100.8 KHZ
+decoded : CQ CQ CQ DE DDK2 DDH7 DDK59FREQUENCIES   4583 KHZ   7646 KHZ   101008 KHZ
+CER     : 2.7 %
+```
+
+`101008` is not a decode error: `norm_baudot()` keeps only A-Z, 0-9 and space, so the decimal point
+never reaches the report. The one real error is the `5` at the `DDK9 FREQUENCIES` junction, and it is worth recording what it
+is **not**, because the obvious suspect is the decoder. It is not an unshift-on-space defect:
+`rtty.c` implements no USOS at all - only codes 27 and 31 change `charSetMode`, and a space maps to
+`' '` in both `RTTYLetters` and `RTTYSymbols` - so a space cannot come out as a figure. `'5'` is
+`RTTYSymbols[16]`, which means code 16 arrived while the decoder sat in FIGS. Two checks close it.
+A synthesised stream of this text (the DWD shifting, 1.5 stop bits, 50 Bd, 450 Hz) decodes at
+**0.0 % CER**, so the shift handling is right. And replacing `[FIGS][9][SP]` with
+`[FIGS][16][9]` in that stream reproduces this exact line, `DDK59FREQUENCIES`, at 2.7 % CER - the
+decoder prints what arrives. Three takes of the same transmission read `DDK9`, `DDK95` and `DDK59`
+at that junction, so it is not deterministic logic either: the bits were corrupted in the air.
+Two characters of 74 is the 2.7 % this case pins, and the target passes a `max CER 3` limit.
+
+### The pair, measured
+
+The tone numbers, in the order they were taken, because the first method is biased:
+
+* per hump spectral peak of the average spectrum over the whole take: space **932.0 Hz**, mark
+  **1370.6 Hz**, separation **441 +- 3 Hz**. That reading is pulled inward. 50 Bd keying puts
+  sidebands at +-50 and +-100 Hz around each tone, and the idle `RYRY...` pattern makes each hump a
+  comb with 3.33 Hz teeth, so "the peak" is whichever tooth happens to be tallest.
+* single tone runs only (>= 55 ms, transitions trimmed, no second tone present to leak in, so
+  neither the comb nor the other tone's keying sidebands can bias the peak): space **927.9 Hz**
+  (n = 24, sd 0.44), mark **1375.4 Hz** (n = 15, sd 0.87), separation **447.5 +- 0.2 Hz**. Three
+  estimators agree on it - the per run maximum likelihood median 447.54 Hz, a 1/length
+  extrapolation that removes the fixed window bias 447.51 Hz, and the phase slope across runs
+  447.62 Hz - and it is stable across Hann and Hamming windows, 2/4/6 ms trims, and run lengths
+  from 50 to 130 ms. **447.5 Hz is the number to use: the emission is a 447.5 Hz pair, 0.55 % below
+  the nominal 450 Hz.** The scale cannot account for that difference - the WWV check below holds
+  the audio axis to 0.008 % on a 500 Hz interval, seventy times better than the 2.5 Hz in question.
+
+The receiver then decides the shift setting, and it is not close: **450 Hz decodes at 2.7 % CER**,
+425 Hz at 49.3 %, 170 Hz at 30.1 %, 850 Hz at 32.9 %. The measured 447.5 Hz sits 2.5 Hz from the
+450 Hz setting and 22.5 Hz from the 425 Hz one, which is why that is the setting to receive it with:
+the pair is a 450 Hz class emission whose own shift is 0.55 % low, not a measurement that cannot tell
+the two apart. 50 Bd is confirmed the same way: 20.0 ms bit period from the
+transition spacing, and 2.7 % at 50 Bd against 37.0 % at 45.45 Bd. Both tones sit about 11 Hz above
+the modem's 915/1365 Hz filters, which moves the pair without touching the separation.
+
+### Is the stream rate what it says it is?
+
+A 441 Hz reading invites the obvious explanation that the client's "8 kHz" stream is not 8 kHz. It
+is, checked against a known signal: WWV on 10 MHz, captured the same way through the same receiver,
+with the dial at 9999.0 kHz in USB so the carrier belongs at 1000 Hz of audio and its 100 Hz
+subaudible tone and 500/600 Hz tone at 1100/1500/1600 Hz:
+
+```
+carrier measured       980.82 Hz    (-19.2 Hz: the dial is off, not the rate)
+100 Hz subaudible      spacing   99.99 Hz    -> scale 0.9999
+500 Hz tone            spacing  500.04 Hz    -> scale 1.00008
+600 Hz (500+100)       spacing  599.75 Hz    -> scale 0.99958
+```
+
+Scale **1.0000 +- 0.0003**, so the 8 kHz stream is right to about +-2.5 Hz, and across a 450 Hz
+separation that is 0.15 Hz. A wrong nominal rate cannot explain a 6 Hz gap; the gap was the
+estimator. The same capture pins the receiver's audio axis at -19.2 Hz from its dial on that band,
+which is worth knowing before quoting an absolute audio frequency - do not carry that correction to
+4583 kHz without measuring it there.
+
+What this case does not prove: that the modem copes with weak or fading signals. This is one
+strong-ish night take, and its 2.7 % is the kind of failure the section above lists as open - the
+`5` at the junction is a received-code error in the air, not a shift-handling defect - the probe
+above reproduces it from a deliberately altered bit stream and the canonical stream decodes clean.
+
+### The second on-air case, DDK9 on 10100.8 kHz, is not pinned
+
+Attempted on 19 November 2026, 21:15-22:20 UTC, and **no fixture was committed**, because the take
+could not be verified. The record is here so the next attempt starts where this one stopped.
+
+**At NA5B, the receiver that produced the DDK2 case, there was nothing to copy.** Dial 10100.685 kHz
+in USB puts the pair on the modem's 915/1365 Hz filters; across passbands of 300-2600 Hz and
+800-1480 Hz the recording sat at RMS 2300-2440 with no FSK pair anywhere from 400 to 2500 Hz (10 ms
+windows, dominant frequency scattered with no two-tone structure). That is a noise floor, not a weak
+signal: 10 MHz was shut from Texas to central Europe at that hour.
+
+**At Twente (`websdr.ewi.utwente.nl`) the signal is there**, and it measures like DDK9: tones
+**924.0 / 1371.0 Hz**, separation 447 Hz - the same 447-448 Hz the DDK2 case measures, consistent
+with the same DWD equipment - with one tone at a time in 10 ms slices, and a **50.0 Bd** clock
+(bit period 142.4 samples of that receiver's 7119 Hz stream, 1245 transitions in 16 s).
+
+**But it does not decode, and the fault is the capture path, not the signal.** The control settles
+it: DDK2 - the station in the committed fixture - captured the same way through Twente has its
+tones on **917.6 / 1369.6 Hz** (inside the modem's filters) and the same 142.4-sample 50.0 Bd
+clock, and still decodes to nothing at all (100 % CER). Meanwhile a synthesised 450 Hz / 50 Bd
+stream written at Twente's **7119 Hz** rate decodes at 4.1 % through the same `rtty-wav` path, i.e.
+identically to the same stream at 8000 Hz, so the bench handles that rate and the STFT/Demod chain
+is not at fault. Something in Twente's streamed audio is unusable by the modem (its recorder was
+checked for dropouts - 24 single-sample gaps in 18 s, no repeated blocks - and for a mirrored
+sideband, which LSB does not fix). Tone verification alone cannot rescue a take whose audio will not
+decode, and pinning one would have put a 90 %-CER line into the bench as if it were ground truth.
+
+So the DDK2 case remains the only on-air case, and its 2.7 % still has nothing strong to compare
+against. What would unblock it: run the same capture on NA5B once 10 MHz is open to Europe (later
+in the night or around dawn UTC), or on any receiver whose audio the modem can decode - and prove
+the path first by copying DDK2 through it to a few percent CER, before trusting a 10100.8 kHz take.
+A receiver's own S-meter is not evidence; the tone pair plus a clean decode is.
 
 ## Receiving a DWD teletype station on the radio
 
@@ -441,8 +567,10 @@ off, which is exactly the distortion the bench should be shown rather than hidin
 3. RTTY: chase the fast-fading failure with the numbers in front of us.
 4. Only then decide about FT8 RX, where the RAM question is per board rather than per mode.
 
-CI: the `digi-checks` job in `.github/workflows/config-upgrade-check.yml` runs seven steps - the
+CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs seven steps - the
 filter design check (`support/digi/design_rtty_filters.py`), `make digi-bench` (the self checks),
 the RTTY shift, SNR and reference error character error rate matrix, that matrix again with the long
-message, the shift setting curve, the tuning error sweep, and the weather fax table.
-`make digi-bench` is also available on its own; it is one of the seven, not the whole job.
+message, the shift setting curve, the tuning error sweep, and the recorded DDK2 fixture
+(`make -C support/digi rtty-ddk2`). `make -C support/digi wefax` is a target of its own and is not
+one of the seven. `make digi-bench` is also available on its own; it is one of the seven, not the
+whole job.

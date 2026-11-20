@@ -108,3 +108,10 @@ jobs:
       - name: Run the RTTY tuning error sweep
         working-directory: mchf-eclipse
         run: make -C support/digi rtty-tune
+
+      # the one case that is not synthetic: a real DWD RTTY transmission recorded off the NA5B WebSDR,
+      # kept as a committed 13.7 s fixture. It fails if the decoder's output for real audio moves, so
+      # a modem change that no synthetic row notices still has to be explained.
+      - name: Decode the recorded DWD on air fixture
+        working-directory: mchf-eclipse
+        run: make -C support/digi rtty-ddk2

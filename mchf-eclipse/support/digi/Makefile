@@ -7,6 +7,8 @@
 #   make wefax   synthetic HF weather fax broadcast through the reference demodulator
 #   make rtty-shift  does the shift setting still matter: one signal, every setting
 #   make rtty-tune  how many Hz of tuning error the demodulator survives, and what that is in ppm
+#   make rtty-ddk2  the one on air case: a DWD transmission recorded off the NA5B WebSDR, graded
+#                against the text the station sends. Uses the committed fixture in fixtures/
 #
 # drivers/audio/rtty.c and drivers/audio/audio_agc.c are compiled from the real sources: the
 # modem and the AGC the radio puts in front of it. The shim/ directory replaces only the headers
@@ -67,5 +69,13 @@ rtty-shift: digi_bench
 rtty-tune: digi_bench
 	@./digi_bench rtty-tune
 
+# the on air case. fixtures/ddk2-4583.wav is a 13.7 s slice of a 4583 kHz DDK2 transmission recorded
+# through the WebSDR client's own recorder (see README.md): real propagation, not a synthetic channel.
+# 3 % is just above the 2.7 % this copy measured when it was pinned, so a modem change that alters
+# the decode of real audio fails here even when every synthetic row still reads 0.0 %.
+rtty-ddk2: digi_bench
+	@./digi_bench rtty-wav fixtures/ddk2-4583.wav 450 "CQ CQ CQ DE DDK2 DDH7 DDK9 FREQUENCIES   4583 KHZ   7646 KHZ   10100.8 KHZ" 50 3
+
 clean:
 	rm -f digi_bench *.o *.wav *.pgm
+# fixtures/ is untouched on purpose: the on air recording is tracked, not a build product
