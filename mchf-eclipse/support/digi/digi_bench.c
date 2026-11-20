@@ -1083,6 +1083,9 @@ static void gate_pair_stats(const cap_t* c, double clo, double chi, gate_pair_t*
 
 typedef struct { double period_ms, dispersion_pct; int transitions; } gate_clock_t;
 
+// a phase difference folded into [-0.5, 0.5): the nearest way round the grid
+static double wrap_half(double d) { return d - floor(d + 0.5); }
+
 // The tone the signal is on flips at every bit boundary, so the transitions sit on a grid whose step
 // is the bit. Fitting that step over the whole take, then measuring how far the transitions scatter
 // off it, is the difference between a clock and a stretch of audio that happens to have two tones.
@@ -1139,7 +1142,7 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
     // A Baudot character is 7.5 bits long - one start, five data, 1.5 stop - so the transitions at a
     // character boundary sit half a bit away from the ones inside a character. Fitting the plain
     // coherence has to reconcile both phases on one grid, and on the DDK2 fixture that pulls the
-    // answer to 18.75 ms, 6 % short of the 20 ms the decoder itself uses, with 19 % of a bit left
+    // answer to 18.75 ms, 6 % short of the 20 ms the decoder itself uses, with 13.9 % of a bit left
     // over as scatter. Squaring the phase first cancels the half bit and leaves the bit period;
     // the two phases come back below as two centres, which is what the scatter is measured against.
     //
@@ -1160,24 +1163,6 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
         const double r = sqrt(re * re + im * im) / (double)n;
         if (r > best_r) { best_r = r; best_t = T; }
     }
-    // A grid that explains the transitions at the bit period explains them at half of it too, so a
-    // take with long marks can fit a harmonic as well as the fundamental, and reporting the harmonic
-    // turns a 40 baud take into "15 ms". Among the periods that explain the transitions equally
-    // well, the longest is the bit: the loop runs upward, so a later near-equal fit replaces the
-    // shorter one instead of being hidden behind it.
-    for (double T = nominal * 0.70; T <= nominal * 1.30; T += 0.005)
-    {
-        if (T <= best_t) continue;
-        double re = 0.0, im = 0.0;
-        for (size_t i = 0; i < n; i++)
-        {
-            const double ph = fmod(t[i] * 1000.0, T) / T;
-            re += cos(4.0 * GATE_PI * ph);
-            im += sin(4.0 * GATE_PI * ph);
-        }
-        const double r = sqrt(re * re + im * im) / (double)n;
-        if (r >= 0.995 * best_r) best_t = T;
-    }
     double centre[2];
     {
         double re = 0.0, im = 0.0;
@@ -1190,22 +1175,17 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
         centre[0] = fmod(atan2(im, re) / (2.0 * GATE_PI) + 1.0, 1.0);
         centre[1] = fmod(centre[0] + 0.5, 1.0);
     }
-    for (int round = 0; round < 3; round++)
+    // The centres start half a phase apart and are then moved to sit on the transitions that chose
+    // them, because the fixture's half bit is not exactly half and its jitter is not symmetric. One
+    // reassignment is not enough - the fixture's scatter is 9.4 % after it - and two is: it reads
+    // 8.8 % at the second and the same at the fourth and the sixth.
+    for (int round = 0; round < 2; round++)
     {
         double re[2] = {0.0, 0.0}, im[2] = {0.0, 0.0};
         for (size_t i = 0; i < n; i++)
         {
             const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
-            int k = 0;
-            for (int c = 1; c < 2; c++)
-            {
-                double near = ph - centre[c], best = ph - centre[k];
-                while (near > 0.5) near -= 1.0;
-                while (near < -0.5) near += 1.0;
-                while (best > 0.5) best -= 1.0;
-                while (best < -0.5) best += 1.0;
-                if (fabs(near) < fabs(best)) k = c;
-            }
+            const int k = fabs(wrap_half(ph - centre[1])) < fabs(wrap_half(ph - centre[0])) ? 1 : 0;
             re[k] += cos(2.0 * GATE_PI * ph);
             im[k] += sin(2.0 * GATE_PI * ph);
         }
@@ -1217,12 +1197,7 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
     for (size_t i = 0; i < n; i++)
     {
         const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
-        double d0 = ph - centre[0], d1 = ph - centre[1];
-        while (d0 > 0.5) d0 -= 1.0;
-        while (d0 < -0.5) d0 += 1.0;
-        while (d1 > 0.5) d1 -= 1.0;
-        while (d1 < -0.5) d1 += 1.0;
-        const double d = fabs(d0) <= fabs(d1) ? d0 : d1;
+        const double d = fmin(fabs(wrap_half(ph - centre[0])), fabs(wrap_half(ph - centre[1])));
         sq += d * d;
     }
     k->period_ms = best_t;
@@ -1407,6 +1382,35 @@ static float filter_half_power_edge(unsigned idx, float from, float step, float 
     return (a > b) ? f + step * (a - half) / (a - b) : f;
 }
 
+// A take built here rather than read off disk: these cases pin the estimator, and a recording on disk
+// is a file that a later trim, re-encode or decimation can change under them. `slots` holds the tone
+// of each slot (0 = low tone, 1 = high tone) and `slot_ms` its length, so a slot of half a bit gives
+// the 1.5 stop bits of a Baudot character and a slot of a whole bit gives plain keying. The phase runs
+// on across the steps, as a real FSK signal's does; restarting it at every step would put a click in
+// each transition and widen the crossing the gate is asked to time.
+static int synth_take(cap_t* c, const uint8_t* slots, size_t nslots, double slot_ms, double lo, double hi)
+{
+    c->rate = 12000;
+    c->n = (size_t)llround((double)nslots * slot_ms * 0.001 * (double)c->rate);
+    c->x = malloc((c->n ? c->n : 1) * sizeof(float));
+    if (!c->x) return 0;
+    double phase = 0.0;
+    size_t s = 0;
+    for (size_t k = 0; k < nslots && s < c->n; k++)
+    {
+        const double f = slots[k] ? hi : lo;
+        const size_t end = (size_t)llround((double)(k + 1) * slot_ms * 0.001 * (double)c->rate);
+        for (; s < end && s < c->n; s++)
+        {
+            c->x[s] = (float)(0.4 * sin(phase));
+            phase += 2.0 * M_PI * f / (double)c->rate;
+            if (phase > 2.0 * M_PI) phase -= 2.0 * M_PI;
+        }
+    }
+    for (; s < c->n; s++) c->x[s] = 0.0f;
+    return 1;
+}
+
 static int selftest(void)
 {
     // 1. the oscillator this bench invented (softdds_host.c) must produce the tone the modem asks
@@ -1565,6 +1569,80 @@ static int selftest(void)
                 check(fabsf(label - (mark_hz + shift)) <= 0.5f, what);
             }
         }
+    }
+    // 5. the clock estimator, on takes made here rather than read from disk. The gate is what stands
+    // between an on air recording and the fixture table, so its two sharpenings have to be held in
+    // place by something that runs on every build: the squared phase fit that cancels the half bit a
+    // Baudot character's stop leaves, and the rule that the reported period is the bit and not a
+    // lattice the transitions alone would allow.
+    {
+        enum { NSLOT = 600 };
+        static uint8_t slots[NSLOT];
+        unsigned rng = 2463534242u;
+        for (int i = 0; i < NSLOT; i++)
+        {
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+            slots[i] = (uint8_t)((rng >> 8) & 1);
+        }
+        cap_t c;
+        gate_clock_t k;
+        check(synth_take(&c, slots, NSLOT, 20.0, 775.0, 1225.0),
+              "clock: a 50 baud take can be built in memory instead of read off disk");
+        gate_clock(&c, 775.0, 1225.0, 50.0, &k);
+        printf("     (clean 50 Bd take made here: %.3f ms, scatter %.1f %%, %d transitions)\n",
+               k.period_ms, k.dispersion_pct, k.transitions);
+        check(fabs(k.period_ms - 20.0) <= 20.0 * GATE_PERIOD_TOL,
+              "clock: a clean 50 baud take fits 20 ms inside the period window");
+        check(k.dispersion_pct < 1.0,
+              "clock: and its transitions sit within 1 % of a bit of that grid");
+        free(c.x);
+
+        // a Baudot character is 1 start bit, 5 data and 1.5 stop, so it is 15 half bits long and the
+        // transitions at a character boundary sit half a bit off the ones inside it. Fitted on the
+        // phase alone this take reads 23.440 ms, 42.7 baud and 6.7 % scatter: the two grids fight,
+        // nothing wins cleanly, and the take looks like one recorded slightly fast. Fitted on the
+        // squared phase it reads the 25 ms it is, with 0.3 %.
+        enum { NCHAR = 70, NHALF = NCHAR * 15 };
+        static uint8_t half[NHALF];
+        for (int i = 0; i < NCHAR; i++)
+        {
+            uint8_t* p = half + i * 15;
+            p[0] = p[1] = 0;                       // start: one space bit
+            rng = 2463534242u ^ (unsigned)(i * 2654435761u);
+            for (int b = 0; b < 5; b++)            // five data bits, two half slots each
+            {
+                rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+                p[2 + 2 * b] = p[3 + 2 * b] = (uint8_t)((rng >> 8) & 1);
+            }
+            p[12] = p[13] = p[14] = 1;             // stop: 1.5 mark bits
+        }
+        check(synth_take(&c, half, NHALF, 12.5, 775.0, 1225.0),
+              "clock: a 40 baud take with 1.5 stop bits can be built in memory");
+        gate_clock(&c, 775.0, 1225.0, 50.0, &k);
+        printf("     (40 Bd take with 1.5 stop bits: %.3f ms = %.1f baud, scatter %.1f %%, "
+               "%d transitions)\n", k.period_ms, 1000.0 / k.period_ms, k.dispersion_pct, k.transitions);
+        check(fabs(1000.0 / k.period_ms - 40.0) <= 0.2,
+              "clock: 1.5 stop bits do not pull the fitted period off the 25 ms bit (40 baud)");
+        check(fabs(k.period_ms - 20.0) > 20.0 * GATE_PERIOD_TOL,
+              "clock: and the take is refused against 50 baud on the period alone");
+        free(c.x);
+
+        // transitions every second bit: the bit tone still steps at 20 ms, but the tone only changes
+        // every 40 ms, so 40 ms explains the transitions exactly as well as 20 does and 10 ms fits
+        // their phases too. The reported period has to be the bit the modem will key at, which is
+        // the fundamental of that grid, and not the coarser lattice the crossings alone allow.
+        // What holds this is the search window as much as the fit: it runs 30 % either side of the
+        // declared 50 baud, so 21..26 ms, and 40 ms is never a candidate. The case pins the outcome
+        // for the day the window or the fit changes, not a rule inside the fit.
+        for (int i = 0; i < NSLOT; i++) slots[i] = (uint8_t)((i / 2) & 1);
+        check(synth_take(&c, slots, NSLOT, 20.0, 775.0, 1225.0),
+              "clock: a take that repeats on a two bit lattice can be built in memory");
+        gate_clock(&c, 775.0, 1225.0, 50.0, &k);
+        printf("     (two bit lattice at 20 ms a bit: %.3f ms = %.1f baud)\n",
+               k.period_ms, 1000.0 / k.period_ms);
+        check(fabs(k.period_ms - 20.0) <= 20.0 * 0.01,
+              "clock: a two bit lattice is reported as the 20 ms bit, not its 40 ms spacing");
+        free(c.x);
     }
     printf("%s\n", failures ? "SELF CHECKS FAILED" : "all self checks passed");
     return failures ? 1 : 0;

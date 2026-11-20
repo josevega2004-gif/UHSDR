@@ -53,23 +53,23 @@ every reading. A Baudot character is 7.5 bits long - one start, five data, 1.5 s
 transitions at a character boundary sit half a bit away from the ones inside it. The period is
 fitted on the squared phase, which cancels that half bit and leaves the bit itself, and the two
 phases come back as two centres that the scatter is measured against. Without the split the fixture
-fitted to 18.75 ms - 6 % short of the rate the modem decodes it at - with 19 % scatter, and that
+fitted to 18.75 ms - 6 % short of the rate the modem decodes it at - with 13.9 % scatter, and that
 shape looked like a recorder rate error; with it the same audio reads 20.000 ms and 8.8 %, so the
 take's 2.7 % CER is signal quality, not a stretched time base. A clean synthetic take measures
 20.000 ms and 0.1 %, and a 45.45 baud take measures 22.000 ms with 2.2 % and is refused on the
-period alone, though its pair and its scatter look perfect. The fit keeps the longest of the
-periods that explain the transitions equally well, since a grid at half the bit explains them too:
-a 40 baud take reads 25.00 ms and 40.0 baud rather than the 15.00 ms harmonic, and the rejection
-line names the rate beside the period so a wrong time base is reported as what it is.
+period alone, though its pair and its scatter look perfect. The fit searches 30 % either side of
+the nominal period rather than at it, so a take at the wrong rate reports the rate it carries: a
+40 baud take reads 25.00 ms and 40.0 baud, and the rejection line names that beside the period.
 - **dropouts** are 1 ms slots below 15 % of the median level, reported as a count and the longest
 run. Trimming the ends of a take does not remove a stall in the middle of one.
 
 The limits are set just outside the fixture's own numbers (single tone above 0.55, both below 0.35,
 period within 5 %, scatter under 12 % of a bit, no gap over 5 ms). The period window passes both
-reference takes at their nominal period and refuses a 45.45 baud take at 10 % long; the scatter
-limit sits above the fixture's 8.8 % and below the 11-15 % the noise takes on hand read, so a take
-whose keying has been smeared or clipped fails even where its pair happens to look right. A take
-that fails these is not evidence about the modem either way. The gate has already earned its place: a
+reference takes at their nominal period and refuses a 45.45 baud take at 10 % long. The scatter
+limit is a third above the fixture's 8.8 % and inside the 10.6-13.6 % the five noise takes on hand
+read, so scatter alone does not refuse those; what refuses them is the period, and none of the five
+holds one (16.5 to 25.7 ms measured). A take that fails these is not evidence about the modem either
+way. The gate has already earned its place: a
 24 s take of the 10.1 MHz band whose free decode was `VXTYGJJUKD` reads 234 Hz apart with 0.66 of
 its windows holding both tones and is refused, while a synthetic 50 baud take - the same program,
 the same filters, where the pair really is switched - reads 0.00 both tones and 20.000 ms and is
