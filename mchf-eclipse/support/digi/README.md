@@ -420,10 +420,15 @@ an inversion there would have produced letters that are not in the DWD message s
 
 The only case in this bench that is not synthetic. `fixtures/ddk2-4583.wav` is 13.7 s of a real
 **DDK2** transmission (4583 kHz, 00:00-24:00 UTC, F1B, 50 Bd, +/-225 Hz), recorded through the NA5B
-WebSDR client's own recorder on 19 November 2026 at about 20:45 UTC, on a dial of 4581.84 kHz in USB
-with an 850-1450 Hz passband. The take was 38 s at the client's 8 kHz stream rate, decimated 2:1 to
-4 kHz (the pair is below 1.5 kHz, so 4 kHz sampling keeps 500 Hz of margin) and trimmed to the one
-clean repetition, 19.1-32.8 s. The fixture is committed, and `make clean` leaves `fixtures/` alone.
+WebSDR client's own recorder on 19 November 2026 at about 20:45 local time on the recording
+workstation - that clock reading was never logged against UTC, so it is not a UTC time - on a dial of
+4581.84 kHz in USB with an 850-1450 Hz passband. The client's recorder ran for **64.1 s**, and only
+the **last 38 s** of it were transferred out of the browser, since the hand-off is one top-level
+navigation with one blob in it; every offset below is an offset into that 38 s window, not into the
+whole take. That 38 s was decimated 2:1 to 4 kHz from the client's 8 kHz stream rate (the pair is
+below 1.5 kHz, so 4 kHz sampling keeps 500 Hz of margin) and trimmed to the one clean repetition,
+19.1-32.8 s of the transferred 38 s. The fixture is committed, and `make clean` leaves `fixtures/`
+alone.
 
 The pinned text is the CQ line the DWD stations send; logs from DDK9 and DDH 8 show the same line
 with the transmitter's own call signs and frequency list:
@@ -524,6 +529,19 @@ is not at fault. Something in Twente's streamed audio is unusable by the modem (
 checked for dropouts - 24 single-sample gaps in 18 s, no repeated blocks - and for a mirrored
 sideband, which LSB does not fix). Tone verification alone cannot rescue a take whose audio will not
 decode, and pinning one would have put a 90 %-CER line into the bench as if it were ground truth.
+
+**Other receivers do not rescue it.** The public directory (`websdr.ewi.utwente.nl/~~websdrlist`, 128
+entries) lists **19** receivers whose bands cover 10100.8 kHz. Of the European ones, DF0HTE
+(Friedrichshafen, 10.004-10.196 MHz) and ES4O (Estonia, 10.096-10.480 MHz) were both checked, and
+neither carries DDK9 here: with 5 ms windows - a quarter of a bit - 60 % hold both candidate tones
+within 6 dB and the spectrum has no discrete pair at all (DF0HTE's peaks spread over 1010-1030 Hz,
+ES4O's the same), which is a weak carrier in noise, not FSK, at S-meter 1800-2500. Only Twente
+produced a genuine 450 Hz / 50.0 Bd shape. Hack Green's WebSDR has no 10 MHz band at all. Each
+receiver also carries its own dial offset - 1.025 kHz between the typed marker and the dial on
+Twente, about 105 Hz on ES4O, 19 Hz on NA5B's WWV capture - so "dial = carrier - 1.14 kHz" is per
+receiver and has to be measured, never assumed. At 21:45-22:00 UTC 10 MHz was not open on a
+regional European path and was closed to the US, which is the honest reason this case is still
+waiting.
 
 So the DDK2 case remains the only on-air case, and its 2.7 % still has nothing strong to compare
 against. What would unblock it: run the same capture on NA5B once 10 MHz is open to Europe (later
