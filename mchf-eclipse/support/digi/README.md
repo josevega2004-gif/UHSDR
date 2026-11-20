@@ -574,15 +574,15 @@ output has to be explained.
 DDK9 was attempted on 19 November 2026 and **no fixture was committed**, because no take could be
 verified. NA5B, the receiver behind the DDK2 case, had nothing there that evening: RMS 2300-2440 over
 two passbands, with no FSK pair anywhere from 400 to 2500 Hz, which is a noise floor - 10 MHz was
-shut from Texas to Europe. Twente (`websdr.ewi.utwente.nl`) did show a 450 Hz / **50.0 Bd** shape at
-**924.0 / 1371.0 Hz**, but its audio never decodes, and its control says what that means: DDK2 copied
-the same way through Twente, tones on the filters and the same 50.0 Bd clock, also decodes to nothing,
-while a synthesised 450 Hz / 50 Bd stream at Twente's 7119 Hz rate decodes at 4.1 %. The capture path
-is at fault, not the decoder, and a 90 %-CER line must not be pinned as ground truth. DF0HTE
-(Friedrichshafen) and ES4O (Estonia) carry only a weak carrier in noise at that frequency (5 ms
-windows, 60 % of them holding both tones within 6 dB), and Hack Green has no 10 MHz band. Every
-receiver also has its own dial offset - 1.025 kHz on Twente's marker-to-dial, 105 Hz on ES4O, 19 Hz
-on NA5B's WWV capture - so the tuning rule has to be measured, never assumed.
+shut from Texas to Europe.
+
+Twente (`websdr.ewi.utwente.nl`) did show a 450 Hz / **50.0 Bd** shape at **924.0 / 1371.0 Hz**, but
+nothing decodes through it: not this take, not DDK2, and not a synthesised 450 Hz / 50 Bd stream at
+Twente's 7119 Hz rate, which reads 4.1 %. That puts the fault in the capture path rather than the
+decoder, so a 90 %-CER line from it must not be pinned as ground truth. The rest of the sweep is no
+better: DF0HTE (Friedrichshafen) and ES4O (Estonia) hold only a weak carrier in noise there (5 ms
+windows, 60 % of them with both tones within 6 dB), and Hack Green has no 10 MHz band; Twente's dial
+sits 1.025 kHz off its marker and ES4O's 105 Hz.
 
 The comparison this case lacks is a propagation problem, not a bench one: retry on NA5B when 10 MHz
 is open to Europe, and prove any new receiver by copying DDK2 through it to a few percent before
