@@ -24,6 +24,9 @@ one mutation at a time and checks the verdict:
  13. a rename committed with a marker bump    -> the recorder carries the name the value had
                                                  from the record of the previous marker, and the
                                                  check accepts the bump with it
+ 14. a value renamed twice                    -> the record keeps the name the value had first,
+                                                 and the translation of the previous layout still
+                                                 finds the value at its word
 
 An assertion may look at the exit code and at the data a verdict has to name: the settings that
 were named, the marker that was recorded, the record that did not parse. It may not look at the
@@ -287,6 +290,47 @@ def case_rename_with_a_bump():
     expect('the whole bump with the rename in it', run(), 0)
 
 
+def case_renamed_twice():
+    """a value renamed again while the record still names the name it had first
+
+    The suffix on a word line is the name the layout in the field knows the value by, not a note
+    about the last edit. A second rename has to follow that suffix back to the first name rather
+    than replace it with the intermediate one - otherwise two ordinary renames leave the record
+    naming a value the previous layout never had, and its translation stops finding the value
+    although the word never moved.
+    """
+    text = HEADER.read_text(encoding='utf-8')
+    match = re.search(r'(?m)^#define\s+(EEPROM_FREQ_STEP)\s+(\d+)\s*$', text)
+    assert match, 'the define this case renames is gone, update this case'
+    owner, word = match.group(1), match.group(2)
+    second = owner + '_RENAMED'
+    third = owner + '_RENAMED_AGAIN'
+
+    for path in (HEADER, TABLE):
+        source = path.read_text(encoding='utf-8')
+        path.write_text(re.sub(r'\b%s\b' % owner, second, source), encoding='utf-8')
+    expect('the value renamed, the record naming the name it had first',
+           run('--record-layout'), 0, RECORD_NAME)
+    if ('%s %s (was %s)\n' % (word, second, owner)) not in RECORD.read_text(encoding='utf-8'):
+        print('  FAIL  the first rename was not recorded against the name the value had')
+        failures.append('the first rename was not recorded')
+
+    for path in (HEADER, TABLE):
+        source = path.read_text(encoding='utf-8')
+        path.write_text(re.sub(r'\b%s\b' % second, third, source), encoding='utf-8')
+    expect('the value renamed again, the record still naming the first name',
+           run('--record-layout'), 0, RECORD_NAME)
+    written = RECORD.read_text(encoding='utf-8')
+    if ('%s %s (was %s)\n' % (word, third, owner)) not in written:
+        print('  FAIL  the second rename did not keep the name the value had first (%s)' % owner)
+        failures.append('the second rename lost the oldest name')
+    if ('(was %s)' % second) in written:
+        print('  FAIL  the record follows the intermediate name %s instead of the first one'
+              % second)
+        failures.append('the second rename recorded the intermediate name')
+    expect('the compiled check still translates the value after two renames', run_check(), 0)
+
+
 def case_old_layout_translation():
     """one offset of UiConfiguration_OldLayoutAddress() changed
 
@@ -446,6 +490,7 @@ CASES = (
     ('11. the menu offers more than the row stores', case_menu_wider_than_stored),
     ('12. the marker bump, edit by edit', case_marker_bump_procedure),
     ('13. a rename committed together with a marker bump', case_rename_with_a_bump),
+    ('14. a value renamed twice', case_renamed_twice),
 )
 
 
