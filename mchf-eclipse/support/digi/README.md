@@ -31,7 +31,7 @@ make -C support/digi capture-check
   tones     : 932 / 1374 Hz, separation 442 Hz (declared 450), centre 1153 Hz
               spread 15.8 / 14.9 Hz; offset from the modem's 915/1365 -17 / -9 Hz
   bimodality: 0.47 low, 0.39 high, 0.14 both (5 ms windows, 2740)
-  clock     : period 18.750 ms (357 transitions), scatter 18.9 % of a bit
+  clock     : period 20.000 ms (357 transitions), scatter 8.8 % of a bit
   dropouts  : 21 gap(s) below 15 % of the median, longest 2 ms (0.2 % of the take)
   ACCEPT    : the pair, the bit clock and the continuity are all inside the gate
 ```
@@ -45,21 +45,34 @@ both tones at once and any pair looks well behaved.
 being switched reads about 0.86 single tone and 0.14 both, the both being transitions; a single
 carrier or a stretch of noise reads near 0.0 single and 1.0 both, whatever its spectrum looks like.
 - **clock** fits the bit period to the times the signal changes tone, then measures how far those
-transitions scatter off that grid, as a percentage of a bit. A clean take measures 20.000 ms and
-0.0 %; the DDK2 fixture measures 18.75 ms and 19 %, which is what real fading and the client
-recorder's timing cost. The fixture's 6 % short period is worth knowing rather than acting on: a
-recorder that dropped samples would leave exactly that shape, so it is a candidate explanation for
-the take's 2.7 % CER where a synthetic take reads 0.0 %, but this measurement cannot tell it apart
-from fading and is not evidence on its own.
+transitions scatter off that grid, as a percentage of a bit. Each transition is the zero crossing of
+the tone discriminator, interpolated between the last 5 ms window that settled on the old tone and
+the first that settled on the new one: the window centre trails the change and folds that smear into
+every reading. A Baudot character is 7.5 bits long - one start, five data, 1.5 stop - so the
+transitions at a character boundary sit half a bit away from the ones inside it. The period is
+fitted on the squared phase, which cancels that half bit and leaves the bit itself, and the two
+phases come back as two centres that the scatter is measured against. Without the split the fixture
+fitted to 18.75 ms - 6 % short of the rate the modem decodes it at - with 19 % scatter, and that
+shape looked like a recorder rate error; with it the same audio reads 20.000 ms and 8.8 %, so the
+take's 2.7 % CER is signal quality, not a stretched time base. A clean synthetic take measures
+20.000 ms and 0.1 %, and a 45.45 baud take measures 22.000 ms with 2.2 % and is refused on the
+period alone, though its pair and its scatter look perfect. The fit keeps the longest of the
+periods that explain the transitions equally well, since a grid at half the bit explains them too:
+a 40 baud take reads 25.00 ms and 40.0 baud rather than the 15.00 ms harmonic, and the rejection
+line names the rate beside the period so a wrong time base is reported as what it is.
 - **dropouts** are 1 ms slots below 15 % of the median level, reported as a count and the longest
 run. Trimming the ends of a take does not remove a stall in the middle of one.
 
 The limits are set just outside the fixture's own numbers (single tone above 0.55, both below 0.35,
-period within 10 %, scatter under 25 % of a bit, no gap over 5 ms), so a take that fails them is not
-evidence about the modem either way. The gate has already earned its place: a 24 s take of the
-10.1 MHz band whose free decode was `VXTYGJJUKD` reads 234 Hz apart with 0.66 of its windows holding
-both tones and is refused, while a synthetic 50 baud take - the same program, the same filters,
-where the pair really is switched - reads 0.00 both tones and 20.000 ms and is accepted.
+period within 5 %, scatter under 12 % of a bit, no gap over 5 ms). The period window passes both
+reference takes at their nominal period and refuses a 45.45 baud take at 10 % long; the scatter
+limit sits above the fixture's 8.8 % and below the 11-15 % the noise takes on hand read, so a take
+whose keying has been smeared or clipped fails even where its pair happens to look right. A take
+that fails these is not evidence about the modem either way. The gate has already earned its place: a
+24 s take of the 10.1 MHz band whose free decode was `VXTYGJJUKD` reads 234 Hz apart with 0.66 of
+its windows holding both tones and is refused, while a synthetic 50 baud take - the same program,
+the same filters, where the pair really is switched - reads 0.00 both tones and 20.000 ms and is
+accepted.
 
 `rtty-wav` takes any 16 bit PCM WAV, any sample rate, mono or stereo: it resamples to the 12 kHz
 the demodulator is pinned at and trims gain from the file peak, so a quiet recording still reaches

@@ -1091,37 +1091,58 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
     const int w = (int)lround(0.005 * c->rate);
     const int hop = (int)lround(0.001 * c->rate);
     size_t cap = 4096, n = 0;
+    const size_t nh = c->n > (size_t)w ? (c->n - (size_t)w) / (size_t)hop + 1 : 0;
     double* t = malloc(cap * sizeof(double));
+    double* g = nh ? malloc(nh * sizeof(double)) : NULL;
     k->transitions = 0; k->period_ms = 0.0; k->dispersion_pct = 0.0;
-    if (!t) return;
-    // A zero crossing of the raw discriminator is a fragile thing to count: a real recording slews
-    // through zero over several windows and noise crosses it whenever neither tone is loud. Counting
-    // a transition only when the signal has settled on the other tone (hysteresis) finds one per bit
-    // change instead of several per slew.
-    // A single hop on the other tone is noise inside a long mark; a transition is the signal staying
-    // there. The confirmation is shorter than a bit, so a real change is never missed.
-    const int confirm = (int)lround(0.003 * c->rate / (double)hop);
-    int state = 0, opp = 0;
-    size_t opp_start = 0;
-    for (size_t s = 0; s + (size_t)w <= c->n; s += (size_t)hop)
+    if (!t || !g) { free(t); free(g); return; }
+    for (size_t s = 0, i = 0; i < nh; s += (size_t)hop, i++)
     {
         const double a = gate_tone(c->x + s, w, lo, c->rate);
         const double b = gate_tone(c->x + s, w, hi, c->rate);
-        const double g = (b - a) / (b + a + 1e-9);
-        if (fabs(g) < 0.5) continue;                 // mid slew, or neither tone: not a decision
-        const int now = g > 0.0 ? 1 : -1;
-        if (!state) { state = now; continue; }        // the first settled tone starts the record
-        if (now == state) { opp = 0; continue; }
-        if (opp == 0) opp_start = s;
+        g[i] = (b - a) / (b + a + 1e-9);
+    }
+    // A zero crossing of the raw discriminator is a fragile thing to count: noise crosses it
+    // whenever neither tone is loud. Counting a transition only when the signal has settled on the
+    // other tone (hysteresis) finds one per bit change instead of several per slew.
+    // A single hop on the other tone is noise inside a long mark; a transition is the signal staying
+    // there. The confirmation is shorter than a bit, so a real change is never missed.
+    // Its time is not the centre of the window that first saw the new tone, which trails the change
+    // by up to the window length and carries that smear into every period. The crossing is taken
+    // instead between the last settled sample of the old tone and the first of the new one, on the
+    // line through their two discriminator values: the window smooths the step symmetrically, so
+    // that zero is where the change happened.
+    const int confirm = (int)lround(0.003 * c->rate / (double)hop);
+    int state = 0, opp = 0;
+    size_t opp_start = 0, settled = 0;
+    for (size_t i = 0; i < nh; i++)
+    {
+        if (fabs(g[i]) < 0.5) continue;              // mid slew, or neither tone: not a decision
+        const int now = g[i] > 0.0 ? 1 : -1;
+        if (!state) { state = now; settled = i; continue; }   // the first settled tone starts it
+        if (now == state) { opp = 0; settled = i; continue; }
+        if (opp == 0) opp_start = i;
         if (++opp >= confirm)
         {
-            if (n == cap) { cap *= 2; t = realloc(t, cap * sizeof(double)); if (!t) return; }
-            t[n++] = ((double)opp_start + 0.5 * (double)w) / (double)c->rate;  // window centre
+            const double t0 = ((double)(settled * (size_t)hop) + 0.5 * (double)w) / (double)c->rate;
+            const double t1 = ((double)(opp_start * (size_t)hop) + 0.5 * (double)w) / (double)c->rate;
+            const double g0 = g[settled], g1 = g[opp_start];
+            if (n == cap) { cap *= 2; t = realloc(t, cap * sizeof(double)); if (!t) { free(g); return; } }
+            t[n++] = t0 + (t1 - t0) * (g0 / (g0 - g1));
             state = now;
+            settled = opp_start;
             opp = 0;
         }
     }
+    free(g);
     if (n < 16) { free(t); return; }
+    // A Baudot character is 7.5 bits long - one start, five data, 1.5 stop - so the transitions at a
+    // character boundary sit half a bit away from the ones inside a character. Fitting the plain
+    // coherence has to reconcile both phases on one grid, and on the DDK2 fixture that pulls the
+    // answer to 18.75 ms, 6 % short of the 20 ms the decoder itself uses, with 19 % of a bit left
+    // over as scatter. Squaring the phase first cancels the half bit and leaves the bit period;
+    // the two phases come back below as two centres, which is what the scatter is measured against.
+    //
     // the search is deliberately wider than the accept window: a recording whose time base is wrong
     // by 20 % still has a grid, and finding it is what lets the gate say "40 baud, not 50" instead of
     // reporting the nominal period for a take that has no such period at all
@@ -1133,27 +1154,76 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
         for (size_t i = 0; i < n; i++)
         {
             const double ph = fmod(t[i] * 1000.0, T) / T;
-            re += cos(2.0 * GATE_PI * ph);
-            im += sin(2.0 * GATE_PI * ph);
+            re += cos(4.0 * GATE_PI * ph);
+            im += sin(4.0 * GATE_PI * ph);
         }
         const double r = sqrt(re * re + im * im) / (double)n;
         if (r > best_r) { best_r = r; best_t = T; }
     }
-    double re = 0.0, im = 0.0;
-    for (size_t i = 0; i < n; i++)
+    // A grid that explains the transitions at the bit period explains them at half of it too, so a
+    // take with long marks can fit a harmonic as well as the fundamental, and reporting the harmonic
+    // turns a 40 baud take into "15 ms". Among the periods that explain the transitions equally
+    // well, the longest is the bit: the loop runs upward, so a later near-equal fit replaces the
+    // shorter one instead of being hidden behind it.
+    for (double T = nominal * 0.70; T <= nominal * 1.30; T += 0.005)
     {
-        const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
-        re += cos(2.0 * GATE_PI * ph);
-        im += sin(2.0 * GATE_PI * ph);
+        if (T <= best_t) continue;
+        double re = 0.0, im = 0.0;
+        for (size_t i = 0; i < n; i++)
+        {
+            const double ph = fmod(t[i] * 1000.0, T) / T;
+            re += cos(4.0 * GATE_PI * ph);
+            im += sin(4.0 * GATE_PI * ph);
+        }
+        const double r = sqrt(re * re + im * im) / (double)n;
+        if (r >= 0.995 * best_r) best_t = T;
     }
-    const double mean = atan2(im, re) / (2.0 * GATE_PI);
+    double centre[2];
+    {
+        double re = 0.0, im = 0.0;
+        for (size_t i = 0; i < n; i++)
+        {
+            const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
+            re += cos(2.0 * GATE_PI * ph);
+            im += sin(2.0 * GATE_PI * ph);
+        }
+        centre[0] = fmod(atan2(im, re) / (2.0 * GATE_PI) + 1.0, 1.0);
+        centre[1] = fmod(centre[0] + 0.5, 1.0);
+    }
+    for (int round = 0; round < 3; round++)
+    {
+        double re[2] = {0.0, 0.0}, im[2] = {0.0, 0.0};
+        for (size_t i = 0; i < n; i++)
+        {
+            const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
+            int k = 0;
+            for (int c = 1; c < 2; c++)
+            {
+                double near = ph - centre[c], best = ph - centre[k];
+                while (near > 0.5) near -= 1.0;
+                while (near < -0.5) near += 1.0;
+                while (best > 0.5) best -= 1.0;
+                while (best < -0.5) best += 1.0;
+                if (fabs(near) < fabs(best)) k = c;
+            }
+            re[k] += cos(2.0 * GATE_PI * ph);
+            im[k] += sin(2.0 * GATE_PI * ph);
+        }
+        for (int c = 0; c < 2; c++)
+            if (re[c] != 0.0 || im[c] != 0.0)
+                centre[c] = fmod(atan2(im[c], re[c]) / (2.0 * GATE_PI) + 1.0, 1.0);
+    }
     double sq = 0.0;
     for (size_t i = 0; i < n; i++)
     {
-        double ph = fmod(t[i] * 1000.0, best_t) / best_t - mean;
-        while (ph > 0.5) ph -= 1.0;
-        while (ph < -0.5) ph += 1.0;
-        sq += ph * ph;
+        const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
+        double d0 = ph - centre[0], d1 = ph - centre[1];
+        while (d0 > 0.5) d0 -= 1.0;
+        while (d0 < -0.5) d0 += 1.0;
+        while (d1 > 0.5) d1 -= 1.0;
+        while (d1 < -0.5) d1 += 1.0;
+        const double d = fabs(d0) <= fabs(d1) ? d0 : d1;
+        sq += d * d;
     }
     k->period_ms = best_t;
     k->transitions = (int)n;
@@ -1207,17 +1277,24 @@ static void gate_dropouts(const cap_t* c, gate_drop_t* d)
     free(rms); free(sorted);
 }
 
-// Thresholds, set from two measurements that bracket the useful range: a clean 50 baud take generated
-// for this purpose measures 20.000 ms with 0.0 % scatter, and the DDK2 fixture - real audio through
-// the WebSDR client's recorder - measures 18.75 ms with 19 %. The fixture is the realistic case, so
-// the limits sit just outside it: the period and scatter tests catch a wrong baud rate, a doubled or
-// halved recording and a gappy take, while the pair and the bimodality carry the accept/reject
-// decision. A take that cannot clear these is not evidence about the modem either way.
+// Thresholds, set from four measurements that bracket the useful range. Transitions are interpolated
+// zero crossings against two phase centres, so these are the audio's numbers and not the estimator's:
+// a clean 50 baud take generated for this purpose measures 20.000 ms with 0.1 % scatter, the DDK2
+// fixture - real audio through the WebSDR client's recorder - 20.000 ms with 8.8 %, a 45.45 baud take
+// 22.000 ms with 2.2 %, and a 40 baud take 25.000 ms with 0.9 %.
+//
+// The fixture is the realistic case, so the limits sit just outside it. The period window is 5 %,
+// which passes both reference takes at their nominal period and refuses a 45.45 baud take at 10 %
+// long even though its pair and its scatter look perfect; the scatter limit is 12 %, above the
+// fixture's 8.8 % and well above the 2.2 % a mis-keyed rate costs. Scatter is what carries a take
+// damaged in a way the pair cannot see - a keyed signal whose edges have been smeared or clipped -
+// while the pair and the bimodality carry a stretch of noise or hash. A take that cannot clear these
+// is not evidence about the modem either way.
 #define GATE_SINGLE_MIN   0.55   // windows holding one tone
 #define GATE_BOTH_MAX     0.35   // windows holding both: straddled bits plus noise
 #define GATE_PAIR_SLACK   30.0   // Hz between the measured pair and the declared shift
-#define GATE_PERIOD_TOL   0.10   // fraction of a bit
-#define GATE_DISPERSION   25.0   // percent of a bit
+#define GATE_PERIOD_TOL   0.05   // fraction of a bit
+#define GATE_DISPERSION   12.0   // percent of a bit
 #define GATE_GAP_MS        5.0   // longest hole a take may carry
 
 static int capture_check(const char* path, uint16_t shift, uint16_t baud)
@@ -1283,8 +1360,12 @@ static int capture_check(const char* path, uint16_t shift, uint16_t baud)
     if (!clock.transitions || fabs(clock.period_ms - nominal) > nominal * GATE_PERIOD_TOL
         || clock.dispersion_pct > GATE_DISPERSION)
     {
-        printf("REJECT    : no %u baud clock (wanted %.2f ms, measured %.2f ms, scatter %.1f %%)\n",
-               (unsigned)baud, nominal, clock.period_ms, clock.dispersion_pct);
+        // the rate the take actually carries, so a wrong time base reads as the baud rate it is and
+        // not only as a period in milliseconds
+        printf("REJECT    : no %u baud clock (wanted %.2f ms, measured %.2f ms = %.1f baud, "
+               "scatter %.1f %%)\n",
+               (unsigned)baud, nominal, clock.period_ms,
+               clock.period_ms > 0.0 ? 1000.0 / clock.period_ms : 0.0, clock.dispersion_pct);
         bad = 1;
     }
     if (drop.longest_ms > GATE_GAP_MS)
