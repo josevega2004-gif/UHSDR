@@ -27,6 +27,12 @@ one mutation at a time and checks the verdict:
  14. a value renamed twice                    -> the record keeps the name the value had first,
                                                  and the translation of the previous layout still
                                                  finds the value at its word
+ 15. a renamed value written outside the table -> the suffix follows the annotation the line
+                                                 already carried, and both survive
+ 16. a suffix added by hand and resealed       -> the check accepts it, which is the recovery its
+                                                 own message describes
+ 17. a suffix that names another value         -> the check fails, naming the word and the value
+                                                 the previous layout stored there
 
 An assertion may look at the exit code and at the data a verdict has to name: the settings that
 were named, the marker that was recorded, the record that did not parse. It may not look at the
@@ -147,6 +153,23 @@ def run(*args):
     proc = subprocess.run([sys.executable, str(GEN), *args], cwd=str(ROOT),
                           capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
+
+
+def rename_in_table(owner, stale, paths=None):
+    """rename a stored value where the header declares it and where the table stores it"""
+    for path in paths or (HEADER, TABLE):
+        source = path.read_text(encoding='utf-8')
+        renamed = re.sub(r'\b%s\b' % owner, stale, source)
+        assert renamed != source, '%s is not named in %s, update this case' % (owner, path.name)
+        path.write_text(renamed, encoding='utf-8')
+
+
+def reseal_record(replace):
+    """edit the current record the way its own message tells a human to, and reseal it"""
+    text = RECORD.read_text(encoding='utf-8')
+    edited = replace(text)
+    assert edited != text, 'the record line this case rewrites is gone, update this case'
+    RECORD.write_text(layout_digest.seal(edited), encoding='utf-8')
 
 
 def run_check():
@@ -331,6 +354,80 @@ def case_renamed_twice():
     expect('the compiled check still translates the value after two renames', run_check(), 0)
 
 
+def case_rename_annotated_value():
+    """a renamed value whose record line already says how the word is written
+
+    A value the save path writes outside the table carries "(written outside the table)" on its
+    line, and plain_name() ends a name at the first bracket while alias_of() anchors "(was ...)" at
+    the end of the line. The suffix therefore has to be appended after the annotation, not in place
+    of it: dropping the annotation loses how the word is written, and putting the suffix before it
+    makes alias_of() miss the rename and the translation fail later.
+    """
+    owner = 'EEPROM_XVERTER_OFFSET_HIGH'
+    stale = owner + '_RENAMED'
+    # this one is declared with a trailing comment, unlike the plain table rows
+    match = re.search(r'(?m)^#define\s+%s\s+(\d+)\b' % owner,
+                      HEADER.read_text(encoding='utf-8'))
+    assert match, 'the define this case renames is gone, update this case'
+    word = match.group(1)
+    # a value written outside the table is also named in the generator's own list of those values,
+    # so a rename of it reaches the generator as well as the header and the table
+    rename_in_table(owner, stale, (HEADER, TABLE, GEN))
+
+    expect('the annotated value renamed in the table', run(), 0)
+    expect('the recorder keeps both the annotation and the old name',
+           run('--record-layout'), 0, RECORD_NAME)
+    line = '%s %s (written outside the table) (was %s)\n' % (word, stale, owner)
+    if line not in RECORD.read_text(encoding='utf-8'):
+        print('  FAIL  the record does not carry %r' % line.strip())
+        failures.append('the annotated rename lost its annotation or its alias')
+    expect('the compiled check accepts the annotated rename', run_check(), 0)
+
+
+def case_hand_written_suffix():
+    """a suffix a human added to the record and resealed, with no recorder run
+
+    This is the recovery the guard's own message prescribes for a record written before the carry
+    existed: add " (was <name>)" to the word's line and reseal it. Nothing checks that a human
+    wrote it rather than the recorder, so the documented repair has to work.
+    """
+    owner = 'EEPROM_TCXO_STATE'
+    stale = owner + '_RENAMED'
+    match = re.search(r'(?m)^#define\s+%s\s+(\d+)\s*$' % owner,
+                      HEADER.read_text(encoding='utf-8'))
+    assert match, 'the define this case renames is gone, update this case'
+    word = match.group(1)
+    rename_in_table(owner, stale)
+    reseal_record(lambda text: text.replace('%s %s\n' % (word, owner),
+                                            '%s %s (was %s)\n' % (word, stale, owner)))
+
+    expect('a suffix added by hand and resealed', run(), 0)
+    expect('the compiled check accepts the hand written suffix', run_check(), 0)
+
+
+def case_suffix_names_another_value():
+    """a resealed suffix that points at a value the word never held
+
+    The suffix is what the previous layout translation follows, so a suffix naming the wrong value
+    reads the setting through another value's address. It cannot be told from a genuine rename by
+    the word alone, which is why the guard has to notice that the value the previous layout stored
+    at that word is gone and that the name the line claims is not the one it had.
+    """
+    owner = 'EEPROM_MAX_VOLUME'
+    stale = owner + '_RENAMED'
+    wrong = 'EEPROM_AUDIO_GAIN'
+    match = re.search(r'(?m)^#define\s+%s\s+(\d+)\s*$' % owner,
+                      HEADER.read_text(encoding='utf-8'))
+    assert match, 'the define this case renames is gone, update this case'
+    word = match.group(1)
+    rename_in_table(owner, stale)
+    reseal_record(lambda text: text.replace('%s %s\n' % (word, owner),
+                                            '%s %s (was %s)\n' % (word, stale, wrong)))
+
+    expect('a suffix that names another stored value', run(), FAILS,
+           'word %s' % word, owner)
+
+
 def case_old_layout_translation():
     """one offset of UiConfiguration_OldLayoutAddress() changed
 
@@ -491,6 +588,9 @@ CASES = (
     ('12. the marker bump, edit by edit', case_marker_bump_procedure),
     ('13. a rename committed together with a marker bump', case_rename_with_a_bump),
     ('14. a value renamed twice', case_renamed_twice),
+    ('15. a renamed value written outside the table', case_rename_annotated_value),
+    ('16. a suffix added by hand and resealed', case_hand_written_suffix),
+    ('17. a suffix that names another value', case_suffix_names_another_value),
 )
 
 
