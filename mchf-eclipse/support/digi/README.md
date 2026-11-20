@@ -406,6 +406,29 @@ tuning   text frame:  GET /~~param?f=<Hz>&band=<x>&lo=<Hz>&hi=<Hz>&mode=<n>&name
 or weather-fax tones). `name` is shown to the receiver's operator, so fill something honest in.
 These are shared receivers with a limited number of user slots: short sessions only.
 
+### The collector, `capture/websdr_capture.py`
+
+It does the transport half and nothing else: connect, tune, write the raw stream to `part-NNN.stream`
+with one big-endian 32-bit length before each WebSocket message, resume at the next index, and
+reconnect with backoff after a drop. A part is `--part-seconds` of wall clock, since with no decode
+there is no sample count to reach. A fragment left by an attempt that was cut short keeps its own
+index and is recorded `"complete": false`, so the next attempt cannot truncate it:
+
+```
+./websdr_capture.py --freq-khz 4581.41 --part-seconds 5 --parts 2 --out /tmp/proof
+  part-000.stream     5.1 s      36780 bytes     41 messages  2026-11-20T05:37:48Z
+  part-001.stream     5.0 s      36783 bytes     41 messages  2026-11-20T05:37:53Z
+./websdr_capture.py --freq-khz 4581.41 --part-seconds 4 --parts 1 --out /tmp/proof   # resumes
+  part-002.stream     4.0 s      29529 bytes     33 messages  2026-11-20T05:37:59Z
+```
+
+The first two files were still byte identical (md5 unchanged) after that second run, and every file
+consumed exactly under the framing - 41, 41, 33, 46 and 25 messages of 518 to 909 bytes, no leftover
+bytes. **None of it is gradable.** There is no WAV writer and no `--assemble` (`--assemble` is
+rejected as an unknown argument), and `digi_bench capture-check` reads a WAV, so nothing in this tree
+can score a `.stream` as audio. The DPCM decoder for these bytes is still unvalidated - see the
+"What is proven here and what is not" list below - so a part is what the receiver sent and no more.
+
 The DDH 8 capture quoted below was taken from NA5B. The station list, baud rates and shifts came
 from the DWD table on the Franks-Weather page,
 http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts - 50 Bd with 225 Hz
