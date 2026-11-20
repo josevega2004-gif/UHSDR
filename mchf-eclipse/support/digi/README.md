@@ -425,13 +425,13 @@ workstation - that clock reading was never logged against UTC, so it is not a UT
 4581.84 kHz in USB with an 850-1450 Hz passband. The client's recorder ran for **64.1 s**, and only
 the **last 38 s** of it were transferred out of the browser, since the hand-off is one top-level
 navigation with one blob in it; every offset below is an offset into that 38 s window, not into the
-whole take. That 38 s was decimated 2:1 to 4 kHz from the client's 8 kHz stream rate (the pair is
-below 1.5 kHz, so 4 kHz sampling keeps 500 Hz of margin) and trimmed to the one clean repetition,
-19.1-32.8 s of the transferred 38 s. The fixture is committed, and `make clean` leaves `fixtures/`
-alone.
+whole take. That 38 s was decimated 2:1 to 4 kHz from the client's 8 kHz stream rate (the pair sits
+below 1.4 kHz, more than 600 Hz clear of the 2 kHz Nyquist limit) and trimmed to the one clean
+repetition, 19.1-32.8 s of the transferred 38 s. `fixtures/MANIFEST.md` carries the same provenance
+as fields, so a re-capture is checked against numbers rather than against this prose.
 
-The pinned text is the CQ line the DWD stations send; logs from DDK9 and DDH 8 show the same line
-with the transmitter's own call signs and frequency list:
+The pinned text is the CQ line these stations send; the DDH 8 copy in the section above shows it with
+that transmitter's own call sign and frequency list:
 
 ```
 expected: CQ CQ CQ DE DDK2 DDH7 DDK9 FREQUENCIES   4583 KHZ   7646 KHZ   10100.8 KHZ
@@ -440,42 +440,36 @@ CER     : 2.7 %
 ```
 
 `101008` is not a decode error: `norm_baudot()` keeps only A-Z, 0-9 and space, so the decimal point
-never reaches the report. The one real error is the `5` at the `DDK9 FREQUENCIES` junction, and it is worth recording what it
-is **not**, because the obvious suspect is the decoder. It is not an unshift-on-space defect:
-`rtty.c` implements no USOS at all - only codes 27 and 31 change `charSetMode`, and a space maps to
-`' '` in both `RTTYLetters` and `RTTYSymbols` - so a space cannot come out as a figure. `'5'` is
-`RTTYSymbols[16]`, which means code 16 arrived while the decoder sat in FIGS. Two checks close it.
-A synthesised stream of this text (the DWD shifting, 1.5 stop bits, 50 Bd, 450 Hz) decodes at
-**0.0 % CER**, so the shift handling is right. And replacing `[FIGS][9][SP]` with
-`[FIGS][16][9]` in that stream reproduces this exact line, `DDK59FREQUENCIES`, at 2.7 % CER - the
-decoder prints what arrives. Three takes of the same transmission read `DDK9`, `DDK95` and `DDK59`
-at that junction, so it is not deterministic logic either: the bits were corrupted in the air.
-Two characters of 74 is the 2.7 % this case pins, and the target passes a `max CER 3` limit.
+never reaches the report. The one real error is the `5` at the `DDK9 FREQUENCIES` junction, and it is
+**not** a shift-handling defect. `rtty.c` has no unshift-on-space at all - only codes 27 and 31
+change `charSetMode`, and a space is `' '` in both tables - so `'5'`, which is `RTTYSymbols[16]`,
+means code 16 arrived while the decoder sat in FIGS. A synthesised stream of this text decodes at
+**0.0 %**, and the same stream with `[FIGS][9][SP]` replaced by `[FIGS][16][9]` reproduces
+`DDK59FREQUENCIES` at 2.7 %: the decoder prints what arrives. Three takes of the same transmission
+read `DDK9`, `DDK95` and `DDK59` there, so the corruption came with the signal rather than with the
+logic. Two wrong characters of the **73** scored is 2.74 %, which the report rounds to the 2.7 % this
+case pins; the target fails it above 3 %.
 
 ### The pair, measured
 
-The tone numbers, in the order they were taken, because the first method is biased:
+The average spectrum is the tempting measurement and the wrong one. Its humps are combs of 3.33 Hz
+teeth from the idle `RYRY...` pattern, with keying sidebands at +-50 and +-100 Hz, so "the peak" is
+whichever tooth is tallest and the answer comes out pulled inward: **441 +- 3 Hz** (932.0 / 1370.6).
 
-* per hump spectral peak of the average spectrum over the whole take: space **932.0 Hz**, mark
-  **1370.6 Hz**, separation **441 +- 3 Hz**. That reading is pulled inward. 50 Bd keying puts
-  sidebands at +-50 and +-100 Hz around each tone, and the idle `RYRY...` pattern makes each hump a
-  comb with 3.33 Hz teeth, so "the peak" is whichever tooth happens to be tallest.
-* single tone runs only (>= 55 ms, transitions trimmed, no second tone present to leak in, so
-  neither the comb nor the other tone's keying sidebands can bias the peak): space **927.9 Hz**
-  (n = 24, sd 0.44), mark **1375.4 Hz** (n = 15, sd 0.87), separation **447.5 +- 0.2 Hz**. Three
-  estimators agree on it - the per run maximum likelihood median 447.54 Hz, a 1/length
-  extrapolation that removes the fixed window bias 447.51 Hz, and the phase slope across runs
-  447.62 Hz - and it is stable across Hann and Hamming windows, 2/4/6 ms trims, and run lengths
-  from 50 to 130 ms. **447.5 Hz is the number to use: the emission is a 447.5 Hz pair, 0.55 % below
-  the nominal 450 Hz.** The scale cannot account for that difference - the WWV check below holds
-  the audio axis to 0.008 % on a 500 Hz interval, seventy times better than the 2.5 Hz in question.
+Single tone runs only - 55 ms or longer, transitions trimmed, so neither the comb nor the other
+tone's sidebands can bias the peak - give space **927.9 Hz** (n = 24, sd 0.44) and mark **1375.4 Hz**
+(n = 15, sd 0.87), separation **447.5 +- 0.2 Hz**. Three estimators agree: per run maximum likelihood
+median 447.54, a length extrapolation that removes the fixed window bias 447.51, and the phase slope
+across runs 447.62. **447.5 Hz** is the number to use. On this take that is 0.55 % below the nominal
+450 Hz, and the WWV check below holds the audio axis to 0.03 %, eighteen times smaller, so the offset
+belongs to the emission and not to the reading.
 
 The receiver then decides the shift setting, and it is not close: **450 Hz decodes at 2.7 % CER**,
 425 Hz at 49.3 %, 170 Hz at 30.1 %, 850 Hz at 32.9 %. The measured 447.5 Hz sits 2.5 Hz from the
 450 Hz setting and 22.5 Hz from the 425 Hz one, which is why that is the setting to receive it with:
-the pair is a 450 Hz class emission whose own shift is 0.55 % low, not a measurement that cannot tell
-the two apart. 50 Bd is confirmed the same way: 20.0 ms bit period from the
-transition spacing, and 2.7 % at 50 Bd against 37.0 % at 45.45 Bd. Both tones sit about 11 Hz above
+the pair is a 450 Hz class emission that this take measures 0.55 % low, not a measurement that cannot
+tell the two apart. 50 Bd is confirmed the same way: 20.0 ms bit period from the transition
+spacing, and 2.7 % at 50 Bd against 37.0 % at 45.45 Bd. Both tones sit about 11 Hz above
 the modem's 915/1365 Hz filters, which moves the pair without touching the separation.
 
 ### Is the stream rate what it says it is?
@@ -498,56 +492,31 @@ estimator. The same capture pins the receiver's audio axis at -19.2 Hz from its 
 which is worth knowing before quoting an absolute audio frequency - do not carry that correction to
 4583 kHz without measuring it there.
 
-What this case does not prove: that the modem copes with weak or fading signals. This is one
-strong-ish night take, and its 2.7 % is the kind of failure the section above lists as open - the
-`5` at the junction is a received-code error in the air, not a shift-handling defect - the probe
-above reproduces it from a deliberately altered bit stream and the canonical stream decodes clean.
+**What one 13.7 s take cannot show.** This is a single night path, one receiver, no fading and no
+QRM, so it says nothing about weak or fading signals, and its 2.7 % is one particular slip - a code
+16 where a space belonged - not an error rate to quote for the mode. What it does pin is that the
+decoder handles the DWD shifting correctly on real audio, and that any modem change which moves this
+output has to be explained.
 
 ### The second on-air case, DDK9 on 10100.8 kHz, is not pinned
 
-Attempted on 19 November 2026, 21:15-22:20 UTC, and **no fixture was committed**, because the take
-could not be verified. The record is here so the next attempt starts where this one stopped.
+DDK9 was attempted on 19 November 2026 and **no fixture was committed**, because no take could be
+verified. NA5B, the receiver behind the DDK2 case, had nothing there that evening: RMS 2300-2440 over
+two passbands, with no FSK pair anywhere from 400 to 2500 Hz, which is a noise floor - 10 MHz was
+shut from Texas to Europe. Twente (`websdr.ewi.utwente.nl`) did show a 450 Hz / **50.0 Bd** shape at
+**924.0 / 1371.0 Hz**, but its audio never decodes, and its control says what that means: DDK2 copied
+the same way through Twente, tones on the filters and the same 50.0 Bd clock, also decodes to nothing,
+while a synthesised 450 Hz / 50 Bd stream at Twente's 7119 Hz rate decodes at 4.1 %. The capture path
+is at fault, not the decoder, and a 90 %-CER line must not be pinned as ground truth. DF0HTE
+(Friedrichshafen) and ES4O (Estonia) carry only a weak carrier in noise at that frequency (5 ms
+windows, 60 % of them holding both tones within 6 dB), and Hack Green has no 10 MHz band. Every
+receiver also has its own dial offset - 1.025 kHz on Twente's marker-to-dial, 105 Hz on ES4O, 19 Hz
+on NA5B's WWV capture - so the tuning rule has to be measured, never assumed.
 
-**At NA5B, the receiver that produced the DDK2 case, there was nothing to copy.** Dial 10100.685 kHz
-in USB puts the pair on the modem's 915/1365 Hz filters; across passbands of 300-2600 Hz and
-800-1480 Hz the recording sat at RMS 2300-2440 with no FSK pair anywhere from 400 to 2500 Hz (10 ms
-windows, dominant frequency scattered with no two-tone structure). That is a noise floor, not a weak
-signal: 10 MHz was shut from Texas to central Europe at that hour.
-
-**At Twente (`websdr.ewi.utwente.nl`) the signal is there**, and it measures like DDK9: tones
-**924.0 / 1371.0 Hz**, separation 447 Hz - the same 447-448 Hz the DDK2 case measures, consistent
-with the same DWD equipment - with one tone at a time in 10 ms slices, and a **50.0 Bd** clock
-(bit period 142.4 samples of that receiver's 7119 Hz stream, 1245 transitions in 16 s).
-
-**But it does not decode, and the fault is the capture path, not the signal.** The control settles
-it: DDK2 - the station in the committed fixture - captured the same way through Twente has its
-tones on **917.6 / 1369.6 Hz** (inside the modem's filters) and the same 142.4-sample 50.0 Bd
-clock, and still decodes to nothing at all (100 % CER). Meanwhile a synthesised 450 Hz / 50 Bd
-stream written at Twente's **7119 Hz** rate decodes at 4.1 % through the same `rtty-wav` path, i.e.
-identically to the same stream at 8000 Hz, so the bench handles that rate and the STFT/Demod chain
-is not at fault. Something in Twente's streamed audio is unusable by the modem (its recorder was
-checked for dropouts - 24 single-sample gaps in 18 s, no repeated blocks - and for a mirrored
-sideband, which LSB does not fix). Tone verification alone cannot rescue a take whose audio will not
-decode, and pinning one would have put a 90 %-CER line into the bench as if it were ground truth.
-
-**Other receivers do not rescue it.** The public directory (`websdr.ewi.utwente.nl/~~websdrlist`, 128
-entries) lists **19** receivers whose bands cover 10100.8 kHz. Of the European ones, DF0HTE
-(Friedrichshafen, 10.004-10.196 MHz) and ES4O (Estonia, 10.096-10.480 MHz) were both checked, and
-neither carries DDK9 here: with 5 ms windows - a quarter of a bit - 60 % hold both candidate tones
-within 6 dB and the spectrum has no discrete pair at all (DF0HTE's peaks spread over 1010-1030 Hz,
-ES4O's the same), which is a weak carrier in noise, not FSK, at S-meter 1800-2500. Only Twente
-produced a genuine 450 Hz / 50.0 Bd shape. Hack Green's WebSDR has no 10 MHz band at all. Each
-receiver also carries its own dial offset - 1.025 kHz between the typed marker and the dial on
-Twente, about 105 Hz on ES4O, 19 Hz on NA5B's WWV capture - so "dial = carrier - 1.14 kHz" is per
-receiver and has to be measured, never assumed. At 21:45-22:00 UTC 10 MHz was not open on a
-regional European path and was closed to the US, which is the honest reason this case is still
-waiting.
-
-So the DDK2 case remains the only on-air case, and its 2.7 % still has nothing strong to compare
-against. What would unblock it: run the same capture on NA5B once 10 MHz is open to Europe (later
-in the night or around dawn UTC), or on any receiver whose audio the modem can decode - and prove
-the path first by copying DDK2 through it to a few percent CER, before trusting a 10100.8 kHz take.
-A receiver's own S-meter is not evidence; the tone pair plus a clean decode is.
+The comparison this case lacks is a propagation problem, not a bench one: retry on NA5B when 10 MHz
+is open to Europe, and prove any new receiver by copying DDK2 through it to a few percent before
+trusting a 10100.8 kHz take. A receiver's S-meter is not evidence; the tone pair plus a clean decode
+is.
 
 ## Receiving a DWD teletype station on the radio
 
