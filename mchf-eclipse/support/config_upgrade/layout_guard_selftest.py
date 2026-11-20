@@ -154,7 +154,12 @@ def run(*args):
 
 
 def rename_in_table(owner, stale, paths=None):
-    """rename a stored value where the header declares it and where the table stores it"""
+    """rename a stored value where the header declares it and where the table stores it
+
+    ``paths`` is for the values that are named somewhere else as well: one the save path writes
+    outside the table is also in the generator's own list of those, and a rename that skipped it
+    would leave the generator naming a value the header no longer declares.
+    """
     for path in paths or (HEADER, TABLE):
         source = path.read_text(encoding='utf-8')
         renamed = re.sub(r'\b%s\b' % owner, stale, source)
