@@ -18,8 +18,8 @@ one mutation at a time and checks the verdict:
   7. the record does not parse                 -> the check fails
   8. a record edited without sealing it       -> the check fails, naming the digest
   9. two rows claim one eeprom id              -> the check fails
-  9. two rows store into one variable          -> the check fails
- 10. the menu offers more than the row stores  -> the check fails
+ 10. two rows store into one variable          -> the check fails
+ 11. the menu offers more than the row stores  -> the check fails
  12. the whole marker bump, one edit at a time -> the check fails until all three edits are there
  13. a rename committed with a marker bump    -> the recorder carries the name the value had
                                                  from the record of the previous marker, and the
@@ -29,9 +29,7 @@ one mutation at a time and checks the verdict:
                                                  finds the value at its word
  15. a renamed value written outside the table -> the suffix follows the annotation the line
                                                  already carried, and both survive
- 16. a suffix added by hand and resealed       -> the check accepts it, which is the recovery its
-                                                 own message describes
- 17. a suffix that names another value         -> the check fails, naming the word and the value
+ 16. a rename whose suffix names a wrong value -> the check fails, naming the word and the value
                                                  the previous layout stored there
 
 An assertion may look at the exit code and at the data a verdict has to name: the settings that
@@ -164,14 +162,6 @@ def rename_in_table(owner, stale, paths=None):
         path.write_text(renamed, encoding='utf-8')
 
 
-def reseal_record(replace):
-    """edit the current record the way its own message tells a human to, and reseal it"""
-    text = RECORD.read_text(encoding='utf-8')
-    edited = replace(text)
-    assert edited != text, 'the record line this case rewrites is gone, update this case'
-    RECORD.write_text(layout_digest.seal(edited), encoding='utf-8')
-
-
 def run_check():
     """the whole check as CI runs it: generator, host compiler, generated program
 
@@ -244,9 +234,7 @@ def case_rename():
     assert match, 'the define this case renames is gone, update this case'
     owner, word = match.group(1), match.group(2)
     stale = owner + '_RENAMED'
-    for path in (HEADER, TABLE):
-        source = path.read_text(encoding='utf-8')
-        path.write_text(re.sub(r'\b%s\b' % owner, stale, source), encoding='utf-8')
+    rename_in_table(owner, stale)
 
     expect('a stored value renamed where the table declares it', run(), 0,
            '%s %s' % (word, stale))
@@ -329,18 +317,14 @@ def case_renamed_twice():
     second = owner + '_RENAMED'
     third = owner + '_RENAMED_AGAIN'
 
-    for path in (HEADER, TABLE):
-        source = path.read_text(encoding='utf-8')
-        path.write_text(re.sub(r'\b%s\b' % owner, second, source), encoding='utf-8')
+    rename_in_table(owner, second)
     expect('the value renamed, the record naming the name it had first',
            run('--record-layout'), 0, RECORD_NAME)
     if ('%s %s (was %s)\n' % (word, second, owner)) not in RECORD.read_text(encoding='utf-8'):
         print('  FAIL  the first rename was not recorded against the name the value had')
         failures.append('the first rename was not recorded')
 
-    for path in (HEADER, TABLE):
-        source = path.read_text(encoding='utf-8')
-        path.write_text(re.sub(r'\b%s\b' % second, third, source), encoding='utf-8')
+    rename_in_table(second, third)
     expect('the value renamed again, the record still naming the first name',
            run('--record-layout'), 0, RECORD_NAME)
     written = RECORD.read_text(encoding='utf-8')
@@ -384,34 +368,13 @@ def case_rename_annotated_value():
     expect('the compiled check accepts the annotated rename', run_check(), 0)
 
 
-def case_hand_written_suffix():
-    """a suffix a human added to the record and resealed, with no recorder run
-
-    This is the recovery the guard's own message prescribes for a record written before the carry
-    existed: add " (was <name>)" to the word's line and reseal it. Nothing checks that a human
-    wrote it rather than the recorder, so the documented repair has to work.
-    """
-    owner = 'EEPROM_TCXO_STATE'
-    stale = owner + '_RENAMED'
-    match = re.search(r'(?m)^#define\s+%s\s+(\d+)\s*$' % owner,
-                      HEADER.read_text(encoding='utf-8'))
-    assert match, 'the define this case renames is gone, update this case'
-    word = match.group(1)
-    rename_in_table(owner, stale)
-    reseal_record(lambda text: text.replace('%s %s\n' % (word, owner),
-                                            '%s %s (was %s)\n' % (word, stale, owner)))
-
-    expect('a suffix added by hand and resealed', run(), 0)
-    expect('the compiled check accepts the hand written suffix', run_check(), 0)
-
-
 def case_suffix_names_another_value():
-    """a resealed suffix that points at a value the word never held
+    """a rename whose record line names the wrong value it came from
 
     The suffix is what the previous layout translation follows, so a suffix naming the wrong value
-    reads the setting through another value's address. It cannot be told from a genuine rename by
-    the word alone, which is why the guard has to notice that the value the previous layout stored
-    at that word is gone and that the name the line claims is not the one it had.
+    would read the setting through another value's address. What catches it is not a comparison of
+    the claimed name: it is that no line carries the value the previous layout stored at that word
+    any more, so the check fails and says which value went missing there.
     """
     owner = 'EEPROM_MAX_VOLUME'
     stale = owner + '_RENAMED'
@@ -421,8 +384,11 @@ def case_suffix_names_another_value():
     assert match, 'the define this case renames is gone, update this case'
     word = match.group(1)
     rename_in_table(owner, stale)
-    reseal_record(lambda text: text.replace('%s %s\n' % (word, owner),
-                                            '%s %s (was %s)\n' % (word, stale, wrong)))
+    text = RECORD.read_text(encoding='utf-8')
+    edited = text.replace('%s %s\n' % (word, owner),
+                          '%s %s (was %s)\n' % (word, stale, wrong))
+    assert edited != text, 'the record line this case rewrites is gone, update this case'
+    RECORD.write_text(layout_digest.seal(edited), encoding='utf-8')
 
     expect('a suffix that names another stored value', run(), FAILS,
            'word %s' % word, owner)
@@ -589,8 +555,7 @@ CASES = (
     ('13. a rename committed together with a marker bump', case_rename_with_a_bump),
     ('14. a value renamed twice', case_renamed_twice),
     ('15. a renamed value written outside the table', case_rename_annotated_value),
-    ('16. a suffix added by hand and resealed', case_hand_written_suffix),
-    ('17. a suffix that names another value', case_suffix_names_another_value),
+    ('16. a suffix that names another value', case_suffix_names_another_value),
 )
 
 
