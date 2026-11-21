@@ -1,4 +1,5 @@
 digi_bench
+digi_bench-break-rx
 *.wav
 *.pgm
 *.o

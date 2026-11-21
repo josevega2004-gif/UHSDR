@@ -127,6 +127,13 @@ static int lead_in_junk;
 static int cer_chars;
 static int cer_wrong;
 
+// A copy of the take as the receiver receives it, before the AGC, for the self check that asks
+// whether the noise on a take is real. The self check points this at a buffer, runs the same case
+// with and without noise, and measures the difference.
+static float32_t* take_copy;
+static size_t     take_copy_cap;
+static size_t     take_copy_n;
+
 // A band pass at freq with the constant peak gain form of the RBJ cookbook, so |H(freq)| is 1 and
 // subtracting g of its output attenuates a tone sitting exactly there by exactly g, in the audio
 // the modulator produced rather than in a re-implementation of it.
@@ -332,6 +339,12 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
         for (size_t i = 0; i < n; i++) buf[i] *= g;
     }
 
+    if (take_copy && n <= take_copy_cap)
+    {
+        memcpy(take_copy, buf, n * sizeof(float32_t));
+        take_copy_n = n;
+    }
+
     // the receiver: a cold AGC, the fixed post-AGC gain, then the demodulator. Cold, because the
     // AGC carries its gain, ring buffer and hang counter from one transmission into the next, so a
     // level row would otherwise measure whatever the case before it left in the gain and its
@@ -340,6 +353,14 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
     AudioAgc_ResetAgcWdsp();
     AudioAgc_SetupAgcWdsp(RATE, false);
     radio_agc(buf, n);
+
+#ifdef BENCH_BREAK_RX
+    // Deliberately wrong: the receiver assumes the take's symbol rate matches its speed setting,
+    // so a build that tells it the other speed must fail the RTTY table. break-rx makes that
+    // failure the test, rather than a table that would pass whatever the receiver does.
+    rtty_ctrl_config.speed_idx = (c->baud == 50) ? RTTY_SPEED_45 : RTTY_SPEED_50;
+    Rtty_Modem_Init((uint32_t) TXRATE);
+#endif
 
     // RX: the firmware demodulator, characters collected by the UI stand-in
     for (size_t i = 0; i < n; i++)
@@ -2714,9 +2735,11 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
 // What is left at the DDK9 junction is one inserted character, not two misreads. A per-character
 // table cannot show an insertion - it has a row per character the pinned text carries - so the record
 // is checked from both sides: the edit script names the insertion, the table says the nine came back
-// as sent, and the take's own line break is what stands where the pinned text has a space. If the
-// insertion stops being an insertion, or a character starts being read wrong, the record has to be
-// rewritten rather than quietly left standing.
+// as sent, and the take's own line break is what stands where the pinned text has a space. The
+// inserted slot's own code is the decoder's reading (16, '5'); the audio there carries 24, '9', one
+// data bit away, so no character the carried text has is read wrong. If the insertion stops being an
+// insertion, or a carried character starts being read wrong, the record has to be rewritten rather
+// than quietly left standing.
 static int align_check(const char* path, const char* expected, uint16_t shift, uint16_t baud)
 {
     align_rows = 0;
@@ -2776,8 +2799,8 @@ static int align_check(const char* path, const char* expected, uint16_t shift, u
     if (align_ins != 1 || align_ins_char != '5' || align_sub != 0 || align_del != 1)
     {
         printf("FAIL  the junction is %d inserted / %d substituted / %d not in the take; the record\n"
-               "      is one inserted '5', no character read wrong, and the space the take breaks the\n"
-               "      line at\n", align_ins, align_sub, align_del);
+               "      is one inserted character, no carried character read wrong, and the space the\n"
+               "      take breaks the line at\n", align_ins, align_sub, align_del);
         bad = 1;
     }
     if (!strstr(align_raw, "DDK59\r\nFREQ"))
@@ -2788,11 +2811,13 @@ static int align_check(const char* path, const char* expected, uint16_t shift, u
     }
     if (!bad)
     {
-        printf("\nOne character inserted at the junction and nothing read wrong: the take prints\n"
-               "DDK59, breaks the line, then FREQUENCIES, and the nine is the character the pinned\n"
-               "text carries. The scorer charges the insertion and the pinned space the break stands\n"
-               "in for - %d edits over %zu characters, %.1f %% - which is what 2.7 %% is made of.\n"
-               "Both windows carry their own keying, so a break that became a fade would fail here.\n",
+        printf("\nOne character inserted at the junction and no carried character read wrong: the\n"
+               "take prints DDK59, breaks the line, then FREQUENCIES, and the nine is the character\n"
+               "the pinned text carries. The inserted slot itself is the decoder's reading ('5');\n"
+               "the audio there is a second nine, one data bit away. The scorer charges the insertion\n"
+               "and the pinned space the break stands in for - %d edits over %zu characters, %.1f %% -\n"
+               "which is what 2.7 %% is made of. Both windows carry their own keying, so a break that\n"
+               "became a fade would fail here.\n",
                align_ins + align_sub + align_del, align_rows,
                100.0 * (double)(align_ins + align_sub + align_del) / (double)align_rows);
     }
@@ -2934,8 +2959,9 @@ static int rtty_trace(const char* path, const char* expected, uint16_t shift, ui
         k += len;
     }
     printf("\n%d character slots read, %d shift codes, %d line breaks, %d abandoned at a stop bit,\n"
-           "%d inserted with no counterpart in the text, %d with a data bit that differs from what\n"
-           "was sent\n", groups, groups - printed - breaks, breaks, abandoned, inserted, diff_chars);
+           "%d inserted with no counterpart in the text, %d compared characters with a data bit that\n"
+           "differs from what was sent\n", groups, groups - printed - breaks, breaks, abandoned, inserted,
+           diff_chars);
     if (off_clock)
         printf("%d of them had a decision spacing more than 0.5 ms off the bit: the DPLL relocked "
                "inside\nthe character, so its clock and the audio's disagreed there\n", off_clock);
@@ -3273,6 +3299,113 @@ static int selftest(void)
         float f = crossings * TXRATE / 2.0f / 48000.0f;
         printf("     (host oscillator measured at %.1f Hz, asked for 915.0 Hz)\n", f);
         check(fabsf(f - 915.0f) < 2.0f, "the host oscillator produces the frequency it is asked for");
+    }
+    {
+        // The noise and fading channels are the only part of a case the modem does not generate,
+        // and a generator whose state stops advancing is invisible in a character error rate: every
+        // sample receives the same value, so "noise" becomes a constant offset and the row reads
+        // cleaner than it should. That is how three tables here were measured before the state was
+        // written back, so check the channels directly rather than reading their effect in a CER.
+        enum { CH_N = 12000 };
+        static float32_t ch[CH_N];
+        for (int i = 0; i < CH_N; i++) ch[i] = 0.0f;
+        Bench_RngSeed(0x5EED1234u);
+        Bench_AddNoise(ch, CH_N, 10.0f, 1.0f);
+        double sum = 0.0, sq = 0.0, d2 = 0.0;
+        int same = 0;
+        for (int i = 0; i < CH_N; i++) { sum += ch[i]; sq += (double) ch[i] * ch[i]; }
+        for (int i = 1; i < CH_N; i++)
+        {
+            const double d = (double) ch[i] - ch[i - 1];
+            d2 += d * d;
+            if (ch[i] == ch[i - 1]) same++;
+        }
+        const double n_mean = sum / CH_N;
+        const double n_rms = sqrt(sq / CH_N);
+        const double n_step = sqrt(d2 / (CH_N - 1));
+        printf("     (noise: mean %+.4f, rms %.3f, %d/%d adjacent samples equal, step rms %.3f)\n",
+               n_mean, n_rms, same, CH_N - 1, n_step);
+        check(fabs(n_mean) < 0.01, "noise: the added signal has no DC");
+        check(n_rms > 0.25 && n_rms < 0.40, "noise: the added signal has the RMS the SNR asks for");
+        check(same < CH_N / 100 && n_step > 0.25,
+              "noise: the generator advances sample to sample");
+
+        const double depth = pow(10.0, -10.0 / 20.0);
+        for (int i = 0; i < CH_N; i++) ch[i] = 1.0f;
+        Bench_AddQsb(ch, CH_N, 2.0f, 10.0f);
+        double qsum = 0.0, q2 = 0.0;
+        float lo = ch[0], hi = ch[0];
+        int qsame = 0;
+        for (int i = 0; i < CH_N; i++)
+        {
+            qsum += ch[i];
+            if (ch[i] < lo) lo = ch[i];
+            if (ch[i] > hi) hi = ch[i];
+            if (i)
+            {
+                const double d = (double) ch[i] - ch[i - 1];
+                q2 += d * d;
+                if (ch[i] == ch[i - 1]) qsame++;
+            }
+        }
+        const double q_mean = qsum / CH_N;
+        const double q_step = sqrt(q2 / (CH_N - 1));
+        printf("     (qsb: %.3f..%.3f, mean %.3f, %d/%d adjacent samples equal, step rms %.2e)\n",
+               lo, hi, q_mean, qsame, CH_N - 1, q_step);
+        check(hi > 0.99f && lo > (float) depth - 0.01f && hi - lo > 0.6f,
+              "qsb: the fade reaches its trough and peak");
+        check(fabs(q_mean - 0.5 * (1.0 + depth)) < 0.01,
+              "qsb: the envelope's mean is the depth it asks for, not a constant gain");
+        check(qsame < CH_N / 100 && q_step > 1e-5,
+              "qsb: the fading phase advances sample to sample");
+        for (int i = 0; i < CH_N; i++) ch[i] = 0.0f;
+        Bench_AddQsb(ch, CH_N, 2.0f, 10.0f);
+        int nonzero = 0;
+        for (int i = 0; i < CH_N; i++) if (ch[i] != 0.0f) nonzero++;
+        check(nonzero == 0, "qsb: silence stays silent, so fading adds no DC");
+    }
+    {
+        // The check above measures the generator. This one measures the take: run the same case
+        // twice, once without noise and once at 10 dB, and treat the difference as the noise the
+        // receiver is actually handed. A random number generator that stopped advancing leaves a
+        // constant residue; a take that lost its noise leaves none at all.
+        rtty_case_t clean = { .label = "take clean", .shift = 170, .snr_db = 100.0f, .max_cer = 5.0f };
+        rtty_case_t noisy = { .label = "take noisy", .shift = 170, .snr_db = 10.0f, .max_cer = 5.0f };
+        static float32_t take_clean[160000], take_noisy[160000], residual[160000];
+        char got[8192];
+        int eot = 0;
+        take_copy = take_clean; take_copy_cap = 160000; take_copy_n = 0;
+        rtty_run(&clean, "DE UHSDR NOISE TAKE", false, got, sizeof(got), &eot);
+        take_copy = take_noisy;
+        rtty_run(&noisy, "DE UHSDR NOISE TAKE", false, got, sizeof(got), &eot);
+        take_copy = NULL; take_copy_cap = 0;
+        const size_t n = take_copy_n;
+        double sum = 0.0, sq = 0.0, d2 = 0.0, sig = 0.0;
+        int same = 0;
+        for (size_t i = 0; i < n; i++)
+        {
+            residual[i] = take_noisy[i] - take_clean[i];
+            sum += residual[i];
+            sq += (double) residual[i] * residual[i];
+            sig += (double) take_clean[i] * take_clean[i];
+            if (i)
+            {
+                const double step = (double) residual[i] - residual[i - 1];
+                d2 += step * step;
+                if (residual[i] == residual[i - 1]) same++;
+            }
+        }
+        const double mean = n ? sum / (double) n : 0.0;
+        const double rms = n ? sqrt(sq / (double) n) : 0.0;
+        const double step = n > 1 ? sqrt(d2 / (double) (n - 1)) : 0.0;
+        const double want = sqrt(sig / (double) (n ? n : 1)) * pow(10.0, -10.0 / 20.0);
+        printf("     (noise take: mean %+.4f, rms %.4f (asked %.4f), %d/%zu adjacent equal, step rms %.4f)\n",
+               mean, rms, want, same, n ? n - 1 : 0, step);
+        check(fabs(mean) < 0.005, "noise take: the noise on the take has no DC");
+        check(fabs(rms - want) < 0.2 * want,
+              "noise take: the noise on the take has the level the SNR asks for");
+        check(same < (int) (n / 100) && step > 0.001,
+              "noise take: the noise changes sample to sample");
     }
     {
         // zero crossing count of the modulator tone, measured through the same path the bench uses

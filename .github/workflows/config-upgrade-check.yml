@@ -88,6 +88,13 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi rtty
 
+      # A build with one receiver assumption deliberately broken: the receiver is told the other
+      # symbol speed. The target succeeds only when the RTTY table fails, so a table that stopped
+      # seeing receiver faults fails here instead of passing quietly.
+      - name: Check the bench fails a broken receiver
+        working-directory: mchf-eclipse
+        run: make -C support/digi break-rx
+
       # the matrix above sends 48 characters, where one wrong character is 2.1 %: 0.0 % there only
       # means "under 2.1 %". This sends the same text eight times through the same cases, so a clean
       # row is under three tenths of a percent and a partly wrong one reports a rate worth reading.
@@ -115,6 +122,25 @@ jobs:
       - name: Decode the recorded DWD on air fixture
         working-directory: mchf-eclipse
         run: make -C support/digi rtty-ddk2
+
+      # the same take, one row per character: the junction the record names, so a decoder change
+      # that moved the 2.7 % somewhere else could not pass as the same result
+      - name: Check the pinned characters in the DWD take
+        working-directory: mchf-eclipse
+        run: make -C support/digi fixture-align
+
+      # a second path: the sweep has to stay under 5 % a cell, and the 18 ms case has to keep costing
+      # the message - the echo failure is pinned from below, so a modem that became immune to it
+      # would fail here
+      - name: Run the two path RTTY sweep
+        working-directory: mchf-eclipse
+        run: make -C support/digi rtty-multipath
+
+      # the modulator's own keying through the receiver's gate: every interval between tone changes
+      # has to sit on the half bit lattice, which a receiver loopback cannot see
+      - name: Check the RTTY transmitter keying
+        working-directory: mchf-eclipse
+        run: make -C support/digi tx-check
 
       # NAVTEX is the first mode here that is not the radio's: a reference SITOR-B modem, graded on
       # the two mechanisms the mode is built from. The table has rows that have to fail as well as

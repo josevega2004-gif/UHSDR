@@ -1,6 +1,8 @@
 # Host bench for the UHSDR digital modes. Builds nothing into the radio.
 #
 #   make test    self checks (used by CI)
+#   make break-rx  negative control: a build with the receiver told the other symbol speed must
+#                fail the RTTY table, or the table is not measuring the receiver
 #   make rtty    RTTY shift/SNR character error rate matrix (used by CI, fails above the per case
 #                limit), firmware modem looped back on itself
 #   make rtty-long  the same matrix with eight copies of the message: 0.26 % is one character
@@ -58,6 +60,26 @@ uhsdr_math.o: ../../misc/uhsdr_math.c
 
 test: digi_bench
 	@./digi_bench test
+
+# A build with one receiver assumption deliberately broken: the receiver is told the other symbol
+# speed, while the take it is handed is the one the case asked for. The RTTY table has to fail
+# against it, so this target succeeds only when the broken build fails. A table that cannot see a
+# broken receiver is not a table, and the noise rows are exactly where a receiver that is not being
+# tested looks better.
+digi_bench-break-rx: digi_bench.break-rx.o $(filter-out digi_bench.o,$(BENCH_OBJS)) $(FW_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+digi_bench.break-rx.o: digi_bench.c bench.h
+	$(CC) $(CFLAGS) $(DEFINES) -DBENCH_BREAK_RX $(INCLUDES) -c -o $@ $<
+
+break-rx: digi_bench-break-rx
+	@if ./digi_bench-break-rx rtty >/tmp/digi-break-rx.log 2>&1; then \
+		echo "FAIL  the broken receiver passed the RTTY table, so the table is not measuring it"; \
+		tail -3 /tmp/digi-break-rx.log; \
+		exit 1; \
+	fi; \
+	echo "ok    the broken receiver fails the RTTY table, as it must"; \
+	grep -m2 "FAIL" /tmp/digi-break-rx.log || true
 
 rtty: digi_bench
 	@./digi_bench rtty
@@ -148,5 +170,5 @@ fixture-check:
 	@python3 fixture_check.py
 
 clean:
-	rm -f digi_bench *.o *.wav *.pgm
+	rm -f digi_bench digi_bench-break-rx *.o *.wav *.pgm
 # fixtures/ is untouched on purpose: the on air recording is tracked, not a build product

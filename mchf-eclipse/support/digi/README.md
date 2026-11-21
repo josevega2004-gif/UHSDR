@@ -4,6 +4,7 @@ Grades the radio's own modems on a PC. Nothing in this directory is compiled int
 
 ```
 make -C support/digi test     # self checks, non zero exit on regression   (also: make digi-bench)
+make -C support/digi break-rx # negative control: a broken receiver must fail the RTTY table
 make -C support/digi rtty     # RTTY character error rate, modem looped back on itself
 make -C support/digi rtty-long  # the same matrix, eight copies of the message (one character 0.26 %)
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
@@ -264,9 +265,16 @@ and +10 dB. The level rows therefore record the AGC working, not the modem being
 Two things still break it, and they are measured with the same chain. Fast fading, 2 Hz at 10 dB
 deep, costs **47.9 %** (23/48) at 45.45 Bd and **93.6 %** (367/392) over the long message: the modem
 loses lock partway and the rest never comes out. The 6.2 % this row used to report was measured
-against a noise generator whose state never advanced, so the row carried no noise at all. A strong
-signal next door
-is the remaining cliff: an unmodulated carrier 300 Hz above the space tone is harmless at +20 dB
+against a noise generator whose state never advanced, so the row carried no noise at all. That
+class of bug is now checked before any case runs: the self test requires the added noise to have
+zero mean and to change on every sample, and the fading envelope to reach its trough and peak and
+to change on every sample, so a frozen generator fails the bench instead of making its rows look
+better. It also runs one case twice, with and without noise, and requires the difference - the noise
+the receiver is actually handed - to have zero mean, the level the SNR asks for, and a new value on
+every sample. In the other direction, `make -C support/digi break-rx` builds the bench with the
+receiver told the other symbol speed and succeeds only when the RTTY table fails; a table that can
+no longer see a broken receiver fails that target instead of passing quietly. A strong signal next door is the remaining cliff: an unmodulated carrier 300 Hz above the
+space tone is harmless at +20 dB
 over the wanted signal and costs **31.2 %** at +30 dB, with the weak mark tone in the same row
 holding the bits on the space filter. That is a filter rejection limit, not a level one - which is
 what makes it the interesting failure, since the AGC cannot help with it. It reproduces without a
@@ -579,24 +587,38 @@ CER     : 2.7 %
 ```
 
 `101008` is not a decode error: `norm_baudot()` keeps only A-Z, 0-9 and space, so the decimal point
-never reaches the report. What the take carries at the `DDK9` junction is **one inserted character**,
-not two misreads. `rtty-trace` shows the extra slot as a code 16 (`'5'` in FIGS) with no counterpart
-in the sent text, the `9` after it read correctly, and every other character matching; the decoder
-prints `DDK59`, then a **line break**, then `FREQUENCIES`, and the break stands where the pinned text
-has a space. `fixture-align` names the same thing from the other side - one insertion, no
-substitution, the pinned space absent because the take breaks the line there - and both windows
-carry the take's own keying.
+never reaches the report. What the take carries at the `DDK9` junction is **one extra character**,
+not two misreads: the line reads `DDK99` and then breaks, where the pinned text carries one `9` and a
+space. The decoder prints `DDK59` - it reads the extra slot as code 16 (`'5'` in FIGS), one data bit
+away from the code 24 (`'9'` in FIGS) the audio carries - then a **line break**, then `FREQUENCIES`.
+The `9` before the extra character and every character the pinned text carries are read correctly.
+`fixture-align` names the same insertion from the other side: one inserted, no substitution, the
+pinned space absent because the take breaks the line there - and both windows carry the take's own
+keying.
 
-That insertion is **not** a shift-handling defect. `rtty.c` has no unshift-on-space at all - only
-codes 27 and 31 change `charSetMode`, and a space is `' '` in both tables - so `'5'`, which is
-`RTTYSymbols[16]`, means code 16 arrived while the decoder sat in FIGS. A synthesised stream of this
-text decodes at **0.0 %**, so the alphabet and the decoder reproduce the line exactly and the extra
-character is in the take. Three takes of the same transmission read `DDK9`, `DDK95` and `DDK59`
-there, so the corruption came with the signal rather than with the logic.
+The junction was read back from the audio without the decoder's decisions: 12 ms Goertzel windows at
+the two keying tones (929 Hz mark, 1357 Hz space), one window per data bit, aligned on each character.
+The first slot reads code 8 (CR) at its own alignment: its four space bits are 15-18 dB down on the
+mark tone, its data bit 3 is a 10 dB mark there (at a fixed half-bit centre it sits at 0 dB), and no
+alignment of the slot reads it as a space. The second reads code 2 (LF): its mark bit
+is 15 dB clear and its space bits 11-29 dB down. So the break was transmitted; it is not a space
+misread as CR - that would need a mark at data bit 2, and the slot carries space there at every
+alignment tested. The extra slot is real too: a full seven-and-a-half bit character whose audio
+reads code 24 (`'9'`) at its best alignment, one bit from the code 16 the decoder printed.
+
+The extra character is **not** a shift-handling defect. `rtty.c` has no unshift-on-space at all -
+only codes 27 and 31 change `charSetMode`, and a space is `' '` in both tables. The audio carries
+code 24 in FIGS, which is `RTTYSymbols[24]` = `'9'`, so the extra character is a second nine; the
+`'5'` is `RTTYSymbols[16]`, one data bit away, and that is the bit the decoder got wrong on a slot
+with no counterpart to compare it against. A synthesised stream of this text decodes at **0.0 %**, so
+the alphabet and the decoder reproduce the line exactly and the extra character is in the take.
+Three takes of the same transmission read `DDK9`, `DDK95` and `DDK59` there, so the extra slot's
+identity came with the signal rather than with the logic.
 
 The scorer charges the insertion and the pinned space the line break stands in for: 2 edits over the
 **73** characters is 2.74 %, which is the 2.7 % this case pins, and the target fails it above 3 %.
-The take's own reading is one inserted character and nothing misread.
+No character the pinned text carries is read wrong; the one symbol the decoder misreads is the extra
+nine, which has no counterpart in the text.
 
 ### The pair, measured
 
@@ -641,8 +663,9 @@ which is worth knowing before quoting an absolute audio frequency - do not carry
 4583 kHz without measuring it there.
 
 **What one 13.7 s take cannot show.** This is a single night path, one receiver, no fading and no
-QRM, so it says nothing about weak or fading signals, and its 2.7 % is one inserted code 16 (plus
-the pinned space its line break stands in for), not an error rate to quote for the mode. What it
+QRM, so it says nothing about weak or fading signals, and its 2.7 % is one extra character (a
+second nine, which the decoder prints as `'5'`) plus the pinned space its line break stands in for,
+not an error rate to quote for the mode. What it
 does pin is that the
 decoder handles the DWD shifting correctly on real audio, and that any modem change which moves this
 output has to be explained.
@@ -710,7 +733,7 @@ and says whether the DPLL ever relocked inside a character - which is the differ
 slicer error and a clock slip, and no letter can show it.
 
 On the DDK2 take it reads: one inserted code 16, four line breaks, one abandoned slot, **zero**
-differing data bits, every decision one bit apart.
+compared characters with a differing data bit, every decision one bit apart.
 
 ### `rtty-multipath`
 
@@ -1049,10 +1072,13 @@ off, which is exactly the distortion the bench should be shown rather than hidin
 3. RTTY: chase the fast-fading failure with the numbers in front of us.
 4. Only then decide about FT8 RX, where the RAM question is per board rather than per mode.
 
-CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs eleven steps - the
+CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs fifteen steps - the
 filter design check (`support/digi/design_rtty_filters.py`), `make digi-bench` (the self checks),
 the RTTY shift, SNR and reference error character error rate matrix, that matrix again with the long
-message, the shift setting curve, the tuning error sweep, the recorded DDK2 fixture
-(`make -C support/digi rtty-ddk2`), and the four reference modems: NAVTEX, Hellschreiber, MFSK16 and
-Olivia. `make -C support/digi wefax` is a target of its own and is not one of the eleven. `make
-digi-bench` is also available on its own; it is one of the eleven, not the whole job.
+message, the negative control that tells the receiver the other symbol speed so the table has to
+fail (`break-rx`), the shift setting curve, the tuning error sweep, the recorded DDK2 fixture and
+the per-character check of that take (`make -C support/digi rtty-ddk2` and `fixture-align`), the
+two-path sweep (`rtty-multipath`), the transmitter's keying through the gate (`tx-check`), and the
+four reference modems: NAVTEX, Hellschreiber, MFSK16 and Olivia. `make -C support/digi wefax` is a
+target of its own and is not one of the fifteen. `make digi-bench` is also available on its own; it
+is one of the fifteen, not the whole job.
