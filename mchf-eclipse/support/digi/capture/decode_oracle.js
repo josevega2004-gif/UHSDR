@@ -25,10 +25,13 @@
 // WAV writer below are all checked into this tree.
 //
 // usage: node decode_oracle.js <stream-file> <out.wav> [--client <websdr-sound.js>]
-//        node decode_oracle.js --self-test        (169 frames of random bytes must be refused)
+//        node decode_oracle.js --self-test   (a built conformant stream must walk clean, and 169
+//                                             frames of random bytes must be refused)
 //
-// --self-test needs no client, on purpose: the random stream is refused by the framing walk, before
-// the decoder is loaded, so CI can grade the refusal without the client file or a network.
+// --self-test needs no client, on purpose: both cases are decided by the framing walk, before the
+// decoder is loaded, so CI can grade it without the client file or a network.  The conformant case
+// is the one that catches a walk which has stopped accepting valid traffic - a refusal test alone
+// cannot tell a strict walk from one that rejects everything.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -280,9 +283,66 @@ function decodeStream(streamPath, outPath, clientPath) {
       ' ms) shared the rate message and are not in the file\n' : ''));
 }
 
-// ---- self-test: random bytes must be refused, not decoded ------------------------------------
+// ---- self-test: a conformant stream must pass, random bytes must be refused -------------------
+
+// A packed block is not arbitrary bytes: it is 128 samples at width G = 4, each with a zero run
+// length and a zero mantissa, so the client spends one bit on the run and four on the mantissa per
+// sample.  That is 5 bits a sample - 640 bits - plus the bits the header byte already carries, which
+// is why the walk has to land exactly on the byte this puts there.  `head` is that header: 0xA8 is
+// a 144..223 header (G = 14 - 0xA = 4) whose low nibble holds the first four bits, 0x40 is a
+// sub-0x80 continuation whose top zero is the one bit already consumed.
+function packedBlock(m, head) {
+  const bits = [];
+  for (let i = 0; i < m; i++) bits.push((head >> (7 - i)) & 1);
+  for (let s = 0; s < 128; s++) bits.push(1, 0, 0, 0, 0);
+  while (bits.length % 8) bits.push(0);
+  const out = Buffer.alloc(bits.length / 8);
+  bits.forEach((bit, i) => { if (bit) out[i >> 3] |= 0x80 >> (i & 7); });
+  return out;
+}
+
+function streamMessage(...parts) {
+  const body = Buffer.concat(parts.map((p) => (Buffer.isBuffer(p) ? p : Buffer.from(p))));
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(body.length, 0);
+  return Buffer.concat([head, body]);
+}
+
+// A small stream the format accepts, written element by element: 7119 Hz, one 8-bit block, one
+// packed block from a 144..223 header, one from a sub-0x80 byte, and one silence marker - 512
+// samples, 3 messages.  The rate comes first and carries no audio, as the recorder needs.
+function conformantStream() {
+  const rate = 7119;
+  const block8 = Buffer.alloc(129);
+  block8[0] = 128;
+  return Buffer.concat([
+    streamMessage([129, rate >> 8, rate & 0xFF], [130, 0, 0], [131, 1],
+                  [133, 0, 0, 0, 0, 0, 0], [134], [135, 0, 0, 0, 0, 0, 0], [0xF0, 0x40]),
+    streamMessage(block8, packedBlock(4, 0xA8), packedBlock(1, 0x40)),
+    streamMessage([132]),
+  ]);
+}
+
 function selfTest() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oracle-selftest-'));
+  process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // the stream above has to pass the walk with the counts it was built from.  readStream refuses
+  // with fail(), which exits, so a message naming the element it stopped on is the failure report.
+  const good = path.join(dir, 'conformant.stream');
+  fs.writeFileSync(good, conformantStream());
+  const walk = readStream(good);
+  const want = { rate: 7119, samples: 512, blocks8: 1, blocks14: 2, silence: 1 };
+  for (const k of Object.keys(want)) {
+    if (walk.st[k] !== want[k]) {
+      fail('the conformant self-test stream walked as ' + k + '=' + walk.st[k] + ', not ' +
+           want[k] + ': the framing walk now miscounts or refuses valid traffic');
+    }
+  }
+  if (walk.frames.length !== 3) {
+    fail('the conformant self-test stream walked as ' + walk.frames.length + ' messages, not 3');
+  }
+
   const stream = path.join(dir, 'random.stream');
   const out = path.join(dir, 'random.wav');
   const buf = Buffer.alloc(169 * (4 + 905));
@@ -295,8 +355,9 @@ function selfTest() {
   fs.writeFileSync(stream, buf);
 
   const r = spawnSync(process.execPath, [__filename, stream, out], { encoding: 'utf8' });
-  const wrote = fs.existsSync(out);
-  fs.rmSync(dir, { recursive: true, force: true });
+    const wrote = fs.existsSync(out);
+
+
 
   if (r.status === 0) fail('the self-test stream of random bytes was accepted (exit 0)');
   if (wrote) fail('the self-test stream of random bytes produced a WAV');
@@ -305,7 +366,11 @@ function selfTest() {
   if (!/^oracle: FAIL /.test(why)) {
     fail('the random stream was refused by something other than a format check: ' + why);
   }
-  process.stdout.write('oracle: self-test ok - 169 frames of random bytes refused: ' + why + '\n');
+  process.stdout.write(
+    'oracle: self-test ok - conformant stream walked: ' + walk.frames.length + ' messages, ' +
+    walk.st.rate + ' Hz, ' + walk.st.samples + ' samples (' + walk.st.blocks8 + ' 8-bit, ' +
+    walk.st.blocks14 + ' packed, ' + walk.st.silence + ' silence)\n' +
+    '                    169 frames of random bytes refused: ' + why + '\n');
 }
 
 // ---- main ------------------------------------------------------------------------------------

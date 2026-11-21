@@ -148,11 +148,13 @@ floors-2k5-check: digi_bench
 record-check: digi_bench
 	@./digi_bench record-check
 
-# the capture decoder's own self-test, in capture/decode_oracle.js: 169 frames of the size a real
-# take arrives in, filled with random bytes, have to be refused with a nonzero exit and no WAV.
-# That is the check on the piece that decides whether a .stream is worth decoding at all - the
-# client it loads is not committed (see the licence note in README.md), so this grades the framing
-# walk and the refusal, and needs no capture, no client and no network.
+# the capture decoder's own self-test, in capture/decode_oracle.js: a stream built element by
+# element there has to pass the framing walk with the counts it was built from, and 169 frames of
+# the size a real take arrives in, filled with random bytes, have to be refused with a nonzero exit
+# and no WAV.  The first case is what catches a walk that has stopped accepting valid traffic; the
+# second says it is still strict.  That is the check on the piece that decides whether a .stream is
+# worth decoding at all - the client it loads is not committed (see the licence note in README.md),
+# so this grades the framing walk and the refusal, and needs no capture, no client and no network.
 oracle-check:
 	@command -v node >/dev/null 2>&1 || { echo "FAIL  node is needed for capture/decode_oracle.js"; exit 1; }
 	@node capture/decode_oracle.js --self-test

@@ -17,7 +17,7 @@ make -C support/digi floors-2k5 # the MFSK16 and Olivia floors over a shaped 2.5
 make -C support/digi floors-2k5-check # the points this file quotes, measured again and checked
                           # (CI, about 15 s)
 make -C support/digi record-check # the four non RTTY modes reading a WAV with a long lead
-make -C support/digi oracle-check # the capture decoder's self test: random bytes have to be refused
+make -C support/digi oracle-check # the capture decoder: a built stream has to walk, random bytes be refused
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi fixture-align  # per character: what the take sent, what the modem read, and the audio
 make -C support/digi rtty-trace    # the demodulator's own bit decisions, for the same take
@@ -575,9 +575,16 @@ rights reserved, and the permission it carries covers serving it unmodified from
 clients, not redistributing it, so the copy stays local and is ignored by git. Save the script your
 receiver's page loads, unmodified, and pass `--client`.
 
-The self test is the refusal: 169 frames of the size a real take arrives in, filled with random
-bytes, have to be rejected with a nonzero exit and no WAV. It needs no client and no network,
-because such a stream is refused before the decoder is loaded - which is why it is the part CI runs.
+The self test is two cases, and it takes both: a stream built in the file element by element -
+7119 Hz, one 8-bit block, one packed block from a `144..223` header, one from a sub-`0x80` byte,
+one silence marker, 512 samples in 3 messages - has to pass the framing walk with exactly those
+counts, and 169 frames of the size a real take arrives in, filled with random bytes, have to be
+rejected with a nonzero exit and no WAV. The refusal alone would pass a walk that rejected every
+stream, and the conformant one alone would pass a walk that accepted anything; the packed blocks are
+built to the format's own arithmetic (128 samples of width 4, one run bit and four mantissa bits
+each, 640 bits in all), so the walk has to land on the byte the builder wrote, not merely accept it.
+Neither case needs a client or a network, because both are decided before the decoder is loaded -
+which is why they are what CI runs.
 
 The DDH 8 capture quoted below was taken from NA5B. The station list, baud rates and shifts came
 from the DWD table on the Franks-Weather page,
@@ -1245,8 +1252,9 @@ fail (`break-rx`), the shift setting curve, the tuning error sweep, the recorded
 the per-character check of that take (`make -C support/digi rtty-ddk2` and `fixture-align`), the
 two-path sweep (`rtty-multipath`), the transmitter's keying through the gate (`tx-check`), the four
 reference modems: NAVTEX, Hellschreiber, MFSK16 and Olivia, and the recording paths for the four of
-them through a WAV with a lead (`record-check`), the capture decoder's refusal of random bytes
-(`oracle-check`, which needs no WebSDR client), and the shaped 2.5 kHz floors against the readings
+them through a WAV with a lead (`record-check`), the capture decoder's self test, a built
+conformant stream that has to walk and random bytes that have to be refused (`oracle-check`, which
+needs no WebSDR client), and the shaped 2.5 kHz floors against the readings
 this file documents (`floors-2k5-check`). `make -C support/digi wefax` and `floors-2k5` are targets
 of their own and are not among the eighteen. `make digi-bench` is also available on its own; it is
 one of the eighteen, not the whole job.
