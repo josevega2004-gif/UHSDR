@@ -1635,10 +1635,23 @@ static void gate_pair_stats(const cap_t* c, double clo, double chi, gate_pair_t*
     g->hi_spread = wh > 0.0 ? sqrt(fabs(sh2 / wh - g->hi_hz * g->hi_hz)) : 0.0;
 }
 
-typedef struct { double period_ms, dispersion_pct; int transitions; } gate_clock_t;
+typedef struct
+{
+    double period_ms;
+    double dispersion_pct;   // every transition's distance from its own phase centre, as an RMS
+    double mad_pct;          // the same scatter as a median absolute deviation, which one bad
+                             // crossing cannot move
+    int    transitions;
+} gate_clock_t;
 
 // a phase difference folded into [-0.5, 0.5): the nearest way round the grid
 static double wrap_half(double d) { return d - floor(d + 0.5); }
+
+static int cmp_double(const void* a, const void* b)
+{
+    const double x = *(const double*)a, y = *(const double*)b;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
 
 // The tone the signal is on flips at every bit boundary, so the transitions sit on a grid whose step
 // is the bit. Fitting that step over the whole take, then measuring how far the transitions scatter
@@ -1707,7 +1720,7 @@ static size_t gate_crossings(const cap_t* c, double lo, double hi, double** out)
 
 static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_clock_t* k)
 {
-    k->transitions = 0; k->period_ms = 0.0; k->dispersion_pct = 0.0;
+    k->transitions = 0; k->period_ms = 0.0; k->dispersion_pct = 0.0; k->mad_pct = 0.0;
     double* t = NULL;
     const size_t n = gate_crossings(c, lo, hi, &t);
     if (!t) return;                       // fewer than 16 tone changes: no grid to fit
@@ -1766,25 +1779,34 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
                 centre[c] = fmod(atan2(im[c], re[c]) / (2.0 * GATE_PI) + 1.0, 1.0);
     }
     double sq = 0.0;
+    double* dev = malloc(n * sizeof(double));
     for (size_t i = 0; i < n; i++)
     {
         const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
         const double d = fmin(fabs(wrap_half(ph - centre[0])), fabs(wrap_half(ph - centre[1])));
         sq += d * d;
+        if (dev) dev[i] = d;
     }
     k->period_ms = best_t;
     k->transitions = (int)n;
     k->dispersion_pct = 100.0 * sqrt(sq / (double)n);
+    // An RMS over transitions is not a robust statistic: one crossing that landed 40 % of a bit out
+    // of place adds 0.4/sqrt(n) to it, so the same audio reports 8.8 % or 19 % depending on which
+    // single bit the noise caught (measured on repeated synthetic takes at a fixed SNR). Half the
+    // transitions being closer than the median distance is a property of the keying; the worst
+    // crossing in the take is not. 1.4826 turns the median absolute deviation into the sigma of a
+    // normal distribution, so the number stays comparable with the RMS on a clean take.
+    if (dev)
+    {
+        qsort(dev, n, sizeof(double), cmp_double);
+        const double med = (n & 1) ? dev[n / 2] : 0.5 * (dev[n / 2 - 1] + dev[n / 2]);
+        k->mad_pct = 100.0 * 1.4826 * med;
+        free(dev);
+    }
     free(t);
 }
 
 typedef struct { double longest_ms, fraction; int gaps; } gate_drop_t;
-
-static int cmp_double(const void* a, const void* b)
-{
-    const double x = *(const double*)a, y = *(const double*)b;
-    return (x < y) ? -1 : (x > y) ? 1 : 0;
-}
 
 // a recorder that stalls leaves a stretch of silence in the middle of the take; trimming the ends
 // does not remove it, and every bit clock measured across it is wrong
@@ -1841,7 +1863,7 @@ static void gate_dropouts(const cap_t* c, gate_drop_t* d)
 #define GATE_BOTH_MAX     0.35   // windows holding both: straddled bits plus noise
 #define GATE_PAIR_SLACK   30.0   // Hz between the measured pair and the declared shift
 #define GATE_PERIOD_TOL   0.05   // fraction of a bit
-#define GATE_DISPERSION   12.0   // percent of a bit
+#define GATE_MAD           8.0   // percent of a bit, median absolute deviation
 #define GATE_GAP_MS        5.0   // longest hole a take may carry
 
 static int capture_check(const char* path, uint16_t shift, uint16_t baud)
@@ -1879,8 +1901,8 @@ static int capture_check(const char* path, uint16_t shift, uint16_t baud)
            pair.f_low, pair.f_high, pair.f_both, pair.windows);
     if (clock.transitions)
     {
-        printf("clock     : period %.3f ms (%d transitions), scatter %.1f %% of a bit\n",
-               clock.period_ms, clock.transitions, clock.dispersion_pct);
+        printf("clock     : period %.3f ms (%d transitions), scatter %.1f %% rms / %.1f %% MAD of a bit\n",
+               clock.period_ms, clock.transitions, clock.dispersion_pct, clock.mad_pct);
     }
     else
     {
@@ -1905,14 +1927,15 @@ static int capture_check(const char* path, uint16_t shift, uint16_t baud)
         bad = 1;
     }
     if (!clock.transitions || fabs(clock.period_ms - nominal) > nominal * GATE_PERIOD_TOL
-        || clock.dispersion_pct > GATE_DISPERSION)
+        || clock.mad_pct > GATE_MAD)
     {
         // the rate the take actually carries, so a wrong time base reads as the baud rate it is and
         // not only as a period in milliseconds
         printf("REJECT    : no %u baud clock (wanted %.2f ms, measured %.2f ms = %.1f baud, "
-               "scatter %.1f %%)\n",
+               "scatter %.1f %% rms / %.1f %% MAD)\n",
                (unsigned)baud, nominal, clock.period_ms,
-               clock.period_ms > 0.0 ? 1000.0 / clock.period_ms : 0.0, clock.dispersion_pct);
+               clock.period_ms > 0.0 ? 1000.0 / clock.period_ms : 0.0, clock.dispersion_pct,
+               clock.mad_pct);
         bad = 1;
     }
     if (drop.longest_ms > GATE_GAP_MS)
@@ -2317,6 +2340,9 @@ static int selftest(void)
               "clock: a clean 50 baud take fits 20 ms inside the period window");
         check(k.dispersion_pct < 1.0,
               "clock: and its transitions sit within 1 % of a bit of that grid");
+        printf("     (robust scatter of that take: %.2f %% MAD against %.2f %% rms)\n",
+               k.mad_pct, k.dispersion_pct);
+        check(k.mad_pct < 1.0, "clock: the robust scatter of a clean take is under 1 % of a bit");
         free(c.x);
 
         // a Baudot character is 1 start bit, 5 data and 1.5 stop, so it is 15 half bits long and the
