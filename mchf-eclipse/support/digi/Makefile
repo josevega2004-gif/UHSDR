@@ -19,7 +19,7 @@ AUDIO    = ../../drivers/audio
 LIBDIR   = $(AUDIO)
 SHIM     = shim
 
-BENCH_OBJS = digi_bench.o modem_host.o wefax.o navtex.o \
+BENCH_OBJS = digi_bench.o modem_host.o wefax.o navtex.o hellschreiber.o \
              softdds_host.o
 FW_OBJS    = rtty.o audio_agc.o uhsdr_math.o
 
@@ -67,6 +67,10 @@ wefax: digi_bench
 # NAVTEX / SITOR-B: 100 Bd, 170 Hz shift, CCIR 476 constant ratio alphabet, DX/RX time diversity
 navtex: digi_bench
 	@./digi_bench navtex
+
+# Hellschreiber: on/off keyed raster at 122.5 Bd, scored as a picture rather than as characters
+hell: digi_bench
+	@./digi_bench hell
 
 rtty-shift: digi_bench
 	@./digi_bench rtty-shift

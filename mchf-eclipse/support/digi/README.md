@@ -8,6 +8,7 @@ make -C support/digi rtty     # RTTY character error rate, modem looped back on 
 make -C support/digi rtty-long  # the same matrix, eight copies of the message (one character 0.26 %)
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
 make -C support/digi navtex   # NAVTEX / SITOR-B through a reference modem: alphabet and repeat copy
+make -C support/digi hell     # Hellschreiber: on/off keyed raster, scored as a picture
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi capture-check  # is a recording fit to be pinned: pair, bit clock, continuity
 make -C support/digi fixture-check  # do fixtures/MANIFEST.md's numbers still describe the wav
@@ -664,6 +665,55 @@ midpoint until the error passes half the shift. +50 Hz is inside that and decode
 the space tone nearer the mark bin, every word inverts, and the constant ratio share falls to 0.402.
 There is no AFC here either, so this is the same cliff the RTTY section describes, at the one place
 it can be computed: half the shift, 85 Hz.
+
+## Hellschreiber, `make -C support/digi hell`
+
+The mode with no alphabet, no framing and no error control. A Hell transmitter keys a single tone on
+and off and the receiver prints what it hears as a raster: 122.5 baud, one pixel every 8.16 ms, a 5x7
+glyph followed by a blank column. Everything a synchronous mode gets from its framing, Hell gets from
+the operator's eye, which has two consequences for the bench.
+
+The first is that there is no character error rate to report. A cell that comes out exactly as drawn is
+a character a reader would have read; a cell with one wrong pixel is a character a reader would have
+guessed at. The table therefore counts exact cells and the share of pixels wrong over the whole
+picture, and it allows the paper position to be chosen freely - a whole pixel of roll and up to two
+characters of horizontal offset - because where the picture lands on the page is not a decoding
+result.
+
+The second is that the receiver has to find the raster in the keying alone: the pixel phase by the
+bimodality of the envelope (there is nothing but ink and paper, so the right sampling phase makes the
+histogram two spikes), and then the column grouping and the character phase together, by requiring
+one column in six to be blank. Those two are the same question asked twice, and they have to be
+searched together: a grouping that straddles two columns shreds the gaps, and a character phase that
+is one column out puts the gap in the middle of a glyph.
+
+Measured on a 31 character line at 12 kHz, scored over the 30 or 31 cells the take contains:
+
+| case | pixels wrong % | cells exact | gaps blank |
+|---|---|---|---|
+| clean | 0.00 | 31/31 | 1.00 |
+| 20 dB | 0.00 | 31/31 | 1.00 |
+| 10 dB | 0.00 | 31/31 | 1.00 |
+| 10 dB + 0.5 Hz / 6 dB QSB | 0.00 | 31/31 | 1.00 |
+| **0 dB** | 0.00 | 31/31 | 1.00 |
+| keying tone +200 Hz | 0.00 | 31/31 | 1.00 |
+| keying tone +700 Hz | **14.76** | 4/30 | 0.50 |
+| pixel clock +2 % | **36.47** | 4/30 | 0.28 |
+
+The noise rows are not a surprise once the geometry is written down: a pixel is 8.16 ms of a 1 kHz
+tone, so the receiver's envelope integrates about fifty cycles per decision and the noise is averaged
+away before the threshold. 0 dB in the audio band is still a clean picture. The last two rows are the
+real limits. The envelope reaches about +-60 Hz (a 98 sample sliding correlation), so a 200 Hz tuning
+error has lost most of the amplitude but not the on/off contrast - the threshold is set from the take's
+own percentiles, and the picture survives on the contrast that is left. At 700 Hz there is no contrast
+left and the raster is half found and mostly wrong.
+
+The clock row is the failure a raster mode has instead of a bit slip. The receiver's pixel period is
+fixed at 97.96 samples; a transmitter 2 % fast is a sixth of a pixel out after one glyph and two
+columns out by the end of the line, so the columns lean and the gap columns stop being empty (0.28 of
+them blank). Both failing rows are pinned from below in the table, and the self check additionally
+holds the 2 % case, so a receiver that started following the clock slowly would fail rather than read
+as an improvement.
 
 ## Receiving a DWD teletype station on the radio
 

@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "bench.h"
+#include "hellschreiber.h"
 #include "navtex.h"
 #include "rtty.h"
 #include "softdds.h"
@@ -973,6 +974,163 @@ typedef struct
     int   max_missing;      // glyph cells this case may fail to reproduce exactly
     int   min_missing;      // and the cells that have to stay missing, for the rows that must fail
 } hell_case_t;
+
+static int hell_table(void)
+{
+    static const char* msg = "HELLSCHREIBER TEST DE UHSDR 123";
+    enum { MAXC = 640 };
+    static uint8_t truth[HELL_ROWS * MAXC], gotp[HELL_ROWS * MAXC];
+    static const hell_case_t cases[] =
+    {
+        { .name = "clean", .snr_db = 100.0f, .max_pixel = 0.0f, .max_missing = 0 },
+        { .name = "snr 20", .snr_db = 20.0f, .max_pixel = 0.0f, .max_missing = 0 },
+        { .name = "snr 10", .snr_db = 10.0f, .max_pixel = 0.0f, .max_missing = 0 },
+        { .name = "snr 10 qsb", .snr_db = 10.0f, .qsb_rate = 0.5f, .qsb_depth = 6.0f,
+          .max_pixel = 0.0f, .max_missing = 0 },
+        { .name = "snr 0", .snr_db = 0.0f, .max_pixel = 100.0f, .max_missing = 31 },
+        { .name = "tone +200 Hz", .snr_db = 20.0f, .tune_hz = 200.0f, .max_pixel = 0.0f,
+          .max_missing = 0 },
+        // the two that have to fail: a keying tone out of the envelope's reach, and a transmitter
+        // whose pixel clock the receiver does not follow, which shears the picture. Both are pinned
+        // from below, like the RTTY rows that have to keep costing characters.
+        { .name = "tone +700 Hz", .snr_db = 20.0f, .tune_hz = 700.0f, .max_pixel = 100.0f,
+          .max_missing = 31, .min_missing = 15 },
+        { .name = "clk +2 %", .snr_db = 20.0f, .clk_pct = 2.0f, .max_pixel = 100.0f,
+          .max_missing = 31, .min_missing = 15 },
+    };
+    const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
+    int failures = 0;
+
+    printf("Hellschreiber through the reference modem: 122.5 Bd on/off keying, one pixel per 8.16 ms,\n"
+           "5x7 glyph plus a blank column. Text is %zu characters, %d glyph cells.\n\n",
+           strlen(msg), 31);
+    printf("%-13s %7s %9s %7s %6s %5s %5s  %s\n", "case", "pixels%", "cells ok", "pix ms",
+           "gaps", "roll", "shift", "sync");
+    for (size_t i = 0; i < n_cases; i++)
+    {
+        const hell_case_t* c = &cases[i];
+        const size_t cap = 300000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        int truth_cols = 0, got_cols = 0;
+        hell_result_t res;
+        if (!x) { printf("out of memory\n"); return 1; }
+        const size_t n = Bench_HellGenerate(x, cap, msg, truth, MAXC, &truth_cols,
+                                            1000.0f + c->tune_hz, c->clk_pct);
+        if (!n) { free(x); printf("FAIL  %-13s nothing generated\n", c->name); failures++; continue; }
+        if (c->snr_db < 90.0f)
+        {
+            Bench_RngSeed(0x48454C4Cu);
+            Bench_AddNoise(x, n, c->snr_db, 0.0f);
+        }
+        Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
+
+        const int ok = Bench_HellDecode(x, n, gotp, MAXC, &got_cols, &res);
+        // the paper position: a whole pixel of roll and a column of offset are how the picture lands,
+        // not decoding errors, so the score takes the best of them and says which one it used
+        int best_err = -1, best_seen = 0, best_cells = 0, best_cell_total = 0;
+        int best_roll = 0, best_shift = 0;
+        if (ok)
+        {
+            for (int roll = 0; roll < HELL_ROWS; roll++)
+            {
+                for (int cs = 0; cs < 2 * HELL_CELL; cs++)
+                {
+                    int err = 0, seen = 0, cells = 0, cell_total = 0;
+                    for (int col = 0; col + cs < truth_cols && col < got_cols; col++)
+                        for (int r = 0; r < HELL_ROWS; r++)
+                        {
+                            seen++;
+                            if (truth[((r + roll) % HELL_ROWS) * MAXC + col + cs]
+                                != gotp[r * MAXC + col]) err++;
+                        }
+                    // a cell is the glyph, five columns: the sixth is the gap the synchroniser uses
+                    // and the last one can be cut off by the end of the take without costing a glyph
+                    for (int col = 0; col + cs + HELL_COLS <= truth_cols && col + HELL_COLS <= got_cols;
+                         col += HELL_CELL)
+                    {
+                        cell_total++;
+                        int same = 1;
+                        for (int cc = 0; cc < HELL_COLS && same; cc++)
+                            for (int r = 0; r < HELL_ROWS && same; r++)
+                                if (truth[((r + roll) % HELL_ROWS) * MAXC + col + cs + cc]
+                                    != gotp[r * MAXC + col + cc]) same = 0;
+                        if (same) cells++;
+                    }
+                    if (cells > best_cells || (cells == best_cells && (best_err < 0 || err < best_err)))
+                    {
+                        best_cells = cells;
+                        best_cell_total = cell_total;
+                        best_err = err;
+                        best_seen = seen;
+                        best_roll = roll;
+                        best_shift = cs;
+                    }
+                }
+            }
+        }
+        const double pixel_pct = (best_seen && best_err >= 0)
+                               ? 100.0 * (double)best_err / (double)best_seen : 100.0;
+        const int missing = best_cell_total - best_cells;
+        if (ok)
+        {
+            printf("%-13s %7.2f %5d/%-3d %7.2f %6.2f %5d %5d  phase %d\n", c->name, pixel_pct,
+                   best_cells, best_cell_total, res.pixel_samples / 12.0, res.gap_share,
+                   best_roll, best_shift, res.pixel_phase);
+        }
+        else
+        {
+            printf("%-13s %7.2f %9s %7s %6s %5s %5s  no raster\n", c->name, 100.0, "-", "-", "-",
+                   "-", "-");
+        }
+        if (!ok)
+        {
+            printf("FAIL  %-13s the receiver found no raster at all\n", c->name);
+            failures++;
+        }
+        else if (pixel_pct > c->max_pixel + 1e-9 || missing > c->max_missing)
+        {
+            printf("FAIL  %-13s %.2f %% of pixels wrong and %d of %d cells not exact; this case "
+                   "allows %.2f %% and %d\n", c->name, pixel_pct, missing, best_cell_total,
+                   (double)c->max_pixel, c->max_missing);
+            failures++;
+        }
+        else if (missing < c->min_missing)
+        {
+            printf("FAIL  %-13s %d of %d cells not exact, and this case has to stay above %d: a "
+                   "channel\n      that stopped costing the picture is a different receiver\n",
+                   c->name, missing, best_cell_total, c->min_missing);
+            failures++;
+        }
+        free(x);
+    }
+    printf("\n'cells ok' counts the 5x7 glyphs that came out exactly as drawn: a mode with no alphabet\n"
+           "has no character error rate, and a cell that is not exact is a character a reader would\n"
+           "have to guess at. 'gaps' is the share of the gap columns that came out blank, which is what\n"
+           "the grouping search maximises; 'roll' and 'shift' are the paper position the score allowed.\n");
+    if (!failures)
+    {
+        printf("\nall %zu cases inside their pixel and cell limits\n", n_cases);
+    }
+    return failures ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ *  MFSK16
+ * ------------------------------------------------------------------ */
+// Sixteen tones at 15.625 baud is four bits a symbol and 64 ms of signal per symbol, which is a lot
+// of energy per decision; what this table is really measuring is the coding. A symbol the receiver
+// loses costs four bits, and the interleaver is what turns that into one bit in eight symbols, which
+// the rate 1/2 code can carry. The rows are therefore ordered from the clean case to the ones where
+// the correction is doing the work, and the last two are the ones that have to cost characters.
+typedef struct
+{
+    const char* name;
+    float snr_db, qsb_rate, qsb_depth, tune_hz;
+    int   burst_symbols;    // symbols erased in the middle of the take
+    int   no_signal;        // a take with nothing but noise in it: the receiver must not invent text
+    float max_cer;
+    float min_cer;          // for the rows that must keep costing characters
+} mfsk16_case_t;
 
 /* ------------------------------------------------------------------ *
  *  decoding a recorded file: the input path any real feed will use
@@ -2002,6 +2160,44 @@ static int selftest(void)
               "navtex: the repeat copy carries a block whose direct copy was erased");
         free(x);
     }
+    {
+        // Hellschreiber is scored as a picture, so the self check is about the picture: the raster has
+        // to be found (every gap column blank) and carry as many pixels as were drawn, and a
+        // transmitter whose pixel clock the receiver does not follow has to lose that raster rather
+        // than drift quietly.
+        static const char* msg = "HELL TEST";
+        const size_t cap = 40000;
+        static uint8_t truth[HELL_ROWS * 256], got[HELL_ROWS * 256];
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        hell_result_t r;
+        int tcols = 0, gcols = 0;
+        const size_t n = Bench_HellGenerate(x, cap, msg, truth, 256, &tcols, 1000.0f, 0.0f);
+        int t_on = 0;
+        for (int row = 0; row < HELL_ROWS; row++)
+            for (int col = 0; col < tcols; col++) t_on += truth[row * 256 + col] != 0;
+        check(n > 0 && Bench_HellDecode(x, n, got, 256, &gcols, &r),
+              "hell: a clean raster decodes");
+        int g_on = 0;
+        for (int row = 0; row < HELL_ROWS; row++)
+            for (int col = 0; col < gcols; col++) g_on += got[row * 256 + col] != 0;
+        printf("     (%d columns drawn, %d read, %d pixels drawn and %d read, gaps %.2f, pixel "
+               "phase %d, column phase %d)\n", tcols, gcols, t_on, g_on, r.gap_share,
+               r.pixel_phase, r.column_phase);
+        check(t_on > 0 && g_on == t_on,
+              "hell: every pixel that was keyed comes back, and no pixel that was not");
+        check(r.gap_share == 1.0 && gcols >= tcols - 1,
+              "hell: the raster is found with every gap column blank");
+        free(x);
+
+        x = malloc(cap * sizeof(float32_t));
+        const size_t slow = Bench_HellGenerate(x, cap, msg, truth, 256, &tcols, 1000.0f, 2.0f);
+        const int ok_slow = Bench_HellDecode(x, slow, got, 256, &gcols, &r);
+        printf("     (same text with the pixel clock 2 %% off: ok %d, gaps %.2f)\n", ok_slow,
+               r.gap_share);
+        check(!ok_slow || r.gap_share < 0.5,
+              "hell: a 2 % pixel clock error has to cost the raster, not just blur it");
+        free(x);
+    }
     printf("%s\n", failures ? "SELF CHECKS FAILED" : "all self checks passed");
     return failures ? 1 : 0;
 }
@@ -2037,6 +2233,7 @@ int main(int argc, char** argv)
     if (!strcmp(what, "rtty-tune")) { return rtty_tune(); }
     if (!strcmp(what, "wefax")) return wefax_table();
     if (!strcmp(what, "navtex")) return navtex_table();
+    if (!strcmp(what, "hell")) return hell_table();
     // the gate a take has to clear before it is worth decoding, let alone pinning: it measures the
     // file and never touches the modem, so it cannot be fooled by the modem agreeing with itself
     if (!strcmp(what, "capture-check") && argc > 2)

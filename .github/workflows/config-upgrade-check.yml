@@ -125,3 +125,9 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi navtex
 
+      # Hellschreiber has no alphabet, so this step grades a picture: exact glyph cells and the share
+      # of pixels wrong, with the paper position free and a pixel clock error that has to fail.
+      - name: Run the Hellschreiber reference modem
+        working-directory: mchf-eclipse
+        run: make -C support/digi hell
+
