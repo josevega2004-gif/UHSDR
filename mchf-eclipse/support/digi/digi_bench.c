@@ -111,6 +111,10 @@ typedef struct
     float       min_cer;     // a floor for the cases that have to keep failing: a wrong speed
                              // setting decodes badly, and a change that made it decode would be
                              // a different modem, not a better one
+    float       echo_ms;     // a second path arriving this much after the direct one. A bit is
+                             // 22 ms at 45.45 Bd and 20 at 50, so 1..20 ms is a twentieth of a bit
+                             // to a whole one - the range a one hop and a two hop path span
+    float       echo_db;     // and at this level relative to the direct path
 } rtty_case_t;
 
 // The demodulator emits one or two characters of junk while it locks on, which is a property of
@@ -297,6 +301,22 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
         float amp = (float) sqrt(sum / (double) n) * powf(10.0f, c->adj_db / 20.0f) * 1.41421356f;
         float w = (float) (2.0 * M_PI * (915.0 + tune + c->shift + c->adj_hz) / RATE);
         for (size_t i = 0; i < n; i++) buf[i] += amp * sinf(w * (float) i);
+    }
+
+    // a second path: the same transmission arriving echo_ms later and echo_db down, summed onto the
+    // direct one. It is the one channel shape nothing else here produces - fading moves the level of
+    // one path, noise adds a signal that does not carry the same bits, and a tuning error moves both
+    // tones together - and it is the one that decides whether a bit boundary's keying is still a
+    // boundary where the receiver samples it.
+    if (c->echo_ms > 0.0f && c->echo_db != 0.0f)
+    {
+        const size_t d = (size_t)lround((double)c->echo_ms * 0.001 * (double)RATE);
+        const float g = powf(10.0f, c->echo_db / 20.0f);
+        if (d > 0 && d < n)
+        {
+            // backwards, so every term is the direct signal and not the sum of the two
+            for (size_t i = n; i-- > d; ) buf[i] += g * buf[i - d];
+        }
     }
 
     // channel, at the rate the demodulator sees
@@ -2343,6 +2363,79 @@ static int rtty_trace(const char* path, const char* expected, uint16_t shift, ui
     free(match); free(from);
     return 0;
 }
+
+/* ------------------------------------------------------------------ *
+ *  a second path
+ * ------------------------------------------------------------------ */
+// The same transmission arriving twice, one path later than the other. Nothing else in this bench
+// produces that channel: fading moves the level of one path, noise adds a signal that does not carry
+// the same bits, and a tuning error moves both tones together. Two paths put the same bit at two
+// places in the audio, and whether the shapes still add up to a keying edge where the receiver
+// samples is exactly what a delay spread asks.
+static int rtty_multipath(void)
+{
+    const char* msg = RTTY_TABLE_MSG;
+    static const float delays[] = { 0.0f, 1.0f, 2.0f, 3.0f, 5.0f, 7.0f, 10.0f, 13.0f, 16.0f, 20.0f };
+    static const float levels[] = { -3.0f, -6.0f, -10.0f };
+    const size_t n_delay = sizeof(delays) / sizeof(delays[0]);
+    const size_t n_level = sizeof(levels) / sizeof(levels[0]);
+    char got[8192];
+    int failures = 0;
+
+    // Pinned from the table below, and not where the model first guessed: a delay inside a tenth of
+    // a bit decodes, and the failure is a notch at about a third of a bit (7 ms) with the echo at
+    // half the direct amplitude (100 % of the text lost at -6 dB, 20.8 % at -3 dB, nothing at -10).
+    // Longer delays read clean here, which this bench records and does not explain.
+    const float clean_ms = 2.0f, gone_ms = 7.0f, pin_db = -6.0f;
+
+    printf("RTTY with a second path: the same signal echo_ms later and echo_db down, summed onto the\n"
+           "direct one. 45.45 Bd, 170 Hz shift, 20 dB SNR; a bit is 22.0 ms.\n\n");
+    printf("%9s", "delay ms");
+    for (size_t l = 0; l < n_level; l++) printf(" %9.0f dB", (double)levels[l]);
+    printf("\n");
+    for (size_t d = 0; d < n_delay; d++)
+    {
+        printf("%9.1f", (double)delays[d]);
+        for (size_t l = 0; l < n_level; l++)
+        {
+            rtty_case_t c = { .label = "echo", .shift = 170, .snr_db = 20.0f, .max_cer = 100.0f };
+            c.echo_ms = delays[d];
+            c.echo_db = levels[l];
+            int eot = 0;
+            const float cer = rtty_run(&c, msg, false, got, sizeof(got), &eot);
+            printf(" %10.1f", (double)cer);
+            if (delays[d] == clean_ms && levels[l] == pin_db && cer > 5.0f)
+            {
+                printf("\nFAIL  a path %.1f ms late at %.0f dB costs %.1f %% of the text; a delay "
+                       "inside a\n      tenth of a bit is supposed to be survivable\n",
+                       (double)clean_ms, (double)pin_db, (double)cer);
+                failures++;
+            }
+            if (delays[d] == gone_ms && levels[l] == pin_db && cer < 50.0f)
+            {
+                printf("\nFAIL  a path %.1f ms late at %.0f dB now decodes at %.1f %%; the pinned "
+                       "record is\n      that the notch there costs the text\n",
+                       (double)gone_ms, (double)pin_db, (double)cer);
+                failures++;
+            }
+            if (eot != 1)
+            {
+                printf("\nFAIL  the transmission was cut off before EOT\n");
+                failures++;
+            }
+        }
+        printf("\n");
+    }
+    printf("\nThe columns are the echo level, the rows its delay; 0.0 ms is the direct path alone.\n"
+           "The failure is a notch and not a slope: 7 ms at -6 dB loses the whole text, 5 ms and\n"
+           "10 ms at the same level lose none of it, and 7 ms at -10 dB loses none either. That is\n"
+           "what two paths at half amplitude do at the instant the receiver samples - the two tones\n"
+           "are comparable and the decision is a coin toss - and it is a property of where the sample\n"
+           "sits rather than of the delay being long. Delays of a whole bit or more read clean here;\n"
+           "this bench records that and does not explain it.\n");
+    return failures ? 1 : 0;
+}
+
 /* ------------------------------------------------------------------ *
  *  self checks
  * ------------------------------------------------------------------ */
@@ -2850,6 +2943,7 @@ int main(int argc, char** argv)
         const uint16_t baud = argc > 5 ? (uint16_t)atoi(argv[5]) : 50;
         return rtty_trace(argv[2], argv[4], shift, baud);
     }
+    if (!strcmp(what, "rtty-multipath")) return rtty_multipath();
     fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax|navtex"
                     "|rtty-multipath|tx-check|hell|mfsk16|olivia"
                     "|capture-check <file.wav> [shift] [45|50 baud]"

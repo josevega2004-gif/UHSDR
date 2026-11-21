@@ -11,6 +11,7 @@
 #                against the text the station sends. Uses the committed fixture in fixtures/
 #   make fixture-align  the two characters that take gets wrong, by name, with the audio under them
 #   make rtty-trace  which bit of which character the demodulator read wrong, from its own decisions
+#   make rtty-multipath  a second path: character error rate against delay spread
 #
 # drivers/audio/rtty.c and drivers/audio/audio_agc.c are compiled from the real sources: the
 # modem and the AGC the radio puts in front of it. The shim/ directory replaces only the headers
@@ -108,6 +109,12 @@ fixture-align: digi_bench
 # prints rather than asserting
 rtty-trace: digi_bench
 	@./digi_bench rtty-trace fixtures/ddk2-4583.wav 450 "$(DDK2_TEXT)" 50
+
+# a second path, the channel shape nothing else here produces: the same bit at two places in the
+# audio. Fails if a delay inside a tenth of a bit stops decoding or a quarter bit stops costing text
+rtty-multipath: digi_bench
+	@./digi_bench rtty-multipath
+
 
 # the gate a candidate take has to clear before it is pinned: the pair, the bit clock and the
 # continuity, measured from the audio. Run it on any new recording first; the fixture below is the
