@@ -12,6 +12,7 @@
 #   make fixture-align  the two characters that take gets wrong, by name, with the audio under them
 #   make rtty-trace  which bit of which character the demodulator read wrong, from its own decisions
 #   make rtty-multipath  a second path: character error rate against delay spread
+#   make tx-check  the modulator's own keying through the receiver's gate
 #
 # drivers/audio/rtty.c and drivers/audio/audio_agc.c are compiled from the real sources: the
 # modem and the AGC the radio puts in front of it. The shim/ directory replaces only the headers
@@ -115,6 +116,11 @@ rtty-trace: digi_bench
 rtty-multipath: digi_bench
 	@./digi_bench rtty-multipath
 
+# the transmitter's own output through the gate the receiver's audio has to clear, plus the one
+# check only a keyer can fail: every interval between tone changes on the half bit lattice
+# (1 start, 5 data, 1.5 stop), with no short runs and no lost stop bits
+tx-check: digi_bench
+	@./digi_bench tx-check
 
 # the gate a candidate take has to clear before it is pinned: the pair, the bit clock and the
 # continuity, measured from the audio. Run it on any new recording first; the fixture below is the

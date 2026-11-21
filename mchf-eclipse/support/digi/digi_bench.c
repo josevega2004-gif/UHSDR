@@ -2437,6 +2437,167 @@ static int rtty_multipath(void)
 }
 
 /* ------------------------------------------------------------------ *
+ *  the transmitter's own output through the gate
+ * ------------------------------------------------------------------ */
+// Run the modulator over the message and hand back its 12 kHz output: the signal every case starts
+// from, with no channel between it and the measurements.
+static size_t tx_capture(const char* msg, uint16_t shift, uint16_t baud, float32_t* buf, size_t cap)
+{
+    rtty_ctrl_config.speed_idx = baud == 50 ? RTTY_SPEED_50 : RTTY_SPEED_45;
+    for (int i = 0; i < RTTY_SHIFT_NUM; i++)
+        if (rtty_shifts[i].value == (float32_t)shift) rtty_ctrl_config.shift_idx = (rtty_shift_t)i;
+
+    Rtty_BenchResetDecoder();
+    Rtty_Modem_Init((uint32_t)TXRATE);
+    Rtty_BenchTxBitScale(1.0f);
+    char feed[640];
+    snprintf(feed, sizeof(feed), "%s", msg);
+    strncat(feed, "\004", sizeof(feed) - strlen(feed) - 1);
+    Bench_TxFeed(feed);
+    Bench_TxOffClear();
+    Rtty_Modulator_StartTX();
+
+    size_t used = 0;
+    while (used < cap)
+    {
+        float acc = 0.0f;
+        for (int k = 0; k < 4; k++) acc += (float32_t)Rtty_Modulator_GenSample() / 32768.0f;
+        buf[used++] = acc * 0.25f;
+        if (Bench_TxOffRequested()) break;
+    }
+    // the trailing tone the last character needs to finish on the air
+    for (size_t tail = 0; tail < 2400 && used < cap; tail++)
+    {
+        float acc = 0.0f;
+        for (int k = 0; k < 4; k++) acc += (float32_t)Rtty_Modulator_GenSample() / 32768.0f;
+        buf[used++] = acc * 0.25f;
+    }
+    return used;
+}
+
+// Every case here keys the modem and then grades the demodulator on the result, so a keyer that sent
+// the wrong bit length, lost a stop bit or sent a tone the receiver does not filter would be scored
+// as though the receiver had misread it. This runs the modulator's own output through the same gate
+// the receiver's input has to clear - pair, bimodality, bit clock - and adds the one thing only a
+// transmitter has: every interval between tone changes has to be a whole number of half bits,
+// because a character is one start bit, five data and 1.5 stop. A keyer that lost or added a fraction
+// of a bit moves those intervals off that lattice and nothing else in the bench would say so.
+static int tx_check(void)
+{
+    static const struct { uint16_t shift, baud; } cfg[] = { { 170, 45 }, { 450, 50 } };
+    const size_t n_cfg = sizeof(cfg) / sizeof(cfg[0]);
+    const char* msg = RTTY_TABLE_MSG;
+    static float32_t buf[(size_t)MAX_SAMP];
+    int failures = 0;
+
+    printf("The transmitter's own 12 kHz output through the receiver's gate. RTTY is the only mode\n"
+           "in this bench with a firmware transmitter (the fax path has none, PSK is not benched), so\n"
+           "these are the modes a TX gate can cover: 170 Hz / 45.45 Bd and 450 Hz / 50 Bd. The 85 Hz\n"
+           "shift is not gated this way because the gate's pair search needs the tones 150 Hz apart.\n\n");
+    printf("%4s %4s %6s %6s %7s %9s %7s %8s %8s\n", "shift", "baud", "mark", "space",
+           "period", "mad % bit", "both", "worst ms", "2 bit");
+    for (size_t i = 0; i < n_cfg; i++)
+    {
+        const uint16_t shift = cfg[i].shift, baud = cfg[i].baud;
+        const double bit_ms = 1000.0 / (double)baud;
+        const size_t n = tx_capture(msg, shift, baud, buf, (size_t)MAX_SAMP);
+        cap_t c = { buf, n, 12000 };
+        double clo = 0.0, chi = 0.0;
+        if (!gate_coarse_pair(&c, &clo, &chi))
+        {
+            printf("FAIL  %u Hz / %u Bd: the transmitter's output has no pair to measure\n",
+                   (unsigned)shift, (unsigned)baud);
+            failures++;
+            continue;
+        }
+        gate_pair_t pair;
+        gate_pair_stats(&c, clo, chi, &pair);
+        gate_clock_t clock;
+        gate_clock(&c, pair.lo_hz, pair.hi_hz, (double)baud, &clock);
+        double* t = NULL;
+        const size_t nt = gate_crossings(&c, pair.lo_hz, pair.hi_hz, &t);
+        // The keyer's own rule, from Rtty_BaudotAdd(): one stop bit, or two for both 1.5 and 2, so
+        // every interval between tone changes is a whole number of bits. Measuring against the whole
+        // bit rather than the half is what makes the 1.5 stop bit setting visible: it is not 1.5 on
+        // the air, it is 2, and the gate says so instead of passing either as close enough.
+        int short_runs = 0, off_lattice = 0, stops = 0, half_stops = 0;
+        double worst = 0.0;
+        for (size_t q = 1; q < nt; q++)
+        {
+            const double ms = (t[q] - t[q - 1]) * 1000.0;
+            const double bits = ms / bit_ms;
+            const double err = fabs(bits - floor(bits + 0.5)) * bit_ms;
+            if (ms < 0.6 * bit_ms) short_runs++;
+            if (err > 0.12 * bit_ms) off_lattice++;
+            if (err > worst) worst = err;
+            if (fabs(bits - 2.0) < 0.12) stops++;
+            if (fabs(bits - 1.5) < 0.12) half_stops++;
+        }
+        free(t);
+
+        printf("%4u %4u %6.1f %6.1f %7.3f %9.2f %7.2f %8.2f %8d%s\n", (unsigned)shift,
+               (unsigned)baud, pair.lo_hz, pair.hi_hz, clock.period_ms, clock.mad_pct,
+               pair.f_both, worst, stops, "");
+
+        const double pair_pct = fabs(pair.lo_hz - 915.0) + fabs(pair.hi_hz - (915.0 + shift));
+        if (pair_pct > 6.0)
+        {
+            printf("FAIL  %u/%u: the keyed pair is %.1f / %.1f Hz, not the 915 / %.0f Hz it is sent\n",
+                   (unsigned)shift, (unsigned)baud, pair.lo_hz, pair.hi_hz, 915.0 + shift);
+            failures++;
+        }
+        if (pair.f_both > 0.25 || pair.f_low + pair.f_high < 0.70)
+        {
+            printf("FAIL  %u/%u: %.2f of the keyed audio holds one tone and %.2f both; a keyed signal\n"
+                   "      that is half tone in a quarter of its windows is not being keyed cleanly\n",
+                   (unsigned)shift, (unsigned)baud, pair.f_low + pair.f_high, pair.f_both);
+            failures++;
+        }
+        if (fabs(clock.period_ms - bit_ms) > 0.01 * bit_ms)
+        {
+            printf("FAIL  %u/%u: the keyed bit is %.3f ms, not the %.3f ms of %u Bd\n",
+                   (unsigned)shift, (unsigned)baud, clock.period_ms, bit_ms, (unsigned)baud);
+            failures++;
+        }
+        if (clock.mad_pct > 3.0)
+        {
+            printf("FAIL  %u/%u: the keyed transitions scatter %.2f %% of a bit (MAD); the transmitter\n"
+                   "      is the one clock here that should be exact\n",
+                   (unsigned)shift, (unsigned)baud, clock.mad_pct);
+            failures++;
+        }
+        if (short_runs || off_lattice)
+        {
+            printf("FAIL  %u/%u: %d interval(s) shorter than a whole bit and %d off the whole bit "
+                   "lattice\n", (unsigned)shift, (unsigned)baud, short_runs, off_lattice);
+            failures++;
+        }
+        if (stops < 3)
+        {
+            printf("FAIL  %u/%u: only %d interval(s) measure 2 bits; the stop bits the modulator adds\n"
+                   "      are not on the air as whole bit runs\n",
+                   (unsigned)shift, (unsigned)baud, stops);
+            failures++;
+        }
+        if (half_stops)
+        {
+            printf("FAIL  %u/%u: %d interval(s) measure 1.5 bits; the firmware sends two, so a\n"
+                   "      keyer that started sending the half bit has to be a change someone made\n",
+                   (unsigned)shift, (unsigned)baud, half_stops);
+            failures++;
+        }
+    }
+    printf("\n'2 bit' counts the intervals that are exactly two bits: the modulator's stop bits. The\n"
+           "radio's stop bit setting is 1.5, and Rtty_BaudotAdd() sends two for both 1.5 and 2, so the\n"
+           "air carries whole bit runs and this gate is the measurement that says so. 'worst ms' is the\n"
+           "largest distance of any interval from the nearest whole bit; it is not zero because a\n"
+           "transition time comes from the gate's 5 ms windows, which is about 2 ms at these bit\n"
+           "lengths.\n");
+    if (!failures) printf("\nthe transmitter's keying clears the same gate the receiver's audio has to\n");
+    return failures ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
  *  self checks
  * ------------------------------------------------------------------ */
 static int failures;
@@ -2944,6 +3105,7 @@ int main(int argc, char** argv)
         return rtty_trace(argv[2], argv[4], shift, baud);
     }
     if (!strcmp(what, "rtty-multipath")) return rtty_multipath();
+    if (!strcmp(what, "tx-check")) return tx_check();
     fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax|navtex"
                     "|rtty-multipath|tx-check|hell|mfsk16|olivia"
                     "|capture-check <file.wav> [shift] [45|50 baud]"
