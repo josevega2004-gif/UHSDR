@@ -109,7 +109,8 @@ static uint32_t rng_next(void)
 {
     uint32_t x = rng_state;
     x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-    return x ? x : (rng_state = 1u);
+    rng_state = x;                  // the state has to advance, or every sample is the same value
+    return x;
 }
 
 float Bench_Gauss(void)

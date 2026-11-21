@@ -378,11 +378,13 @@ static int rtty_table(const char* msg, bool long_mode)
         { .label = "snr 7 170",    .shift = 170, .snr_db = 7.0f,   .max_cer = 5.0f },
         { .label = "qsb 10 170",   .shift = 170, .snr_db = 10.0f, .qsb_rate = 0.5f,
           .qsb_depth = 6.0f, .max_cer = 5.0f },
-        // 2 Hz, 10 dB deep, at 10 dB SNR. The AGC is what makes this row decodable at all: measured
-        // 6.2 % (3/48) short and 2.3 % (9/392) long, with the receiver's AGC in the loop, against
-        // 58.3 % when the bench fed the demodulator directly and left the level to chance.
+        // 2 Hz, 10 dB deep, at 10 dB SNR. Measured with real noise on the row: 47.9 % (23/48) short
+        // and 93.6 % (367/392) long - the modem loses lock partway through the take and the rest of
+        // the message never comes out. That is pinned as a failure, not hidden: the earlier 6.2 % /
+        // 2.3 % was measured while the bench's noise generator never advanced its state, so the row
+        // had no noise on it at all.
         { .label = "qsb fast 10",  .shift = 170, .snr_db = 10.0f, .qsb_rate = 2.0f,
-          .qsb_depth = 10.0f, .max_cer = 10.0f },
+          .qsb_depth = 10.0f, .max_cer = 100.0f, .min_cer = 40.0f },
         // the real services: DWD DDH/DDK are F1B 50 Baud with +/-225 Hz (450 Hz total) on
         // 4583/7646/10100.8/11039/14467.3 kHz and +/-42.5 Hz (85 Hz) on 147.3 kHz, per the DWD
         // table on http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts.
@@ -704,6 +706,7 @@ typedef struct
     bool     invert;
     bool     steer_right;
     uint32_t rows;
+    uint32_t lines_min;       // 0 = every line has to be found; otherwise the known gap's count
     float    corr_min;
     float    corr_max;
     float    ppm;             // every tone moved by ppm * rf_hz, the same rigid reference error the
@@ -732,14 +735,17 @@ static int wefax_table(void)
         { .name = "snr 12", .snr_db = 12.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
         { .name = "snr 12 fast qsb", .snr_db = 12.0f, .qsb_rate_hz = 2.0f, .qsb_depth_db = 10.0f,
           .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
-        { .name = "snr 12 + skew", .snr_db = 12.0f, .skew_ppm = 20000, .rows = 12,
-          .corr_min = 0.95f, .corr_max = 1.00f },
+        // Known gap, recorded rather than hidden: the capture does not track each sync tip, so a
+        // transmitter that moves every line loses lines and the chart with them. These windows pin
+        // the measured damage; a capture that started tracking would fail here and force an update.
+        { .name = "snr 12 + skew (gap)", .snr_db = 12.0f, .skew_ppm = 20000, .rows = 12,
+          .lines_min = 9, .corr_min = -1.00f, .corr_max = 0.05f },
         { .name = "snr 12 black/white swapped", .snr_db = 12.0f, .invert = true, .rows = 12,
           .corr_min = -1.00f, .corr_max = -0.90f },
         { .name = "snr 12 reversed scan", .snr_db = 12.0f, .steer_right = true, .rows = 12,
           .corr_min = 0.95f, .corr_max = 1.00f },
-        { .name = "snr 8 qsb skew", .snr_db = 8.0f, .qsb_rate_hz = 0.4f, .qsb_depth_db = 6.0f,
-          .skew_ppm = 3000, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
+        { .name = "snr 8 qsb skew (gap)", .snr_db = 8.0f, .qsb_rate_hz = 0.4f, .qsb_depth_db = 6.0f,
+          .skew_ppm = 3000, .rows = 12, .lines_min = 10, .corr_min = 0.30f, .corr_max = 0.65f },
         // the same rigid reference error the RTTY rows carry: every tone of the emission moves by
         // ppm * rf_hz while the demodulator's bins stay at 1857/1500/2300 Hz. The sync tip is the
         // narrow one, so a tuning error attacks the line capture before it attacks the picture, and
@@ -789,10 +795,11 @@ static int wefax_table(void)
         printf("%-28s %3u/%-2u %8.1f %8.3f %8.1f %7.1f\n", cases[i].name,
                res.lines_found, res.lines_expected, res.row_rms_error, corr, res.mean_level,
                (double) tune_hz);
-        if (res.lines_found < cases[i].rows)
+        const uint32_t need = cases[i].lines_min ? cases[i].lines_min : cases[i].rows;
+        if (res.lines_found < need)
         {
-            printf("FAIL  %-28s found %u of the %u lines it transmitted\n",
-                   cases[i].name, res.lines_found, cases[i].rows);
+            printf("FAIL  %-28s found %u of the %u lines it transmitted (at least %u expected)\n",
+                   cases[i].name, res.lines_found, cases[i].rows, need);
             failures++;
         }
         if (corr < cases[i].corr_min || corr > cases[i].corr_max)
@@ -1165,7 +1172,14 @@ static int mfsk16_table(void)
         { .name = "snr 10", .snr_db = 10.0f, .max_cer = 0.0f },
         { .name = "snr 10 qsb", .snr_db = 10.0f, .qsb_rate = 0.5f, .qsb_depth = 3.0f,
           .max_cer = 100.0f },
-        { .name = "snr 3", .snr_db = 3.0f, .max_cer = 100.0f },
+        { .name = "snr 3", .snr_db = 3.0f, .max_cer = 0.0f },
+        { .name = "snr -6", .snr_db = -6.0f, .max_cer = 0.0f },
+        { .name = "snr -12", .snr_db = -12.0f, .max_cer = 0.0f },
+        { .name = "snr -16", .snr_db = -16.0f, .max_cer = 0.0f },
+        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 0.0f },
+        // the floor: the first row where characters start to go, and the next one where they all do
+        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 70.0f, .min_cer = 45.0f },
+        { .name = "snr -22", .snr_db = -22.0f, .max_cer = 110.0f, .min_cer = 85.0f },
         // a burst that takes two whole symbols: eight bits gone, spread over eight symbols by the
         // interleaver, which is what the code is there to repair
         { .name = "burst 2 symbols", .snr_db = 20.0f, .burst_symbols = 2, .max_cer = 0.0f },
@@ -1173,7 +1187,7 @@ static int mfsk16_table(void)
           .min_cer = 5.0f },
         { .name = "tone +8 Hz", .snr_db = 20.0f, .tune_hz = 8.0f, .max_cer = 100.0f,
           .min_cer = 50.0f },
-        { .name = "tone +16 Hz", .snr_db = 20.0f, .tune_hz = 16.0f, .max_cer = 100.0f,
+        { .name = "tone +16 Hz", .snr_db = 20.0f, .tune_hz = 16.0f, .max_cer = 130.0f,
           .min_cer = 50.0f },
         // nothing transmitted at all: a receiver that reads a message out of noise would look like
         // an improvement on every other row here
@@ -1296,7 +1310,11 @@ static int olivia_table(void)
         { .name = "snr 0", .snr_db = 0.0f, .max_cer = 0.0f },
         { .name = "snr -6", .snr_db = -6.0f, .max_cer = 100.0f },
         { .name = "snr -12", .snr_db = -12.0f, .max_cer = 0.0f },
-        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 0.0f },
+        { .name = "snr -14", .snr_db = -14.0f, .max_cer = 0.0f },
+        { .name = "snr -16", .snr_db = -16.0f, .max_cer = 0.0f },
+        // the floor: the first row where characters start to go, and the next one well past it
+        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 45.0f, .min_cer = 20.0f },
+        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 90.0f, .min_cer = 60.0f },
         { .name = "burst 2 symbols", .snr_db = 20.0f, .burst_symbols = 2, .max_cer = 0.0f },
         { .name = "burst 8 symbols", .snr_db = 20.0f, .burst_symbols = 8, .max_cer = 0.0f },
         { .name = "tone +15 Hz", .snr_db = 20.0f, .tune_hz = 15.0f, .max_cer = 0.0f },
@@ -2729,20 +2747,18 @@ static int selftest(void)
 
         // the skew knob must actually move the transmitter, otherwise the line capture is not being
         // tested at all and the table would read as if it were
-        // Known gap, recorded rather than hidden. The transmitter skews each line by up to
-        // +-120 samples (6 pixel columns); the reference decoder still finds every line and still
-        // reads the chart, but its line spacing metric comes out at 0.0, which proves the capture
-        // snaps to the grid of the first line instead of to each sync tip. It gets away with that
-        // only because this test chart is smooth. An envelope based edge capture is the first real
-        // piece of work on the fax path, see README.md.
+        // Known gap, recorded rather than hidden. The transmitter skews every line by up to
+        // +-120 samples (6 pixel columns) and the capture does not follow each tip, so lines are
+        // lost and the chart with them. These numbers are pinned; a capture that started tracking
+        // would change them and this check would have to be updated, which is the point.
         cfg.snr_db = 20.0f; cfg.qsb_rate_hz = 0.0f; cfg.qsb_depth_db = 0.0f; cfg.skew_ppm = 20000.0f;
         Bench_WefaxGenerate(x, truth, &cfg);
         Bench_WefaxDecode(x, samples, grey, &res);
         float skew_corr = pearson(truth, grey, (size_t) cfg.rows * WEFAX_IMG_COLS);
-        printf("     skewed transmitter: %u/%u lines, spacing metric %.1f samples (0.0 means the tip is not tracked), chart correlation %.3f\n",
+        printf("     skewed transmitter: %u/%u lines, spacing metric %.1f samples, chart correlation %.3f\n",
                res.lines_found, cfg.rows, res.row_rms_error, skew_corr);
-        check(res.lines_found == cfg.rows && skew_corr > 0.9f,
-              "fax: a skewed broadcast is still readable, even though it is not still tip locked");
+        check(res.lines_found >= cfg.rows * 3 / 4 && skew_corr < 0.9f,
+              "fax: per-line skew is not tracked, and the table pins how much it costs");
         check(corr > 0.5f, "fax: the chart is still recognisable at 8 dB with fading");
         free(x); free(truth); free(grey);
     }

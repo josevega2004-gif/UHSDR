@@ -302,7 +302,10 @@ int Bench_Mfsk16Decode(const float32_t* x, size_t n, char* out, size_t out_sz, m
     int best_phase = 0;
     double best_ratio = -1.0;
     const size_t probe = n / MF_SYMBOL < 12 ? n / MF_SYMBOL : 12;
-    for (int ph = 0; ph < MF_SYMBOL; ph += 4)
+    // Only the first half symbol is searched: a phase past half a symbol puts the first window
+    // mostly inside the next symbol, which reads the whole interleaver one symbol late. The
+    // generators start the take on a symbol boundary, so there is no earlier phase to find.
+    for (int ph = 0; ph < MF_SYMBOL / 2; ph += 4)
     {
         double ratio = 0.0;
         double e[MF_TONES];
@@ -325,12 +328,16 @@ int Bench_Mfsk16Decode(const float32_t* x, size_t n, char* out, size_t out_sz, m
 
     const size_t nsym = (n - (size_t)best_phase) / MF_SYMBOL;
     if (nsym < MF_BLOCK) return 0;
-    const size_t nblocks = nsym / MF_BLOCK;
+    // A phase that is not zero leaves the last block short by up to one symbol. Rounding down would
+    // throw the whole block away - with it the idle NUL that ends the message - so the block is
+    // completed with zero bits, which is what an erasure looks like to the decoder.
+    const size_t nblocks = (nsym + MF_BLOCK - 1) / MF_BLOCK;
     static uint8_t rx[8192], coded[8192], info[4096];
     if (nblocks * 32 > sizeof(rx)) return 0;
+    memset(rx, 0, nblocks * 32);
 
     double e[MF_TONES];
-    for (size_t s = 0; s < nblocks * MF_BLOCK; s++)
+    for (size_t s = 0; s < nsym; s++)
     {
         const size_t at = (size_t)best_phase + s * MF_SYMBOL;
         mf_energies(x, at, e);

@@ -192,7 +192,7 @@ CER is measured after aligning away the lead-in junk, so it describes the modem 
 | clean, 170 / 425 / 850 Hz shift | 0.0 |
 | AWGN 20, 10, 7 dB | 0.0 |
 | QSB 0.4 Hz, 6 dB deep | 0.0 |
-| QSB 2 Hz, 10 dB deep | **6.2** (3/48, and **2.3** in `rtty-long`) |
+| QSB 2 Hz, 10 dB deep | **47.9** (23/48, and **93.6** in `rtty-long`) |
 | weak mark, 30 dB below the space tone | 0.0 with the 170 Hz space filter, **97.9** with the 850 Hz one |
 | 170 Hz signal decoded with the 850 Hz setting, mark 30 dB down | **97.9** (47/48), against 0.0 % at 170 and 200 Hz |
 | weak mark + carrier 300 Hz above the space tone at +20 dB | 0.0 at 170 Hz, **31.2** with the carrier at +30 dB (11.7 in `rtty-long`); **97.9** at either carrier level once the setting is 850 Hz |
@@ -208,7 +208,7 @@ eight copies of the text - 392 characters with the spaces between them - through
 the same limits: a clean row is then under 0.26 %, which separates a decoder that is exactly right
 from one that is quietly worse. Measured, every row that is clean at 48 characters is clean at 392,
 so the loopback has no residual errors left to find. The two rows that are not clean are clean in
-neither length and carry a limit in both: fast fading at 6.2 % short and 2.3 % long, and a station
+neither length and carry a limit in both: fast fading at 47.9 % short and 93.6 % long, and a station
 sent at 45.45 Bd but decoded as 50 Bd at 70.8 % and 69.4 %.
 
 The AGC changes what this table says, and the honest version is that the earlier one was partly a
@@ -221,8 +221,10 @@ station 30 dB down decodes as well as one at nominal level, 0.0 % (0/48 and 0/39
 and +10 dB. The level rows therefore record the AGC working, not the modem being level proof.
 
 Two things still break it, and they are measured with the same chain. Fast fading, 2 Hz at 10 dB
-deep, used to lose most of the message (58.3 %) when the level was left to chance; through the AGC
-it costs 6.2 % (3/48) at 45.45 Bd and 2.3 % (9/392) over the long message. A strong signal next door
+deep, costs **47.9 %** (23/48) at 45.45 Bd and **93.6 %** (367/392) over the long message: the modem
+loses lock partway and the rest never comes out. The 6.2 % this row used to report was measured
+against a noise generator whose state never advanced, so the row carried no noise at all. A strong
+signal next door
 is the remaining cliff: an unmodulated carrier 300 Hz above the space tone is harmless at +20 dB
 over the wanted signal and costs **31.2 %** at +30 dB, with the weak mark tone in the same row
 holding the bits on the space filter. That is a filter rejection limit, not a level one - which is
@@ -361,9 +363,10 @@ pixel slot, so no filter bank has to be tuned; per sample that is a handful of m
 
 | case | lines | chart correlation |
 |---|---|---|
-| clean / 20 dB / 12 dB | 12/12 | 0.975 / 0.974 / 0.973 |
-| 12 dB + 2 Hz QSB, + skew | 12/12 | 0.973 |
-| 8 dB with QSB and skew | 12/12 | 0.972 |
+| clean / 20 dB / 12 dB | 12/12 | 0.975 / 0.974 / 0.969 |
+| 12 dB + 2 Hz QSB | 12/12 | 0.969 |
+| 12 dB with per-line skew, known gap | **10/12** | **-0.112** |
+| 8 dB with QSB and per-line skew, known gap | **11/12** | **0.495** |
 | black and white swapped | 12/12 | **-0.945** |
 | 1 ppm on 20 m (14 Hz off), 5 ppm on 20 m (70 Hz) | 12/12 | 0.975 / 0.976 |
 | 2 ppm on 10 m (56 Hz), 1 ppm on 6 m (50 Hz) | 12/12 | 0.976 |
@@ -387,12 +390,18 @@ few ppm on HF and shares the 6 m limit with RTTY.
 
 ### Known gaps, all of them measured
 
-* **The sync capture does not track the tip.** With each line skewed by up to +-120 samples the
-  spacing metric stays at 0.0, i.e. it locks to the grid of the first line. The check asserts only
-  what is true (still readable, correlation 0.975) and prints the gap instead of hiding it. An
-  envelope based rising edge capture is the first real work item; a two stage version using a
-  12 sample window was tried and is worse, because 1 ms of audio resolves nothing at 400 Hz tone
-  spacing.
+* **The sync capture does not track the tip.** Each line is skewed by up to +-120 samples and the
+  capture still locks to the grid of the first line: at 12 dB it finds 10 of 12 lines and the chart
+  correlates at -0.112, and at 8 dB with QSB and a third of the skew it finds 11 of 12 and
+  correlates at 0.495. The table and the self check pin those numbers as a known gap, so a capture
+  that started tracking would fail them and force this section to be rewritten. An envelope based
+  rising edge capture is the first real work item; a two stage version using a 12 sample window was
+  tried and is worse, because 1 ms of audio resolves nothing at 400 Hz tone spacing.
+
+  The earlier claim here - still readable, correlation 0.975 - was measured while every line got the
+  *same* skew: `rng_next()` in the noise generator never wrote its new state back, so a take
+  received one Gaussian sample repeated and there was no per-line jitter at all. Fixing the generator
+  is what exposed this gap, and it is why every noise number in this file was re-measured.
 * **Left/right steering is invisible to this metric by construction**: the ground truth follows the
   transmitted scan order, and the reference decoder has no phasing reference. A real receiver needs
   the steer control, not a smarter score.
@@ -700,7 +709,7 @@ Measured on a 31 character line at 12 kHz, scored over the 30 or 31 cells the ta
 | **0 dB** | 0.00 | 31/31 | 1.00 |
 | keying tone +200 Hz | 0.00 | 31/31 | 1.00 |
 | keying tone +700 Hz | **14.76** | 4/30 | 0.50 |
-| pixel clock +2 % | **36.47** | 4/30 | 0.28 |
+| pixel clock +2 % | **36.95** | 4/30 | 0.28 |
 
 The noise rows are not a surprise once the geometry is written down: a pixel is 8.16 ms of a 1 kHz
 tone, so the receiver's envelope integrates about fifty cycles per decision and the noise is averaged
@@ -740,32 +749,44 @@ Measured on a 26 character message at 12 kHz, SNR quoted over the whole 12 kHz b
 
 | case | CER % | err/len | symbols heard |
 |---|---|---|---|
-| clean | 0.0 | 0/26 | 100.0 |
-| 20 dB | 0.0 | 0/26 | 100.0 |
-| 10 dB | 0.0 | 0/26 | 100.0 |
-| 10 dB + 0.5 Hz / 3 dB QSB | 0.0 | 0/26 | 100.0 |
-| 3 dB | 0.0 | 0/26 | 100.0 |
+| clean / 20 dB / 10 dB / 10 dB + QSB / 3 dB / -6 dB | 0.0 | 0/26 | 100.0 |
+| -12 dB | 0.0 | 0/26 | 95.2 |
+| -16 dB | 0.0 | 0/26 | 30.1 |
+| -18 dB | 0.0 | 0/26 | 6.8 |
+| **-20 dB** | **61.5** | 16/26 | 1.9 |
+| **-22 dB** | **100.0** | 26/26 | 0.0 |
 | burst over 2 symbols (128 ms) | 0.0 | 0/26 | 98.1 |
-| burst over 8 symbols (512 ms) | **50.0** | 13/26 | 92.3 |
-| tuning error +8 Hz (half a tone spacing) | **92.3** | 24/26 | 9.4 |
-| tuning error +16 Hz (a whole spacing) | **96.2** | 25/26 | 100.0 |
+| burst over 8 symbols (512 ms) | **42.3** | 11/26 | 92.2 |
+| tuning error +8 Hz (half a tone spacing) | **92.3** | 24/26 | 26.2 |
+| tuning error +16 Hz (a whole spacing) | **119.2** | 31/26 | 92.3 |
 | noise only, nothing transmitted | **100.0** | 26/26 | 0.0 |
 
-The first five rows are the matched filter doing its work: a symbol is 64 ms of one tone, so the
-correlation is worth about 23 dB against noise in the 12 kHz band, and 3 dB of band SNR is still a
-comfortable decision. The burst rows are the interleaver: two symbols erased is eight bits spread over
+The matched filter is why the ladder goes this deep. A symbol is 64 ms of one tone, so the correlation
+is only about 15.6 Hz wide against noise spread over 12 kHz: roughly 29 dB of processing gain, before
+the rate 1/2 code adds its own. **The floor is -20 dB over the 12 kHz band**, which is **-13.2 dB over
+a 2.5 kHz channel**: at -18 dB every character still comes back even though only 6.8 % of symbols
+have a winning tone that holds half the energy, and at -20 dB 61.5 % of the message is wrong. At
+-22 dB (-15.2 dB in 2.5 kHz) there is no message left, only characters out of the noise.
+
+Every noise row in this file was re-measured after a bench bug was found and fixed: `rng_next()` never
+wrote its new state back, so each take received one Gaussian sample repeated - a DC offset, which the
+tone correlators reject. No row below 0 dB had ever really been tested against noise, and the WEFAX
+numbers moved when it was repaired too.
+
+The burst rows are the interleaver: two symbols erased is eight bits spread over
 eight symbols, which the rate 1/2 code repairs completely, and eight symbols erased is thirty two bits
-over eight symbols, four in each of them, which it does not. Thirteen characters are lost, not three:
+over eight symbols, four in each of them, which it does not. Eleven characters are lost (42.3 %):
 with Varicode a character is about ten bits rather than six, so the same thirty two damaged bits reach
 about half the message instead of an eighth of it. The row is pinned from below so that a receiver
 which started hiding the damage would fail here.
 
 The tuning rows are the tone spacing. The tones are exactly one cycle apart per symbol, so a 16 Hz
-error puts the signal on the neighbouring tone: every symbol is heard strongly (100.0 %) and every one
-of them is the wrong tone. Half a spacing is worse in a different way - the energy splits between two
-tones, the winning tone no longer holds half of it (9.4 % heard), and the decisions scatter. There is
-no tuning search in the receiver; this is the same cliff the RTTY and NAVTEX sections measure, at the
-width this mode's tones give it.
+error puts the signal on the neighbouring tone: every symbol is heard strongly (92.3 %) and 119.2 % of
+the message is wrong - more than 100 % because the receiver also prints extra characters out of the
+noise. Half a spacing is worse in a different way - the energy splits between two tones, the winning
+tone no longer holds half of it (26.2 % heard), and the decisions scatter. There is no tuning search in
+the receiver; this is the same cliff the RTTY and NAVTEX sections measure, at the width this mode's
+tones give it.
 
 The noise-only row is the one that must never read as text. With nothing transmitted the receiver
 still frames characters out of the noise, and the row pins that text at a character error rate of
@@ -801,34 +822,34 @@ Measured on the same 26 character message, same channel, same scoring as MFSK16:
 
 | case | CER % | err/len | symbols heard |
 |---|---|---|---|
-| clean | 0.0 | 0/26 | 100.0 |
-| 20 dB | 0.0 | 0/26 | 100.0 |
-| 10 dB | 0.0 | 0/26 | 100.0 |
-| 10 dB + 0.5 Hz / 3 dB QSB | 0.0 | 0/26 | 100.0 |
-| 0 dB | 0.0 | 0/26 | 100.0 |
-| -6 dB | 0.0 | 0/26 | 100.0 |
-| **-12 dB** | 0.0 | 0/26 | 100.0 |
-| **-20 dB** | 0.0 | 0/26 | 100.0 |
+| clean / 20 dB / 10 dB / 10 dB + QSB / 0 dB | 0.0 | 0/26 | 100.0 |
+| -6 dB | 0.0 | 0/26 | 93.0 |
+| -12 dB | 0.0 | 0/26 | 1.6 |
+| -14 dB | 0.0 | 0/26 | 0.5 |
+| -16 dB | 0.0 | 0/26 | 0.0 |
+| **-18 dB** | **34.6** | 9/26 | 0.0 |
+| **-20 dB** | **80.8** | 21/26 | 0.0 |
 | burst over 2 symbols (64 ms) | 0.0 | 0/26 | 99.7 |
 | burst over 8 symbols (256 ms) | 0.0 | 0/26 | 98.2 |
 | tuning error +15 Hz (half a tone spacing) | 0.0 | 0/26 | 6.5 |
 | noise only, nothing transmitted | **100.0** | 26/26 | 0.0 |
 
-The noise ladder has not found this receiver's floor: it decodes the message without a single error
-20 dB below the signal in the 12 kHz band, which is about 13 dB below it in a 2.5 kHz channel - the
-usual way to quote a mode's SNR. The Walsh layer is why. A symbol error is one bit in each of five
-codewords of sixty-four bits, and the rows of the matrix are 32 apart, so the transform reads the
-right one through a great deal of damage. It is reported as measured rather than as a claim: the rows
-say where this receiver has been tested, not where the mode stops.
+**The floor is -18 dB over the 12 kHz band**, which is **-11.2 dB over a 2.5 kHz channel**: the
+message comes back without a single error at -16 dB (-9.2 dB in 2.5 kHz), 34.6 % of the characters go
+at -18 dB, and 80.8 % at -20 dB. The Walsh layer is why it goes that deep. A symbol error is one bit
+in each of five codewords of sixty-four bits, and the rows of the matrix are 32 apart, so the
+transform reads the right one through a great deal of damage, and the soft decisions keep working long
+after no symbol has a winning tone: at -16 dB the heard column is 0.0 % and the text is still exact.
 
-The burst rows no longer cost anything, which is the measurement rather than a missing case: two
-erased symbols is ten bit errors over ten codewords and eight erased symbols is forty, both well
-inside what a 64 bit code with distance 32 repairs. The tuning row is the more interesting one. At
-half a tone spacing only 6.5 % of symbols have a winning tone that holds half the energy - the energy
-is split between two neighbours - and every character still comes back, because the soft decisions
-keep the sign of each bit's difference and the Walsh layer repairs the rest. That is the opposite of
-the old pair based stand-in, where 68.8 % of symbols looked heard and sixteen characters of twenty-six
-came back wrong.
+Above the floor the soft bits carry it. At -12 dB only 1.6 % of symbols look heard and not one
+character is wrong. That is the opposite of the old pair based stand-in, where 68.8 % of symbols
+looked heard and sixteen characters of twenty-six came back wrong.
+
+The burst rows still cost nothing, which is the measurement rather than a missing case: two erased
+symbols is ten bit errors over ten codewords and eight erased symbols is forty, both well inside what
+a 64 bit code with distance 32 repairs. The tuning row is the more interesting one: at half a tone
+spacing only 6.5 % of symbols have a winning tone that holds half the energy, the energy is split
+between two neighbours, and every character still comes back.
 
 The noise-only row is the one that must never read as text: 100 % of the message wrong, no symbol
 heard.

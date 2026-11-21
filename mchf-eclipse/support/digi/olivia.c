@@ -221,7 +221,11 @@ int Bench_OliviaDecode(const float32_t* x, size_t n, char* out, size_t out_sz, o
     // prefer a phase that dropped the last symbol of the take, which is a self check's worth of bug.
     const size_t probe = n / OL_SYMBOL < 6 ? n / OL_SYMBOL : 6;
     double e[OL_TONES];
-    for (int ph = 0; ph < OL_SYMBOL; ph += 4)
+    // Only the first half symbol is searched. A phase past half a symbol puts the first window
+    // mostly inside the *next* symbol, and while the tones still look fine the whole 64 symbol block
+    // is then read one symbol late: the diagonal spread no longer lines up and every character
+    // fails. The generators start the take on a block boundary, so that is the only phase to find.
+    for (int ph = 0; ph < OL_SYMBOL / 2; ph += 4)
     {
         double ratio = 0.0;
         for (size_t s = 0; s < probe; s++)
