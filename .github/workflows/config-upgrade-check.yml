@@ -131,3 +131,9 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi hell
 
+      # The two tone-set modes are the same ladder of cases, so the steps check the tone grid and
+      # the coding separately: MFSK16's interleaver, Olivia's pair redundancy.
+      - name: Run the MFSK16 reference modem
+        working-directory: mchf-eclipse
+        run: make -C support/digi mfsk16
+

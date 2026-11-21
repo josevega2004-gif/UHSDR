@@ -9,6 +9,7 @@ make -C support/digi rtty-long  # the same matrix, eight copies of the message (
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
 make -C support/digi navtex   # NAVTEX / SITOR-B through a reference modem: alphabet and repeat copy
 make -C support/digi hell     # Hellschreiber: on/off keyed raster, scored as a picture
+make -C support/digi mfsk16   # MFSK16: 16 tones, rate 1/2 code, interleaver over 8 symbols
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi capture-check  # is a recording fit to be pinned: pair, bit clock, continuity
 make -C support/digi fixture-check  # do fixtures/MANIFEST.md's numbers still describe the wav
@@ -714,6 +715,56 @@ columns out by the end of the line, so the columns lean and the gap columns stop
 them blank). Both failing rows are pinned from below in the table, and the self check additionally
 holds the 2 % case, so a receiver that started following the clock slowly would fail rather than read
 as an improvement.
+
+## MFSK16, `make -C support/digi mfsk16`
+
+Sixteen tones 15.625 Hz apart, one tone per symbol at 15.625 baud: four bits a symbol, 64 ms of
+signal per decision, 234 Hz wide. A symbol that the receiver reads correctly is worth four bits and a
+symbol lost to the channel is worth nothing, which is why the mode is built around a code and an
+interleaver rather than around the tones.
+
+Two parts of this reference modem are the bench's and two are the mode's, and the table only means
+something if that is said plainly:
+
+* **the mode's**: the tone grid, the rate, four bits per symbol, the rate 1/2 constraint length 7
+  convolutional code, and the fact that coded bits are spread over a block of symbols.
+* **the bench's**: the alphabet is a six bit table (space, A-Z, digits, a few marks) rather than
+  Varicode, the interleaver is eight symbols rather than the mode's longer block, and the stream
+  starts with an eight bit character count. Varicode frames characters for free; a fixed length code
+  cannot, and a length header is the honest way to bench everything under it.
+
+Measured on a 26 character message at 12 kHz, SNR quoted over the whole 12 kHz band:
+
+| case | CER % | err/len | symbols heard |
+|---|---|---|---|
+| clean | 0.0 | 0/26 | 100.0 |
+| 20 dB | 0.0 | 0/26 | 100.0 |
+| 10 dB | 0.0 | 0/26 | 100.0 |
+| 10 dB + 0.5 Hz / 3 dB QSB | 0.0 | 0/26 | 100.0 |
+| 3 dB | 0.0 | 0/26 | 100.0 |
+| burst over 2 symbols (128 ms) | 0.0 | 0/26 | 97.7 |
+| burst over 8 symbols (512 ms) | **11.5** | 3/26 | 90.9 |
+| tuning error +8 Hz (half a tone spacing) | **100.0** | 26/26 | 11.3 |
+| tuning error +16 Hz (a whole spacing) | **100.0** | 26/26 | 100.0 |
+| noise only, nothing transmitted | **100.0** | 26/26 | 0.0 |
+
+The first five rows are the matched filter doing its work: a symbol is 64 ms of one tone, so the
+correlation is worth about 23 dB against noise in the 12 kHz band, and 3 dB of band SNR is still a
+comfortable decision. The burst rows are the interleaver: two symbols erased is eight bits spread over
+eight symbols, which the rate 1/2 code repairs completely, and eight symbols erased is thirty two bits
+over eight symbols, which it does not - three characters are lost and the row is pinned from below so
+that a receiver which started hiding the damage would fail here.
+
+The tuning rows are the tone spacing. The tones are exactly one cycle apart per symbol, so a 16 Hz
+error puts the signal on the neighbouring tone: every symbol is heard strongly (100.0 %) and every one
+of them is the wrong tone. Half a spacing is worse in a different way - the energy splits between two
+tones, the winning tone no longer holds half of it (11.3 % heard), and the decisions scatter. There is
+no tuning search in the receiver; this is the same cliff the RTTY and NAVTEX sections measure, at the
+width this mode's tones give it.
+
+The noise-only row is the one that must never read as text. With nothing transmitted the receiver
+still reports a length and fills it in, and the row pins that text at a character error rate of 100 %,
+so a receiver that began inventing spaces where the signal was silent would show up as a regression.
 
 ## Receiving a DWD teletype station on the radio
 

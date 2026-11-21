@@ -19,7 +19,7 @@ AUDIO    = ../../drivers/audio
 LIBDIR   = $(AUDIO)
 SHIM     = shim
 
-BENCH_OBJS = digi_bench.o modem_host.o wefax.o navtex.o hellschreiber.o \
+BENCH_OBJS = digi_bench.o modem_host.o wefax.o navtex.o hellschreiber.o mfsk16.o \
              softdds_host.o
 FW_OBJS    = rtty.o audio_agc.o uhsdr_math.o
 
@@ -71,6 +71,10 @@ navtex: digi_bench
 # Hellschreiber: on/off keyed raster at 122.5 Bd, scored as a picture rather than as characters
 hell: digi_bench
 	@./digi_bench hell
+
+# MFSK16: 16 tones at 15.625 Bd with the rate 1/2 code and the interleaver in the loop
+mfsk16: digi_bench
+	@./digi_bench mfsk16
 
 rtty-shift: digi_bench
 	@./digi_bench rtty-shift

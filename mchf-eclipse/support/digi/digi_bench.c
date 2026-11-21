@@ -17,6 +17,7 @@
 
 #include "bench.h"
 #include "hellschreiber.h"
+#include "mfsk16.h"
 #include "navtex.h"
 #include "rtty.h"
 #include "softdds.h"
@@ -1132,6 +1133,134 @@ typedef struct
     float min_cer;          // for the rows that must keep costing characters
 } mfsk16_case_t;
 
+static int mfsk16_table(void)
+{
+    static const char* msg = "MFSK16 TEST DE UHSDR 12345";
+    const size_t len = strlen(msg);
+    static const mfsk16_case_t cases[] =
+    {
+        { .name = "clean", .snr_db = 100.0f, .max_cer = 0.0f },
+        { .name = "snr 20", .snr_db = 20.0f, .max_cer = 0.0f },
+        { .name = "snr 10", .snr_db = 10.0f, .max_cer = 0.0f },
+        { .name = "snr 10 qsb", .snr_db = 10.0f, .qsb_rate = 0.5f, .qsb_depth = 3.0f,
+          .max_cer = 100.0f },
+        { .name = "snr 3", .snr_db = 3.0f, .max_cer = 100.0f },
+        // a burst that takes two whole symbols: eight bits gone, spread over eight symbols by the
+        // interleaver, which is what the code is there to repair
+        { .name = "burst 2 symbols", .snr_db = 20.0f, .burst_symbols = 2, .max_cer = 0.0f },
+        { .name = "burst 8 symbols", .snr_db = 20.0f, .burst_symbols = 8, .max_cer = 100.0f,
+          .min_cer = 5.0f },
+        { .name = "tone +8 Hz", .snr_db = 20.0f, .tune_hz = 8.0f, .max_cer = 100.0f,
+          .min_cer = 50.0f },
+        { .name = "tone +16 Hz", .snr_db = 20.0f, .tune_hz = 16.0f, .max_cer = 100.0f,
+          .min_cer = 50.0f },
+        // nothing transmitted at all: a receiver that reads a message out of noise would look like
+        // an improvement on every other row here
+        { .name = "noise only", .snr_db = 0.0f, .no_signal = 1, .max_cer = 100.0f, .min_cer = 50.0f },
+    };
+    const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
+    int failures = 0;
+
+    printf("MFSK16 through the reference modem: 16 tones 15.625 Hz apart at 15.625 Bd, 4 bits a symbol,\n"
+           "rate 1/2 K=7 code, interleaver over 8 symbols. Text is %zu characters.\n", len);
+    printf("The alphabet is this bench's 6 bit table and the stream carries its own length, so the\n"
+           "first row is the modem and the coding, not a real station's Varicode.\n\n");
+    printf("%-16s %6s %8s %8s %8s %6s %s\n", "case", "CER %", "err/len", "symbols", "heard",
+           "bits", "decoded text");
+    for (size_t i = 0; i < n_cases; i++)
+    {
+        const mfsk16_case_t* c = &cases[i];
+        const size_t cap = 400000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        char got[512];
+        mfsk16_result_t res;
+        if (!x) { printf("out of memory\n"); return 1; }
+        size_t n = Bench_Mfsk16Generate(x, cap, msg, c->tune_hz);
+        if (c->no_signal)
+        {
+            memset(x, 0, n * sizeof(float32_t));      // the same length of silence, then noise
+        }
+        else if (!n) { free(x); printf("FAIL  %-16s nothing generated\n", c->name); failures++; continue; }
+        if (c->burst_symbols)
+        {
+            // the middle of the take, which is inside the text for this message
+            const size_t mid = (n / 2) & ~(size_t)63;
+            const size_t wide = (size_t)c->burst_symbols * 768;
+            for (size_t k = mid; k < mid + wide && k < n; k++) x[k] = 0.0f;
+        }
+        if (c->snr_db < 90.0f)
+        {
+            Bench_RngSeed(0x4D46534Bu);
+            Bench_AddNoise(x, n, c->snr_db, 0.0f);
+        }
+        Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
+
+        memset(&res, 0, sizeof(res));
+        const int ok = Bench_Mfsk16Decode(x, n, got, sizeof(got), &res);
+        int err = 0;
+        if (!ok) err = (int)len;
+        else
+        {
+            const size_t glen = strlen(got);
+            for (size_t k = 0; k < len; k++)
+                if (k >= glen || got[k] != msg[k]) err++;
+            for (size_t k = len; k < glen; k++) err++;
+        }
+        const double cer = 100.0 * (double)err / (double)len;
+        printf("%-16s %6.1f %4d/%-3zu %8u %5.2f%% %6u %s\n", c->name, cer, err, len,
+               res.symbols, res.symbols ? 100.0 * (double)res.tones_ok / (double)res.symbols : 0.0,
+               res.viterbi_bits, ok ? got : "(no decode)");
+        if (!ok)
+        {
+            printf("FAIL  %-16s the receiver did not get through the stream\n", c->name);
+            failures++;
+        }
+        else if (cer > (double)c->max_cer + 1e-9)
+        {
+            printf("FAIL  %-16s %.1f %% of characters wrong, this case allows %.1f %%\n", c->name,
+                   cer, (double)c->max_cer);
+            failures++;
+        }
+        else if (cer < (double)c->min_cer - 1e-9)
+        {
+            printf("FAIL  %-16s %.1f %% of characters wrong, and this case has to stay above "
+                   "%.1f %%:\n      a channel that stopped costing characters is a different "
+                   "receiver\n", c->name, cer, (double)c->min_cer);
+            failures++;
+        }
+        free(x);
+    }
+    printf("\n'heard' is the share of symbols whose winning tone held more than half the energy: a\n"
+           "symbol that is heard is not necessarily right, but a symbol that is not heard was lost to\n"
+           "the channel. The burst row erases two whole symbols and is the interleaver at work; the\n"
+           "tone rows are the 15.625 Hz grid, where a full tone spacing of error puts the signal on a\n"
+           "neighbour's frequency.\n");
+    if (!failures)
+    {
+        printf("\nall %zu cases inside their character error limits\n", n_cases);
+    }
+    return failures ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Olivia
+ * ------------------------------------------------------------------ */
+// Thirty-two tones at 31.25 baud is 1000 Hz of signal, and each symbol sends two of them, so one
+// symbol carries a seven bit character with nearly four times the room it needs. The spare room is
+// the point: the pair for a character sits a long way from the pair for any other, so a symbol read
+// slightly wrong is still the right character, and the interleaver spreads a burst over a block of
+// characters. The rows below are the same ladder as MFSK16's, so the two tables can be compared: the
+// same channel, the same text, the same scoring.
+typedef struct
+{
+    const char* name;
+    float snr_db, qsb_rate, qsb_depth, tune_hz;
+    int   burst_symbols;
+    int   no_signal;
+    float max_cer;
+    float min_cer;
+} olivia_case_t;
+
 /* ------------------------------------------------------------------ *
  *  decoding a recorded file: the input path any real feed will use
  * ------------------------------------------------------------------ */
@@ -2198,6 +2327,29 @@ static int selftest(void)
               "hell: a 2 % pixel clock error has to cost the raster, not just blur it");
         free(x);
     }
+    {
+        // MFSK16 rests on two things the self check can name: the tone decisions, which four bits a
+        // symbol carries, and the code across symbols, which is what makes one lost symbol cheap.
+        static const char* msg = "MFSK16 TEST";
+        const size_t cap = 200000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        char got[256];
+        mfsk16_result_t r;
+        const size_t n = Bench_Mfsk16Generate(x, cap, msg, 0.0f);
+        check(n > 0 && Bench_Mfsk16Decode(x, n, got, sizeof(got), &r),
+              "mfsk16: a clean transmission decodes");
+        printf("     (%u symbols, %u coded bits, header %d, %.1f %% of symbols heard, text [%s])\n",
+               r.symbols, r.bits, r.header, r.symbols ? 100.0 * (double)r.tones_ok / r.symbols : 0.0,
+               got);
+        check(strcmp(got, msg) == 0, "mfsk16: and the text comes back as sent");
+        memset(x + 30 * 768, 0, 768 * sizeof(float32_t));
+        const int ok1 = Bench_Mfsk16Decode(x, n, got, sizeof(got), &r);
+        printf("     (with symbol 30 erased: ok %d, %.1f %% heard, text [%s])\n", ok1,
+               r.symbols ? 100.0 * (double)r.tones_ok / r.symbols : 0.0, got);
+        check(ok1 && strcmp(got, msg) == 0,
+              "mfsk16: one erased symbol - four bits, spread over eight - costs nothing");
+        free(x);
+    }
     printf("%s\n", failures ? "SELF CHECKS FAILED" : "all self checks passed");
     return failures ? 1 : 0;
 }
@@ -2234,6 +2386,7 @@ int main(int argc, char** argv)
     if (!strcmp(what, "wefax")) return wefax_table();
     if (!strcmp(what, "navtex")) return navtex_table();
     if (!strcmp(what, "hell")) return hell_table();
+    if (!strcmp(what, "mfsk16")) return mfsk16_table();
     // the gate a take has to clear before it is worth decoding, let alone pinning: it measures the
     // file and never touches the modem, so it cannot be fooled by the modem agreeing with itself
     if (!strcmp(what, "capture-check") && argc > 2)
