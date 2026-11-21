@@ -22,12 +22,9 @@
 #include "olivia.h"
 
 #include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define OL_RATE     12000.0
-#define OL_BAUD     31.25
 #define OL_SPACING  31.25
 #define OL_TONES    32
 #define OL_BASE     935.0
@@ -95,13 +92,11 @@ static void ol_encode_block(const int* chars, uint8_t* tone)
         else fht[ch - OL_SYMS] = -1;
         ol_ifht(fht, OL_SYMS);
         int code_bit = (b * OL_SHIFT) & (OL_SYMS - 1);
-        int rotate = 0;
         for (int t = 0; t < OL_SYMS; t++)
         {
             if ((OL_SCRAMBLE >> code_bit) & 1ull) fht[t] = -fht[t];
             code_bit = (code_bit + 1) & (OL_SYMS - 1);
-            if (fht[t] < 0) sym[t] |= (uint8_t)(1u << ((b + rotate) % OL_BITS));
-            rotate = (rotate + 1) % OL_BITS;
+            if (fht[t] < 0) sym[t] |= (uint8_t)(1u << ((b + t) % OL_BITS));
         }
     }
     for (int t = 0; t < OL_SYMS; t++) tone[t] = (uint8_t)ol_gray[sym[t]];
@@ -175,10 +170,11 @@ size_t Bench_OliviaGenerate(float32_t* out, size_t cap, const char* text, float 
 }
 
 static double ol_tab_cos[OL_TONES][OL_SYMBOL], ol_tab_sin[OL_TONES][OL_SYMBOL];
+static int ol_wave_ready;
 
 static void ol_tables(void)
 {
-    if (ol_tab_cos[0][1] != 0.0) return;
+    if (ol_wave_ready) return;
     for (int t = 0; t < OL_TONES; t++)
     {
         const double w = 2.0 * M_PI * (OL_BASE + OL_SPACING * (double)t) / OL_RATE;
@@ -188,6 +184,7 @@ static void ol_tables(void)
             ol_tab_sin[t][i] = sin(w * (double)i);
         }
     }
+    ol_wave_ready = 1;
 }
 
 static void ol_energies(const float32_t* x, size_t at, double* e)
@@ -209,7 +206,6 @@ static void ol_energies(const float32_t* x, size_t at, double* e)
 int Bench_OliviaDecode(const float32_t* x, size_t n, char* out, size_t out_sz, olivia_result_t* res)
 {
     memset(res, 0, sizeof(*res));
-    res->period_samples = OL_SYMBOL;
     res->header = -1;
     if (n < (size_t)(4 * OL_SYMBOL)) return 0;
     ol_tables_init();
@@ -245,8 +241,6 @@ int Bench_OliviaDecode(const float32_t* x, size_t n, char* out, size_t out_sz, o
         }
         if (ratio > best_ratio) { best_ratio = ratio; best_phase = ph; }
     }
-    res->phase = best_phase;
-
     const size_t nsym = (n - (size_t)best_phase) / OL_SYMBOL;
     const size_t nblk = nsym / OL_SYMS;
     if (nblk < 1) return 0;
@@ -260,13 +254,12 @@ int Bench_OliviaDecode(const float32_t* x, size_t n, char* out, size_t out_sz, o
         {
             const size_t at = (size_t)best_phase + (blk * OL_SYMS + (size_t)s) * OL_SYMBOL;
             ol_energies(x, at, e);
-            int winner = 0;
             double top = -1.0, sum = 0.0;
             double bit_on[OL_BITS] = { 0.0 }, bit_off[OL_BITS] = { 0.0 };
             for (int t = 0; t < OL_TONES; t++)
             {
                 sum += e[t];
-                if (e[t] > top) { top = e[t]; winner = t; }
+                if (e[t] > top) top = e[t];
                 const int bin = ol_binary[t];
                 for (int j = 0; j < OL_BITS; j++)
                 {
@@ -280,7 +273,6 @@ int Bench_OliviaDecode(const float32_t* x, size_t n, char* out, size_t out_sz, o
             // the difference: the transform below then peaks positive on the character's row
             for (int j = 0; j < OL_BITS; j++)
                 soft[s][j] = (bit_off[j] - bit_on[j]) / (sum + 1e-12);
-            (void)winner;
         }
         ol_decode_block(soft, codes + blk * OL_CHARS);
         res->blocks++;

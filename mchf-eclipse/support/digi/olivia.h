@@ -10,11 +10,9 @@
 
 typedef struct
 {
-    double   period_samples;   // the symbol the receiver fitted, in samples at 12 kHz
     unsigned symbols;          // symbols read
     unsigned tones_ok;         // symbols whose winning tone held more than half the energy
     unsigned blocks;           // 64 symbol Walsh blocks decoded
-    int      phase;            // the symbol phase the receiver locked to
     int      header;           // the length the stream declared, -1 when it ran out first
 } olivia_result_t;
 

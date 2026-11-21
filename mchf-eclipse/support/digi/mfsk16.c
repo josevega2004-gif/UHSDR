@@ -24,17 +24,13 @@
 #include "mfsk16.h"
 
 #include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define MF_RATE     12000.0
-#define MF_BAUD     15.625
 #define MF_SPACING  15.625
 #define MF_TONES    16
 #define MF_BASE     1000.0
 #define MF_SYMBOL   768                 // samples: 64 ms at 12 kHz
-#define MF_K        7
 #define MF_G1       0x79u               // octal 171
 #define MF_G2       0x5Bu               // octal 133
 #define MF_BLOCK    8                   // symbols per interleaver block, 32 coded bits
@@ -293,7 +289,6 @@ static size_t mf_viterbi(const uint8_t* coded, size_t nbits, uint8_t* out)
 int Bench_Mfsk16Decode(const float32_t* x, size_t n, char* out, size_t out_sz, mfsk16_result_t* res)
 {
     memset(res, 0, sizeof(*res));
-    res->period_samples = MF_SYMBOL;
     if (n < (size_t)(2 * MF_SYMBOL)) return 0;
 
     // The symbol phase: the alignment that puts the most energy in one tone per symbol. A phase half
@@ -324,8 +319,6 @@ int Bench_Mfsk16Decode(const float32_t* x, size_t n, char* out, size_t out_sz, m
         }
         if (ratio > best_ratio) { best_ratio = ratio; best_phase = ph; }
     }
-    res->phase = best_phase;
-
     const size_t nsym = (n - (size_t)best_phase) / MF_SYMBOL;
     if (nsym < MF_BLOCK) return 0;
     // A phase that is not zero leaves the last block short by up to one symbol. Rounding down would
@@ -388,7 +381,7 @@ int Bench_Mfsk16Decode(const float32_t* x, size_t n, char* out, size_t out_sz, m
             if (c > 0 && at + 1 < out_sz) out[at++] = (char)c;
             continue;
         }
-        // the longest code is twelve bits, plus the two of the delimiter and up to fifteen of the
+        // the longest code is ten bits, plus the two of the delimiter and up to fifteen of the
         // padding the interleaver needs: anything longer is not a character, so resync on it
         if (len > 30) { acc = 0; len = 0; }
     }

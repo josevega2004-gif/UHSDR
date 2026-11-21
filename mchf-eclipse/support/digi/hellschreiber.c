@@ -19,7 +19,6 @@
  * pretending the printer has a glyph synchroniser it does not have.
  */
 #include <math.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -212,7 +211,6 @@ int Bench_HellDecode(const float32_t* x, size_t n, uint8_t* pix, int max_cols, i
     const int n_pix = (int)(((double)n - (double)best_phase) / period);
     if (n_pix < HS_ROWS * HS_CELL) { free(amp); return 0; }
 
-    const int rows = HS_ROWS;
     uint8_t* raw = malloc((size_t)n_pix);
     if (!raw) { free(amp); return 0; }
     for (int k = 0; k < n_pix; k++)
@@ -228,9 +226,9 @@ int Bench_HellDecode(const float32_t* x, size_t n, uint8_t* pix, int max_cols, i
     // gap where a glyph's middle is. The correct answer leaves one column in six blank.
     int best_group = 0, best_col = 0, best_total = 0;
     double best_blank = -1.0;
-    for (int go = 0; go < rows; go++)
+    for (int go = 0; go < HS_ROWS; go++)
     {
-        const int cols_avail = (n_pix - go) / rows;
+        const int cols_avail = (n_pix - go) / HS_ROWS;
         for (int co = 0; co < HS_CELL; co++)
         {
             int blank = 0, total = 0;
@@ -238,9 +236,9 @@ int Bench_HellDecode(const float32_t* x, size_t n, uint8_t* pix, int max_cols, i
             {
                 const int gap = co + HS_CELL * m + HS_COLS;
                 if (gap >= cols_avail) break;
-                const size_t first = (size_t)go + (size_t)gap * (size_t)rows;
+                const size_t first = (size_t)go + (size_t)gap * (size_t)HS_ROWS;
                 int any = 0;
-                for (int r = 0; r < rows; r++) if (raw[first + (size_t)r]) any = 1;
+                for (int r = 0; r < HS_ROWS; r++) if (raw[first + (size_t)r]) any = 1;
                 total++;
                 if (!any) blank++;
             }
@@ -261,17 +259,16 @@ int Bench_HellDecode(const float32_t* x, size_t n, uint8_t* pix, int max_cols, i
     // all found, and it is the quantity the grouping search maximised
     res->gap_share = best_blank;
 
-    const int cols_avail = (n_pix - best_group) / rows;
+    const int cols_avail = (n_pix - best_group) / HS_ROWS;
     int out_cols = cols_avail - best_col;
     if (out_cols > max_cols) out_cols = max_cols;
     for (int c = 0; c < out_cols; c++)
     {
-        const size_t first = (size_t)best_group + (size_t)(c + best_col) * (size_t)rows;
-        for (int r = 0; r < rows; r++)
+        const size_t first = (size_t)best_group + (size_t)(c + best_col) * (size_t)HS_ROWS;
+        for (int r = 0; r < HS_ROWS; r++)
             pix[r * max_cols + c] = raw[first + (size_t)r];
     }
     free(raw);
     *cols_out = out_cols;
-    res->pixels = (unsigned)out_cols * (unsigned)rows;
     return 1;
 }

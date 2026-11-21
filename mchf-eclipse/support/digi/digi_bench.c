@@ -1155,6 +1155,18 @@ static int hell_table(void)
     return failures ? 1 : 0;
 }
 
+// The two tone ladders score a take the same way: every character of the message that is missing or
+// wrong, plus every character the receiver added. A failed decode is the whole message wrong.
+static int exact_char_errors(const char* want, const char* got, int ok)
+{
+    if (!ok) return (int)strlen(want);
+    const size_t len = strlen(want), glen = strlen(got);
+    int err = 0;
+    for (size_t k = 0; k < len; k++) if (k >= glen || got[k] != want[k]) err++;
+    for (size_t k = len; k < glen; k++) err++;
+    return err;
+}
+
 /* ------------------------------------------------------------------ *
  *  MFSK16
  * ------------------------------------------------------------------ */
@@ -1243,17 +1255,8 @@ static int mfsk16_table(void)
         }
         Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
 
-        memset(&res, 0, sizeof(res));
         const int ok = Bench_Mfsk16Decode(x, n, got, sizeof(got), &res);
-        int err = 0;
-        if (!ok) err = (int)len;
-        else
-        {
-            const size_t glen = strlen(got);
-            for (size_t k = 0; k < len; k++)
-                if (k >= glen || got[k] != msg[k]) err++;
-            for (size_t k = len; k < glen; k++) err++;
-        }
+        const int err = exact_char_errors(msg, got, ok);
         const double cer = 100.0 * (double)err / (double)len;
         printf("%-16s %6.1f %4d/%-3zu %8u %5.2f%% %6u %s\n", c->name, cer, err, len,
                res.symbols, res.symbols ? 100.0 * (double)res.tones_ok / (double)res.symbols : 0.0,
@@ -1369,16 +1372,8 @@ static int olivia_table(void)
         }
         Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
 
-        memset(&res, 0, sizeof(res));
         const int ok = Bench_OliviaDecode(x, n, got, sizeof(got), &res);
-        int err = 0;
-        if (!ok) err = (int)len;
-        else
-        {
-            const size_t glen = strlen(got);
-            for (size_t k = 0; k < len; k++) if (k >= glen || got[k] != msg[k]) err++;
-            for (size_t k = len; k < glen; k++) err++;
-        }
+        const int err = exact_char_errors(msg, got, ok);
         const double cer = 100.0 * (double)err / (double)len;
         printf("%-16s %6.1f %4d/%-3zu %8u %5.2f%% %s\n", c->name, cer, err, len, res.symbols,
                res.symbols ? 100.0 * (double)res.tones_ok / (double)res.symbols : 0.0,

@@ -11,13 +11,11 @@
 
 typedef struct
 {
-    double  period_samples;   // the symbol the receiver fitted, in samples at 12 kHz
     unsigned symbols;         // symbols read
     unsigned tones_ok;        // symbols whose winning tone held more than half the energy
     unsigned bits;            // coded bits read
     unsigned viterbi_bits;    // decoded information bits
     unsigned characters;      // Varicode characters framed out of them
-    int     phase;            // the symbol phase the receiver locked to
 } mfsk16_result_t;
 
 // Text to audio at 12 kHz: 16 tones 15.625 Hz apart from 1 kHz up, 15.625 Bd, one tone per symbol.

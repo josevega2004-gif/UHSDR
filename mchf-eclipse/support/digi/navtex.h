@@ -7,17 +7,12 @@
 
 typedef struct
 {
-    int      bit_phase;        // sample offset of the first bit the receiver fitted
-    double   period_samples;   // its bit length, in samples: 120.0 is 100 Bd at 12 kHz
-    int      group_offset;     // which of the seven bits starts a character
+    double   period_samples;   // the bit length the receiver fitted, in samples: 120.0 is 100 Bd
     double   valid_fraction;   // share of the words at that alignment that are 4-of-7
     int      phasing_run;      // how many alternating phasing characters it found
     int      reversed;         // the take carries the bits in the order the table is not written in
-    unsigned characters;       // characters the receiver tried to read
-    unsigned accepted;         // pairs that combined to a word within 3 bits of a valid one
     unsigned repaired;         // characters whose two copies did not agree
     unsigned both_bad;         // characters with neither copy inside the correction radius
-    unsigned bits;             // seven bit words the alignment produced
 } navtex_result_t;
 
 /* The bit order a take is generated in. SITOR sends each seven bit character least significant bit

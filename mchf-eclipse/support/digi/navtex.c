@@ -28,7 +28,6 @@
  * the phasing alone, the second prices a detection that guessed wrong instead of assuming it is free.
  */
 #include <math.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,7 +37,6 @@
 #define NV_RATE      12000.0
 #define NV_SPACE_HZ   1615.0      // '0', the low tone
 #define NV_MARK_HZ    1785.0      // '1', the high tone: SITOR makes the high tone the mark
-#define NV_BAUD        100.0
 #define NV_BIT_SAMPLES 120        // exactly one bit at 12 kHz
 #define NV_PHASING      20        // phasing characters before the text, alternating SIA and SIB
 
@@ -340,8 +338,6 @@ int Bench_NavtexDecode(const float32_t* x, size_t n, char* out, size_t out_sz, n
     }
     res->valid_fraction = best_frac;
     res->period_samples = best_per;
-    res->bit_phase = (int)best_start;
-    res->group_offset = best_offset;
 
     // the words at that alignment, then the phasing run that says which bit order the take carries
     int ng = 0;
@@ -405,9 +401,7 @@ int Bench_NavtexDecode(const float32_t* x, size_t n, char* out, size_t out_sz, n
                 }
                 ok = best_dist <= 3;
             }
-            res->characters++;
             if (!ok) { res->both_bad++; continue; }   // neither copy survived
-            res->accepted++;
             if (a != b) res->repaired++;
             if (best == NV_LTRS) { letters = 1; continue; }
             if (best == NV_FIGS) { letters = 0; continue; }
@@ -419,6 +413,5 @@ int Bench_NavtexDecode(const float32_t* x, size_t n, char* out, size_t out_sz, n
     }
     out[used] = '\0';
     free(grp);
-    res->bits = ng * 7;
     return 1;
 }

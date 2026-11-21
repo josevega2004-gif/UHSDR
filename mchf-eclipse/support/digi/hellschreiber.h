@@ -15,7 +15,6 @@ typedef struct
     double pixel_samples;    // its pixel length, in samples: 97.96 is 122.5 Bd at 12 kHz
     int    column_phase;     // which column of the six the raster starts on
     double gap_share;        // share of the gap columns that came out blank: 1.0 is a found raster
-    unsigned pixels;         // pixels read
 } hell_result_t;
 
 // text -> 12 kHz on/off keying at tone_hz, 122.5 Bd, one pixel per 1/122.5 s; truth gets the picture
