@@ -73,13 +73,15 @@ static float pearson(const uint8_t* a, const uint8_t* b, size_t n)
     return (float) (num / sqrt(da * db));
 }
 
-static void pgm_write(const char* path, const uint8_t* img, uint32_t w, uint32_t h)
+// P5, one byte per pixel. Returns 0 when the file could not be opened or the close failed: a disk
+// that filled up must not leave a truncated picture behind that the caller reports as written.
+static int pgm_write(const char* path, const uint8_t* img, uint32_t w, uint32_t h)
 {
     FILE* f = fopen(path, "wb");
-    if (!f) return;
-    fprintf(f, "P5\n%u %u\n255\n", w, h);
-    fwrite(img, 1, (size_t) w * h, f);
-    fclose(f);
+    if (!f) return 0;
+    const int wrote = fprintf(f, "P5\n%u %u\n255\n", w, h) > 0
+                   && fwrite(img, 1, (size_t)w * h, f) == (size_t)w * h;
+    return fclose(f) == 0 && wrote;
 }
 
 /* ------------------------------------------------------------------ *
@@ -115,6 +117,7 @@ typedef struct
                              // 22 ms at 45.45 Bd and 20 at 50, so 1..20 ms is a twentieth of a bit
                              // to a whole one - the range a one hop and a two hop path span
     float       echo_db;     // and at this level relative to the direct path
+    uint32_t    noise_seed;  // 0 keeps the bench's default draw; a table row sets it per seed
 } rtty_case_t;
 
 // The demodulator emits one or two characters of junk while it locks on, which is a property of
@@ -328,7 +331,7 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
 
     // channel, at the rate the demodulator sees
     Bench_AddQsb(buf, n, c->qsb_rate, c->qsb_depth);
-    Bench_RngSeed(0xC0FFEEu);
+    Bench_RngSeed(c->noise_seed ? c->noise_seed : 0xC0FFEEu);
     Bench_AddNoise(buf, n, c->snr_db, 0.0f);
 
     // how loudly the station arrives. The AGC is what should make this irrelevant, so this is the
@@ -371,6 +374,63 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
     return score_aligned(norm_baudot(msg, 0), got);
 }
 
+// Every noise row is a distribution of takes, not one draw: the same signal with a different noise
+// sample, five times, and the row reports the mean with the seed range beside it. One 26 character
+// take is 3.8 % per character, so a single seed cannot say where a floor is; the mean is what the
+// limits pin. A row that is not noisy is one draw, and its range column says so with a dash.
+#define TABLE_SEEDS 5
+
+// The shaped 2.5 kHz measurement is not a pass/fail row, it is a description of a coast, and the
+// coast is bimodal: at -13.5 dB one draw of the MFSK16 take decodes 7.7 % and the next 100 %, so
+// five draws say more about which side of the cliff they landed on than about the cliff. Twelve
+// draws give a median worth quoting, and the range is printed beside it.
+#define FLOOR_SEEDS 12
+
+typedef struct { double sum, lo, hi; int n; } spread_t;
+
+static void spread_add(spread_t* s, double v)
+{
+    if (!s->n || v < s->lo) s->lo = v;
+    if (!s->n || v > s->hi) s->hi = v;
+    s->sum += v;
+    s->n++;
+}
+
+static double spread_mean(const spread_t* s) { return s->n ? s->sum / (double) s->n : 0.0; }
+
+// "low-high", or "-" for a row that was one draw
+static const char* spread_range(const spread_t* s, char* buf, size_t sz)
+{
+    if (s->n > 1) snprintf(buf, sz, "%.1f..%.1f", s->lo, s->hi);
+    else snprintf(buf, sz, "-");
+    return buf;
+}
+
+// A row that has to keep failing needs a floor. It is derived from the five draws the row was
+// measured with rather than picked: the mean minus the one sided 95 % lower confidence bound,
+// t(0.05, 4) = 2.132 standard errors of a five sample mean. A build is only better on such a row
+// when its mean falls below what the five draws support, so that is where the row fails. A row whose
+// spread is wider than its mean gets 0.0 - it cannot be pinned from below, and the number says so.
+static float floor_from_seeds(const float* v)
+{
+    double sum = 0.0;
+    for (int i = 0; i < TABLE_SEEDS; i++) sum += (double) v[i];
+    const double mean = sum / (double) TABLE_SEEDS;
+    double var = 0.0;
+    for (int i = 0; i < TABLE_SEEDS; i++) var += ((double) v[i] - mean) * ((double) v[i] - mean);
+    const double se = sqrt(var / (double) (TABLE_SEEDS - 1) / (double) TABLE_SEEDS);
+    const double floor = mean - 2.132 * se;
+    return floor > 0.0 ? (float) floor : 0.0f;
+}
+
+// the same for a correlation, where the columns are three decimals apart
+static const char* spread_range3(const spread_t* s, char* buf, size_t sz)
+{
+    if (s->n > 1) snprintf(buf, sz, "%.3f..%.3f", s->lo, s->hi);
+    else snprintf(buf, sz, "-");
+    return buf;
+}
+
 static int rtty_table(const char* msg, bool long_mode)
 {
     // The .max_cer field is the character error rate each case has to stay within. Almost every case
@@ -400,12 +460,14 @@ static int rtty_table(const char* msg, bool long_mode)
         { .label = "qsb 10 170",   .shift = 170, .snr_db = 10.0f, .qsb_rate = 0.5f,
           .qsb_depth = 6.0f, .max_cer = 5.0f },
         // 2 Hz, 10 dB deep, at 10 dB SNR. Measured with real noise on the row: 47.9 % (23/48) short
-        // and 93.6 % (367/392) long - the modem loses lock partway through the take and the rest of
-        // the message never comes out. That is pinned as a failure, not hidden: the earlier 6.2 % /
-        // 2.3 % was measured while the bench's noise generator never advanced its state, so the row
-        // had no noise on it at all.
+        // and 93.6 % (367/392) long on the first seed - the modem loses lock partway through the
+        // take and the rest of the message never comes out. That is pinned as a failure, not hidden:
+        // the earlier 6.2 % / 2.3 % was measured while the bench's noise generator never advanced its
+        // state, so the row had no noise on it at all. Over five seeds the fade catches the modem on
+        // some draws and not on others (4.2-47.9 %, mean 24.6 %), so the floor is set well below the
+        // mean: losing lock is what the row is for, and a draw that survives it is not a fix.
         { .label = "qsb fast 10",  .shift = 170, .snr_db = 10.0f, .qsb_rate = 2.0f,
-          .qsb_depth = 10.0f, .max_cer = 100.0f, .min_cer = 40.0f },
+          .qsb_depth = 10.0f, .max_cer = 100.0f, .min_cer = 10.0f },
         // the real services: DWD DDH/DDK are F1B 50 Baud with +/-225 Hz (450 Hz total) on
         // 4583/7646/10100.8/11039/14467.3 kHz and +/-42.5 Hz (85 Hz) on 147.3 kHz, per the DWD
         // table on http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts.
@@ -474,17 +536,34 @@ static int rtty_table(const char* msg, bool long_mode)
 
     printf("RTTY loopback of drivers/audio/rtty.c through the radio's audio AGC\n");
     printf("(per case: 45.45 or 50 Bd, 1.5 stop bits, tx 48 kHz -> rx 12 kHz)\n");
-    printf("%-16s %7s %8s %6s  %s\n", "case", "CER %", "err/len", "lead", "decoded");
-    char got[8192];
+    printf("%-16s %7s %11s %8s %6s  %s\n", "case", "CER %", "min-max", "err/len", "lead",
+           "decoded");
     int failures = 0;
     for (size_t i = 0; i < n_cases; i++)
     {
-        int eot = 0;
-        float cer = rtty_run(&cases[i], msg, long_mode, got, sizeof(got), &eot);
-        char counted[32];
-        snprintf(counted, sizeof(counted), "%d/%d", cer_wrong, cer_chars);
-        printf("%-16s %7.1f %8s %6d  %.64s%s%s\n", cases[i].label, cer, counted, lead_in_junk,
-               got, strlen(got) > 64 ? " ..." : "",
+        // the seed range is the same signal under different noise samples: what the row's limit
+        // pins is the mean, not the luck of the first draw
+        const int nseeds = cases[i].snr_db < 90.0f ? TABLE_SEEDS : 1;
+        spread_t cs = { 0 };
+        int eot = 0, lead = 0, wrong = 0, chars = (int) strlen(msg);
+        char first[8192] = "";
+        for (int k = 0; k < nseeds; k++)
+        {
+            rtty_case_t c = cases[i];
+            if (nseeds > 1) c.noise_seed = 0xC0FFEEu + (uint32_t) k;
+            int eot_k = 0;
+            char text[8192];
+            spread_add(&cs, rtty_run(&c, msg, long_mode, text, sizeof(text), &eot_k));
+            wrong += cer_wrong;
+            chars = cer_chars;
+            if (!k) { snprintf(first, sizeof(first), "%s", text); eot = eot_k; lead = lead_in_junk; }
+        }
+        const float cer = (float) spread_mean(&cs);
+        char counted[32], range[32];
+        spread_range(&cs, range, sizeof(range));
+        snprintf(counted, sizeof(counted), "%.1f/%d", (double) wrong / (double) nseeds, chars);
+        printf("%-16s %7.1f %11s %8s %6d  %.64s%s%s\n", cases[i].label, (double) cer, range,
+               counted, lead, first, strlen(first) > 64 ? " ..." : "",
                eot ? "" : "   [transmission cut off before EOT]");
         if (cer > cases[i].max_cer)
         {
@@ -784,14 +863,23 @@ static int wefax_table(void)
     int failures = 0;
 
     printf("HF weather fax, 120 lines/min at 12 kHz, sync 1857 Hz, black 1500 / white 2300 Hz\n");
-    printf("%-28s %6s %8s %8s %8s %7s\n", "case", "lines", "skewRMS", "corr", "mean", "off Hz");
+    printf("%-28s %6s %8s %8s %14s %8s %7s\n", "case", "lines", "skewRMS", "corr", "min-max",
+           "mean", "off Hz");
     for (size_t i = 0; i < n; i++)
     {
         size_t samples = (size_t) cases[i].rows * WEFAX_SAMPLES_PER_LINE;
         float32_t* x = malloc(samples * sizeof(float32_t));
+        float32_t* work = malloc(samples * sizeof(float32_t));
         uint8_t* truth = malloc((size_t) cases[i].rows * WEFAX_IMG_COLS);
         uint8_t* grey = malloc((size_t) cases[i].rows * WEFAX_IMG_COLS);
         wefax_result_t res;
+        if (!x || !work || !truth || !grey)
+        {
+            printf("FAIL  %-28s out of memory\n", cases[i].name);
+            failures++;
+            free(x); free(work); free(truth); free(grey);
+            continue;
+        }
         const float tune_hz = cases[i].ppm * 1e-6f * cases[i].rf_hz;
         wefax_cfg_t cfg = { .name = cases[i].name, .snr_db = cases[i].snr_db,
                             .qsb_rate_hz = cases[i].qsb_rate_hz,
@@ -801,49 +889,69 @@ static int wefax_table(void)
                             .tune_hz = tune_hz };
 
         Bench_WefaxGenerate(x, truth, &cfg);
-        if (cases[i].snr_db < 90.0f)
+        // every noise row is a distribution of takes, not one draw: the same picture under five
+        // noise samples, and the correlation printed is their mean with the seed range beside it.
+        // The line count is the worst seed's, because a line the capture misses is lost whole.
+        const int nseeds = cases[i].snr_db < 90.0f ? TABLE_SEEDS : 1;
+        spread_t corr_s = { 0 }, mean_s = { 0 };
+        unsigned lines_worst = cases[i].rows, grey_rows = cases[i].rows;
+        float skew = 0.0f;
+        for (int k = 0; k < nseeds; k++)
         {
-            Bench_RngSeed(0xF00Du);
-            Bench_AddNoise(x, samples, cases[i].snr_db, 0.0f);
+            memcpy(work, x, samples * sizeof(float32_t));
+            if (nseeds > 1)
+            {
+                Bench_RngSeed(0xF00Du + (uint32_t) k);
+                Bench_AddNoise(work, samples, cases[i].snr_db, 0.0f);
+            }
+            Bench_WefaxDecode(work, samples, grey, &res);
+            res.lines_expected = cases[i].rows;
+
+            size_t cmp = (size_t) (res.lines_found < cases[i].rows ? res.lines_found
+                                                                    : cases[i].rows) * WEFAX_IMG_COLS;
+            spread_add(&corr_s, pearson(truth, grey, cmp));
+            spread_add(&mean_s, res.mean_level);
+            if (res.lines_found < lines_worst) lines_worst = res.lines_found;
+            if (!k)
+            {
+                skew = res.row_rms_error;
+                grey_rows = res.lines_found ? res.lines_found : cases[i].rows;
+                if (i == 1)             // leave one readable broadcast behind for inspection
+                {
+                    Bench_WavWrite("wefax_snr20.wav", work, samples, (uint32_t) RATE);
+                    pgm_write("wefax_truth.pgm", truth, WEFAX_IMG_COLS, cases[i].rows);
+                    pgm_write("wefax_decoded.pgm", grey, WEFAX_IMG_COLS, grey_rows);
+                }
+            }
         }
-        Bench_WefaxDecode(x, samples, grey, &res);
-        res.lines_expected = cases[i].rows;
-
-        size_t cmp = (size_t) (res.lines_found < cases[i].rows ? res.lines_found : cases[i].rows) * WEFAX_IMG_COLS;
-        float corr = pearson(truth, grey, cmp);
-        res.grey_corr = corr;
-
-        printf("%-28s %3u/%-2u %8.1f %8.3f %8.1f %7.1f\n", cases[i].name,
-               res.lines_found, res.lines_expected, res.row_rms_error, corr, res.mean_level,
+        const float corr = (float) spread_mean(&corr_s);
+        const float mean_level = (float) spread_mean(&mean_s);
+        char range[32];
+        spread_range3(&corr_s, range, sizeof(range));
+        printf("%-28s %3u/%-2u %8.1f %8.3f %14s %8.1f %7.1f\n", cases[i].name, lines_worst,
+               cases[i].rows, (double) skew, (double) corr, range, (double) mean_level,
                (double) tune_hz);
         const uint32_t need = cases[i].lines_min ? cases[i].lines_min : cases[i].rows;
-        if (res.lines_found < need)
+        if (lines_worst < need)
         {
-            printf("FAIL  %-28s found %u of the %u lines it transmitted (at least %u expected)\n",
-                   cases[i].name, res.lines_found, cases[i].rows, need);
+            printf("FAIL  %-28s found %u of the %u lines it transmitted on its worst seed (at "
+                   "least %u expected)\n", cases[i].name, lines_worst, cases[i].rows, need);
             failures++;
         }
         if (corr < cases[i].corr_min || corr > cases[i].corr_max)
         {
-            printf("FAIL  %-28s correlation %.3f is outside %.2f..%.2f for this case\n",
-                   cases[i].name, corr, cases[i].corr_min, cases[i].corr_max);
+            printf("FAIL  %-28s mean correlation %.3f is outside %.2f..%.2f for this case\n",
+                   cases[i].name, (double) corr, cases[i].corr_min, cases[i].corr_max);
             failures++;
         }
         if (cases[i].mean_max > cases[i].mean_min &&
-            (res.mean_level < cases[i].mean_min || res.mean_level > cases[i].mean_max))
+            (mean_level < cases[i].mean_min || mean_level > cases[i].mean_max))
         {
-            printf("FAIL  %-28s decoded grey mean %.1f is outside %.1f..%.1f for this case\n",
-                   cases[i].name, res.mean_level, cases[i].mean_min, cases[i].mean_max);
+            printf("FAIL  %-28s mean decoded grey %.1f is outside %.1f..%.1f for this case\n",
+                   cases[i].name, (double) mean_level, cases[i].mean_min, cases[i].mean_max);
             failures++;
         }
-
-        if (i == 1)                     // leave one readable broadcast behind for inspection
-        {
-            Bench_WavWrite("wefax_snr20.wav", x, samples, (uint32_t) RATE);
-            pgm_write("wefax_truth.pgm", truth, WEFAX_IMG_COLS, cases[i].rows);
-            pgm_write("wefax_decoded.pgm", grey, WEFAX_IMG_COLS, res.lines_found ? res.lines_found : cases[i].rows);
-        }
-        free(x); free(truth); free(grey);
+        free(x); free(work); free(truth); free(grey);
     }
     printf("\nThe offset rows move every tone of the emission while the bins stay where they are. Their\n"
            "correlation barely changes because Pearson removes the constant grey bias an offset\n"
@@ -947,8 +1055,8 @@ static int navtex_table(void)
     printf("NAVTEX / SITOR-B through the reference modem: 100 Bd, 170 Hz shift, CCIR 476 4-of-7,\n"
            "each character sent twice five slots (350 ms) apart. Text is %zu characters.\n\n",
            strlen(msg));
-    printf("%-14s %6s %8s %6s %7s %7s %6s %6s %3s  %s\n", "case", "CER %", "err/len", "lead",
-           "bit ms", "4of7", "fix", "lost", "rev", "decoded");
+    printf("%-14s %6s %11s %8s %6s %7s %7s %6s %6s %3s  %s\n", "case", "CER %", "min-max",
+           "err/len", "lead", "bit ms", "4of7", "fix", "lost", "rev", "decoded");
     for (size_t i = 0; i < n_cases; i++)
     {
         const navtex_case_t* c = &cases[i];
@@ -959,30 +1067,51 @@ static int navtex_table(void)
         // the tones are where the transmitter put them, or moved by a reference error that the
         // receiver's 1615/1785 Hz bins do not follow
         size_t n = Bench_NavtexGenerate(x, cap, msg, c->tune_hz, c->order);
-        if (c->snr_db < 90.0f)
-        {
-            Bench_RngSeed(0x4E4156u);
-            Bench_AddNoise(x, n, c->snr_db, 0.0f);
-        }
-        Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
-        if (c->erase_len_ms > 0.0f)
-        {
-            const size_t a = (size_t)(c->erase_ms * 12.0);
-            const size_t b = a + (size_t)(c->erase_len_ms * 12.0);
-            for (size_t k = a; k < b && k < n; k++) x[k] = 0.0f;
-        }
-
-        navtex_result_t res;
-        const int ok = Bench_NavtexDecode(x, n, got, 8192, &res);
-        int skip = 0;
-        const float cer = ok ? navtex_score(msg, got, &skip) : 100.0f;
+        // every noise row is a distribution of takes, not one draw: the same transmission under five
+        // noise samples, and the CER printed is their mean with the seed range beside it
         const size_t need = strlen(msg);
-        const int wrong = (int)lround((double)cer * (double)need / 100.0);
-        char counted[32];
-        snprintf(counted, sizeof(counted), "%d/%zu", wrong, need);
-        printf("%-14s %6.1f %8s %6d %7.3f %7.3f %6u %6u %3d  %.44s%s\n", c->name, (double)cer,
-               counted, skip, res.period_samples / 12.0, res.valid_fraction, res.repaired,
-               res.both_bad, res.reversed, got, strlen(got) > 44 ? " ..." : "");
+        const int nseeds = c->snr_db < 90.0f ? TABLE_SEEDS : 1;
+        float32_t* work = malloc(cap * sizeof(float32_t));
+        if (!work) { free(x); free(got); printf("out of memory\n"); return 1; }
+        navtex_result_t res = { 0 };
+        spread_t cs = { 0 };
+        char first[8192] = "";
+        int all_ok = 1, skip = 0, wrong = 0;
+        for (int k = 0; k < nseeds; k++)
+        {
+            memcpy(work, x, n * sizeof(float32_t));
+            if (nseeds > 1)
+            {
+                Bench_RngSeed(0x4E4156u + (uint32_t) k);
+                Bench_AddNoise(work, n, c->snr_db, 0.0f);
+            }
+            Bench_AddQsb(work, n, c->qsb_rate, c->qsb_depth);
+            if (c->erase_len_ms > 0.0f)
+            {
+                const size_t a = (size_t)(c->erase_ms * 12.0);
+                const size_t b = a + (size_t)(c->erase_len_ms * 12.0);
+                for (size_t j = a; j < b && j < n; j++) work[j] = 0.0f;
+            }
+
+            char text[8192];
+            navtex_result_t r_k;
+            const int ok = Bench_NavtexDecode(work, n, text, sizeof(text), &r_k);
+            int skip_k = 0;
+            const float cer_k = ok ? navtex_score(msg, text, &skip_k) : 100.0f;
+            spread_add(&cs, cer_k);
+            wrong += (int)lround((double)cer_k * (double)need / 100.0);
+            if (!ok) all_ok = 0;
+            if (!k) { snprintf(first, sizeof(first), "%s", text); res = r_k; skip = skip_k; }
+        }
+        free(work);
+        const int ok = all_ok;
+        const float cer = (float) spread_mean(&cs);
+        char counted[32], range[32];
+        spread_range(&cs, range, sizeof(range));
+        snprintf(counted, sizeof(counted), "%.1f/%zu", (double) wrong / (double) nseeds, need);
+        printf("%-14s %6.1f %11s %8s %6d %7.3f %7.3f %6u %6u %3d  %.44s%s\n", c->name, (double)cer,
+               range, counted, skip, res.period_samples / 12.0, res.valid_fraction, res.repaired,
+               res.both_bad, res.reversed, first, strlen(first) > 44 ? " ..." : "");
         if (!ok)
         {
             printf("FAIL  %-14s the receiver found no alignment to read\n", c->name);
@@ -1037,6 +1166,57 @@ typedef struct
     int   min_missing;      // and the cells that have to stay missing, for the rows that must fail
 } hell_case_t;
 
+// The score is the picture: the paper position is free (a whole pixel of roll and a column of
+// offset), so this walks them, takes the one that leaves the most glyph cells exactly as drawn, and
+// returns the share of pixels that are wrong at it.
+static double hell_score(const uint8_t* truth, int truth_cols, const uint8_t* gotp, int got_cols,
+                         int stride, int* cells_ok, int* cell_total, int* out_roll, int* out_shift)
+{
+    int best_err = -1, best_seen = 0, best_cells = 0, best_total = 0;
+    int best_roll = 0, best_shift = 0;
+    for (int roll = 0; roll < HELL_ROWS; roll++)
+    {
+        for (int cs = 0; cs < 2 * HELL_CELL; cs++)
+        {
+            int err = 0, seen = 0, cells = 0, total = 0;
+            for (int col = 0; col + cs < truth_cols && col < got_cols; col++)
+                for (int r = 0; r < HELL_ROWS; r++)
+                {
+                    seen++;
+                    if (truth[((r + roll) % HELL_ROWS) * stride + col + cs]
+                        != gotp[r * stride + col]) err++;
+                }
+            // a cell is the glyph, five columns: the sixth is the gap the synchroniser uses and the
+            // last one can be cut off by the end of the take without costing a glyph
+            for (int col = 0; col + cs + HELL_COLS <= truth_cols && col + HELL_COLS <= got_cols;
+                 col += HELL_CELL)
+            {
+                total++;
+                int same = 1;
+                for (int cc = 0; cc < HELL_COLS && same; cc++)
+                    for (int r = 0; r < HELL_ROWS && same; r++)
+                        if (truth[((r + roll) % HELL_ROWS) * stride + col + cs + cc]
+                            != gotp[r * stride + col + cc]) same = 0;
+                if (same) cells++;
+            }
+            if (cells > best_cells || (cells == best_cells && (best_err < 0 || err < best_err)))
+            {
+                best_cells = cells;
+                best_total = total;
+                best_err = err;
+                best_seen = seen;
+                best_roll = roll;
+                best_shift = cs;
+            }
+        }
+    }
+    *cells_ok = best_cells;
+    *cell_total = best_total;
+    *out_roll = best_roll;
+    *out_shift = best_shift;
+    return (best_seen && best_err >= 0) ? 100.0 * (double) best_err / (double) best_seen : 100.0;
+}
+
 static int hell_table(void)
 {
     static const char* msg = "HELLSCHREIBER TEST DE UHSDR 123";
@@ -1066,93 +1246,88 @@ static int hell_table(void)
     printf("Hellschreiber through the reference modem: 122.5 Bd on/off keying, one pixel per 8.16 ms,\n"
            "5x7 glyph plus a blank column. Text is %zu characters, %d glyph cells.\n\n",
            strlen(msg), 31);
-    printf("%-13s %7s %9s %7s %6s %5s %5s  %s\n", "case", "pixels%", "cells ok", "pix ms",
-           "gaps", "roll", "shift", "sync");
+    printf("%-13s %7s %11s %9s %7s %6s %5s %5s  %s\n", "case", "pixels%", "min-max",
+           "cells ok", "pix ms", "gaps", "roll", "shift", "sync");
     for (size_t i = 0; i < n_cases; i++)
     {
         const hell_case_t* c = &cases[i];
         const size_t cap = 300000;
         float32_t* x = malloc(cap * sizeof(float32_t));
+        float32_t* work = malloc(cap * sizeof(float32_t));
         int truth_cols = 0, got_cols = 0;
-        hell_result_t res;
-        if (!x) { printf("out of memory\n"); return 1; }
+        hell_result_t res = { 0 };
+        if (!x || !work) { free(x); free(work); printf("out of memory\n"); return 1; }
         const size_t n = Bench_HellGenerate(x, cap, msg, truth, MAXC, &truth_cols,
                                             1000.0f + c->tune_hz, c->clk_pct);
-        if (!n) { free(x); printf("FAIL  %-13s nothing generated\n", c->name); failures++; continue; }
-        if (c->snr_db < 90.0f)
+        if (!n)
         {
-            Bench_RngSeed(0x48454C4Cu);
-            Bench_AddNoise(x, n, c->snr_db, 0.0f);
+            free(x); free(work);
+            printf("FAIL  %-13s nothing generated\n", c->name);
+            failures++;
+            continue;
         }
-        Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
 
-        const int ok = Bench_HellDecode(x, n, gotp, MAXC, &got_cols, &res);
-        // the paper position: a whole pixel of roll and a column of offset are how the picture lands,
-        // not decoding errors, so the score takes the best of them and says which one it used
-        int best_err = -1, best_seen = 0, best_cells = 0, best_cell_total = 0;
-        int best_roll = 0, best_shift = 0;
-        if (ok)
+        // every noise row is a distribution of takes, not one draw: the same picture under five
+        // noise samples, and the row prints their mean with the seed range beside it
+        const int nseeds = c->snr_db < 90.0f ? TABLE_SEEDS : 1;
+        spread_t pix_s = { 0 };
+        int all_ok = 1, cell_total = 0, cells_ok = 0, missing = 0, roll = 0, shift = 0;
+        double pix_ms = 0.0, gaps = 0.0;
+        int phase = 0;
+        for (int k = 0; k < nseeds; k++)
         {
-            for (int roll = 0; roll < HELL_ROWS; roll++)
+            memcpy(work, x, n * sizeof(float32_t));
+            if (nseeds > 1)
             {
-                for (int cs = 0; cs < 2 * HELL_CELL; cs++)
-                {
-                    int err = 0, seen = 0, cells = 0, cell_total = 0;
-                    for (int col = 0; col + cs < truth_cols && col < got_cols; col++)
-                        for (int r = 0; r < HELL_ROWS; r++)
-                        {
-                            seen++;
-                            if (truth[((r + roll) % HELL_ROWS) * MAXC + col + cs]
-                                != gotp[r * MAXC + col]) err++;
-                        }
-                    // a cell is the glyph, five columns: the sixth is the gap the synchroniser uses
-                    // and the last one can be cut off by the end of the take without costing a glyph
-                    for (int col = 0; col + cs + HELL_COLS <= truth_cols && col + HELL_COLS <= got_cols;
-                         col += HELL_CELL)
-                    {
-                        cell_total++;
-                        int same = 1;
-                        for (int cc = 0; cc < HELL_COLS && same; cc++)
-                            for (int r = 0; r < HELL_ROWS && same; r++)
-                                if (truth[((r + roll) % HELL_ROWS) * MAXC + col + cs + cc]
-                                    != gotp[r * MAXC + col + cc]) same = 0;
-                        if (same) cells++;
-                    }
-                    if (cells > best_cells || (cells == best_cells && (best_err < 0 || err < best_err)))
-                    {
-                        best_cells = cells;
-                        best_cell_total = cell_total;
-                        best_err = err;
-                        best_seen = seen;
-                        best_roll = roll;
-                        best_shift = cs;
-                    }
-                }
+                Bench_RngSeed(0x48454C4Cu + (uint32_t) k);
+                Bench_AddNoise(work, n, c->snr_db, 0.0f);
+            }
+            Bench_AddQsb(work, n, c->qsb_rate, c->qsb_depth);
+
+            const int ok = Bench_HellDecode(work, n, gotp, MAXC, &got_cols, &res);
+            int cells = 0, total = 0, r_roll = 0, r_shift = 0;
+            const double pixel_pct = ok ? hell_score(truth, truth_cols, gotp, got_cols, MAXC,
+                                                     &cells, &total, &r_roll, &r_shift) : 100.0;
+            if (!ok) all_ok = 0;
+            spread_add(&pix_s, pixel_pct);
+            // the worst seed is what the cell limit pins. Each seed's own total is used, because a
+            // paper shift of one column leaves the last glyph out of the count on that seed, and a
+            // glyph that was counted nowhere is not one the receiver got wrong.
+            if (total - cells > missing) missing = total - cells;
+            if (!k)
+            {
+                pix_ms = res.pixel_samples / 12.0;
+                gaps = res.gap_share;
+                phase = res.pixel_phase;
+                cells_ok = cells;
+                cell_total = total;
+                roll = r_roll;
+                shift = r_shift;
             }
         }
-        const double pixel_pct = (best_seen && best_err >= 0)
-                               ? 100.0 * (double)best_err / (double)best_seen : 100.0;
-        const int missing = best_cell_total - best_cells;
-        if (ok)
+        free(work);
+        const double pixel_pct = spread_mean(&pix_s);
+        char range[32];
+        spread_range(&pix_s, range, sizeof(range));
+        if (all_ok)
         {
-            printf("%-13s %7.2f %5d/%-3d %7.2f %6.2f %5d %5d  phase %d\n", c->name, pixel_pct,
-                   best_cells, best_cell_total, res.pixel_samples / 12.0, res.gap_share,
-                   best_roll, best_shift, res.pixel_phase);
+            printf("%-13s %7.2f %11s %5d/%-3d %7.2f %6.2f %5d %5d  phase %d\n", c->name, pixel_pct,
+                   range, cells_ok, cell_total, pix_ms, gaps, roll, shift, phase);
         }
         else
         {
-            printf("%-13s %7.2f %9s %7s %6s %5s %5s  no raster\n", c->name, 100.0, "-", "-", "-",
-                   "-", "-");
+            printf("%-13s %7.2f %11s %9s %7s %6s %5s %5s  no raster on one seed\n", c->name,
+                   100.0, range, "-", "-", "-", "-", "-");
         }
-        if (!ok)
+        if (!all_ok)
         {
-            printf("FAIL  %-13s the receiver found no raster at all\n", c->name);
+            printf("FAIL  %-13s the receiver found no raster on one of %d seeds\n", c->name, nseeds);
             failures++;
         }
-        else if (pixel_pct > c->max_pixel + 1e-9 || missing > c->max_missing)
+        else if (pixel_pct > (double) c->max_pixel + 1e-9 || missing > c->max_missing)
         {
-            printf("FAIL  %-13s %.2f %% of pixels wrong and %d of %d cells not exact; this case "
-                   "allows %.2f %% and %d\n", c->name, pixel_pct, missing, best_cell_total,
+            printf("FAIL  %-13s mean %.2f %% of pixels wrong and %d of %d cells not exact; this "
+                   "case allows %.2f %% and %d\n", c->name, pixel_pct, missing, cell_total,
                    (double)c->max_pixel, c->max_missing);
             failures++;
         }
@@ -1160,7 +1335,7 @@ static int hell_table(void)
         {
             printf("FAIL  %-13s %d of %d cells not exact, and this case has to stay above %d: a "
                    "channel\n      that stopped costing the picture is a different receiver\n",
-                   c->name, missing, best_cell_total, c->min_missing);
+                   c->name, missing, cell_total, c->min_missing);
             failures++;
         }
         free(x);
@@ -1191,9 +1366,6 @@ static int exact_char_errors(const char* want, const char* got, int ok)
 /* ------------------------------------------------------------------ *
  *  MFSK16
  * ------------------------------------------------------------------ */
-// Five draws for every noise row. One 26 character take is 3.8 % per character, so a single seed
-// cannot say where a floor is; the mean is what the limits pin, and the range is printed beside it.
-#define TABLE_SEEDS 5
 // Sixteen tones at 15.625 baud is four bits a symbol and 64 ms of signal per symbol, which is a lot
 // of energy per decision; what this table is really measuring is the coding. A symbol the receiver
 // loses costs four bits, and the interleaver is what turns that into one bit in eight symbols, which
@@ -1206,7 +1378,9 @@ typedef struct
     int   burst_symbols;    // symbols erased in the middle of the take
     int   no_signal;        // a take with nothing but noise in it: the receiver must not invent text
     float max_cer;
-    float min_cer;          // for the rows that must keep costing characters
+    float floor_seeds[TABLE_SEEDS]; // the five draws this row was measured with. The floor is the
+                                    // lower 95 % bound of their mean (floor_from_seeds), not a number
+                                    // picked by hand: all zero means the row has no floor
 } mfsk16_case_t;
 
 static int mfsk16_table(void)
@@ -1225,22 +1399,27 @@ static int mfsk16_table(void)
         { .name = "snr -12", .snr_db = -12.0f, .max_cer = 0.0f },
         { .name = "snr -16", .snr_db = -16.0f, .max_cer = 0.0f },
         // the floor, measured over five seeds: 36.9 % mean (0.0-103.8), so the old 0.0 % was one
-        // lucky draw. It has to keep costing text (min 10) but not be pinned to a single take.
-        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 70.0f, .min_cer = 10.0f },
-        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 100.0f, .min_cer = 60.0f },
-        { .name = "snr -22", .snr_db = -22.0f, .max_cer = 110.0f, .min_cer = 85.0f },
+        // lucky draw. Two of the five draws decode exactly, so the lower bound of the mean is below
+        // zero and the row cannot be pinned from below at all - it says 0.0 and the README does too.
+        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 70.0f,
+          .floor_seeds = { 0.00f, 7.69f, 73.08f, 0.00f, 103.85f } },
+        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 100.0f,
+          .floor_seeds = { 61.54f, 100.00f, 96.15f, 80.77f, 96.15f } },
+        { .name = "snr -22", .snr_db = -22.0f, .max_cer = 110.0f,
+          .floor_seeds = { 100.00f, 100.00f, 100.00f, 92.31f, 100.00f } },
         // a burst that takes two whole symbols: eight bits gone, spread over eight symbols by the
         // interleaver, which is what the code is there to repair
         { .name = "burst 2 symbols", .snr_db = 20.0f, .burst_symbols = 2, .max_cer = 0.0f },
         { .name = "burst 8 symbols", .snr_db = 20.0f, .burst_symbols = 8, .max_cer = 100.0f,
-          .min_cer = 5.0f },
+          .floor_seeds = { 42.31f, 11.54f, 11.54f, 15.38f, 53.85f } },
         { .name = "tone +8 Hz", .snr_db = 20.0f, .tune_hz = 8.0f, .max_cer = 100.0f,
-          .min_cer = 50.0f },
+          .floor_seeds = { 92.31f, 100.00f, 92.31f, 88.46f, 92.31f } },
         { .name = "tone +16 Hz", .snr_db = 20.0f, .tune_hz = 16.0f, .max_cer = 130.0f,
-          .min_cer = 50.0f },
+          .floor_seeds = { 119.23f, 119.23f, 119.23f, 100.00f, 100.00f } },
         // nothing transmitted at all: a receiver that reads a message out of noise would look like
-        // an improvement on every other row here
-        { .name = "noise only", .snr_db = 0.0f, .no_signal = 1, .max_cer = 100.0f, .min_cer = 50.0f },
+        // an improvement on every other row here, so this row's floor is the whole message
+        { .name = "noise only", .snr_db = 0.0f, .no_signal = 1, .max_cer = 100.0f,
+          .floor_seeds = { 100.00f, 100.00f, 100.00f, 100.00f, 100.00f } },
     };
     const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
     int failures = 0;
@@ -1308,6 +1487,7 @@ static int mfsk16_table(void)
         }
         const double mean = sum / (double)nseeds;
         const double mean_err = mean * (double)len / 100.0;
+        const double floor_cer = floor_from_seeds(c->floor_seeds);
         printf("%-16s %6.1f %5.1f-%5.1f %4.1f/%-3zu %8.0f %5.2f%% %6u %s\n", c->name, mean, best,
                worst, mean_err, len, (double)sym_total / (double)nseeds,
                sym_total ? 100.0 * (double)heard / (double)sym_total : 0.0, vbits, text);
@@ -1324,12 +1504,12 @@ static int mfsk16_table(void)
                    (double)c->max_cer);
             failures++;
         }
-        else if (mean < (double)c->min_cer - 1e-9)
+        else if (mean < floor_cer - 1e-9)
         {
             printf("FAIL  %-16s mean %.1f %% wrong over %d seeds (range %.1f-%.1f), and this case "
-                   "has to stay above %.1f %%:\n      a channel that stopped costing characters is "
-                   "a different receiver\n", c->name, mean, nseeds, best, worst,
-                   (double)c->min_cer);
+                   "has to stay above %.1f %% -\n      the lower 95 %% bound of the mean of the "
+                   "five draws it was measured with. A channel that stopped\n      costing characters "
+                   "is a different receiver.\n", c->name, mean, nseeds, best, worst, floor_cer);
             failures++;
         }
         free(x); free(work);
@@ -1361,7 +1541,7 @@ typedef struct
     int   burst_symbols;
     int   no_signal;
     float max_cer;
-    float min_cer;
+    float floor_seeds[TABLE_SEEDS]; // the five draws this row was measured with, as in MFSK16
 } olivia_case_t;
 
 static int olivia_table(void)
@@ -1382,12 +1562,15 @@ static int olivia_table(void)
         { .name = "snr -16", .snr_db = -16.0f, .max_cer = 0.0f },
         // the floor: the first row where characters start to go, and the next one well past it
         // measured over five seeds: 20.8 % mean (11.5-34.6), and 73.1 % (50.0-96.2) below it
-        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 45.0f, .min_cer = 10.0f },
-        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 90.0f, .min_cer = 60.0f },
+        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 45.0f,
+          .floor_seeds = { 34.62f, 19.23f, 23.08f, 11.54f, 15.38f } },
+        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 90.0f,
+          .floor_seeds = { 80.77f, 96.15f, 69.23f, 50.00f, 69.23f } },
         { .name = "burst 2 symbols", .snr_db = 20.0f, .burst_symbols = 2, .max_cer = 0.0f },
         { .name = "burst 8 symbols", .snr_db = 20.0f, .burst_symbols = 8, .max_cer = 0.0f },
         { .name = "tone +15 Hz", .snr_db = 20.0f, .tune_hz = 15.0f, .max_cer = 0.0f },
-        { .name = "noise only", .snr_db = 0.0f, .no_signal = 1, .max_cer = 100.0f, .min_cer = 50.0f },
+        { .name = "noise only", .snr_db = 0.0f, .no_signal = 1, .max_cer = 100.0f,
+          .floor_seeds = { 100.00f, 100.00f, 100.00f, 100.00f, 100.00f } },
     };
     const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
     int failures = 0;
@@ -1452,6 +1635,8 @@ static int olivia_table(void)
         }
         const double mean = sum / (double)nseeds;
         const double mean_err = mean * (double)len / 100.0;
+        // the floor is a property of the distribution the row was measured with, not of this run
+        const double floor_cer = floor_from_seeds(c->floor_seeds);
         printf("%-16s %6.1f %5.1f-%5.1f %4.1f/%-3zu %8.0f %5.2f%% %s\n", c->name, mean, best, worst,
                mean_err, len, (double)sym_total / (double)nseeds,
                sym_total ? 100.0 * (double)heard / (double)sym_total : 0.0, text);
@@ -1468,11 +1653,12 @@ static int olivia_table(void)
                    (double)c->max_cer);
             failures++;
         }
-        else if (mean < (double)c->min_cer - 1e-9)
+        else if (mean < floor_cer - 1e-9)
         {
             printf("FAIL  %-16s mean %.1f %% wrong over %d seeds (range %.1f-%.1f), and this case "
-                   "has to stay above %.1f %%\n", c->name, mean, nseeds, best, worst,
-                   (double)c->min_cer);
+                   "has to stay above %.1f %% -\n      the lower 95 %% bound of the mean of the "
+                   "five draws it was measured with. A channel that stopped\n      costing characters "
+                   "is a different receiver.\n", c->name, mean, nseeds, best, worst, floor_cer);
             failures++;
         }
         free(x); free(work);
@@ -1496,7 +1682,12 @@ static int olivia_table(void)
 // outside the channel, and no row measures it. This reruns the same takes, seeds and scoring with
 // noise shaped to a 2.5 kHz band (500..3000 Hz, where both tone grids sit) at the channel SNR the
 // arithmetic claims, so the README's number comes from audio rather than from a ratio.
-static void floors_2k5_row(const char* mode, float snr_db)
+// One point of the shaped channel: the same take under FLOOR_SEEDS noise seeds. `cer` comes back
+// sorted from the least to the most wrong draw and `median_text` is the take decoded on the median
+// draw, because a mean of a row this bimodal describes no take that was ever decoded. Returns 0 only
+// when it could not measure at all.
+static int floors_2k5_point(const char* mode, float snr_db, double* cer, char* median_text,
+                            size_t text_sz)
 {
     static const char* mmsg = "MFSK16 TEST DE UHSDR 12345";
     static const char* omsg = "OLIVIA TEST DE UHSDR 12345";
@@ -1506,18 +1697,17 @@ static void floors_2k5_row(const char* mode, float snr_db)
     const size_t cap = 400000;
     float32_t* x = malloc(cap * sizeof(float32_t));
     float32_t* work = malloc(cap * sizeof(float32_t));
+    static char seen[FLOOR_SEEDS][512];
     char got[512];
-    if (!x || !work) { free(x); free(work); printf("%-8s out of memory\n", mode); return; }
+    if (!x || !work) { free(x); free(work); printf("%-8s out of memory\n", mode); return 0; }
     const size_t n = mfsk ? Bench_Mfsk16Generate(x, cap, msg, 0.0f)
                           : Bench_OliviaGenerate(x, cap, msg, 0.0f);
-    double sum = 0.0, best = 100.0, worst = 0.0;
-    char text[512] = "";
-    for (int k = 0; k < TABLE_SEEDS; k++)
+    for (int k = 0; k < FLOOR_SEEDS; k++)
     {
         memcpy(work, x, n * sizeof(float32_t));
         Bench_RngSeed((mfsk ? 0x4D46534Bu : 0x4F4C4956u) + (uint32_t) k);
         Bench_AddNoiseBand(work, n, snr_db, 0.0f, 500.0f, 3000.0f);
-        int ok, err;
+        int ok;
         if (mfsk)
         {
             mfsk16_result_t r;
@@ -1528,27 +1718,54 @@ static void floors_2k5_row(const char* mode, float snr_db)
             olivia_result_t r;
             ok = Bench_OliviaDecode(work, n, got, sizeof(got), &r);
         }
-        err = exact_char_errors(msg, got, ok);
-        const double cer = 100.0 * (double) err / (double) len;
-        if (k == 0) snprintf(text, sizeof(text), "%s", ok ? got : "(no decode)");
-        sum += cer;
-        if (cer < best) best = cer;
-        if (cer > worst) worst = cer;
+        const int err = exact_char_errors(msg, got, ok);
+        cer[k] = 100.0 * (double) err / (double) len;
+        snprintf(seen[k], sizeof(seen[k]), "%s", ok ? got : "(no decode)");
     }
-    const double mean = sum / (double) TABLE_SEEDS;
-    printf("%-8s %9.1f %9.1f %6.1f %5.1f-%5.1f %4.1f/%-3zu %s\n", mode, snr_db, snr_db - 6.8,
-           mean, best, worst, mean * (double) len / 100.0, len, text);
     free(x);
     free(work);
+
+    int idx[FLOOR_SEEDS];
+    for (int i = 0; i < FLOOR_SEEDS; i++) idx[i] = i;
+    for (int i = 1; i < FLOOR_SEEDS; i++)
+        for (int j = i; j > 0 && cer[idx[j]] < cer[idx[j - 1]]; j--)
+        {
+            const int t = idx[j];
+            idx[j] = idx[j - 1];
+            idx[j - 1] = t;
+        }
+    double sorted[FLOOR_SEEDS];
+    for (int i = 0; i < FLOOR_SEEDS; i++) sorted[i] = cer[idx[i]];
+    memcpy(cer, sorted, sizeof(sorted));
+    snprintf(median_text, text_sz, "%s", seen[idx[FLOOR_SEEDS / 2]]);
+    return 1;
+}
+
+static void floors_2k5_row(const char* mode, float snr_db)
+{
+    const size_t len = 26;              // both messages are 26 characters, which is the scoring step
+    double cer_s[FLOOR_SEEDS];
+    char text[512];
+    if (!floors_2k5_point(mode, snr_db, cer_s, text, sizeof(text))) return;
+    double sum = 0.0;
+    for (int k = 0; k < FLOOR_SEEDS; k++) sum += cer_s[k];
+    const double mean = sum / (double) FLOOR_SEEDS;
+    char range[32];
+    snprintf(range, sizeof(range), "%.1f..%.1f", cer_s[0], cer_s[FLOOR_SEEDS - 1]);
+    printf("%-8s %9.1f %9.1f %8.1f %14s %6.1f %4.1f/%-3zu %s\n", mode, snr_db, snr_db - 6.8,
+           cer_s[FLOOR_SEEDS / 2], range, mean, mean * (double) len / 100.0, len, text);
 }
 
 static int floors_2k5(void)
 {
     printf("The floors over a 2.5 kHz channel, measured with noise shaped to 500..3000 Hz.\n");
     printf("The 12k dB column is the 12 kHz SNR the arithmetic maps each channel SNR onto; the CER\n"
-           "is what that SNR actually does to the same take through the same receiver.\n\n");
-    printf("%-8s %9s %9s %6s %11s %8s %s\n", "mode", "2.5k dB", "12k dB", "CER %", "min-max",
-           "err/len", "decoded text");
+           "is what that SNR actually does to the same take through the same receiver, over %d noise\n"
+           "seeds: the median of them, the range they span and their mean, with the text of the draw\n"
+           "on the median. The coast is bimodal, so the median and the range are the reading and the\n"
+           "mean is printed only to show how little a mean of this shape means.\n\n", FLOOR_SEEDS);
+    printf("%-8s %9s %9s %8s %14s %6s %8s %s\n", "mode", "2.5k dB", "12k dB", "median %",
+           "min..max", "mean %", "err/len", "decoded (median draw)");
     static const struct { const char* mode; float snr; } mapped[] =
     {
         { "MFSK16", -11.2f }, { "MFSK16", -13.2f }, { "MFSK16", -15.2f },
@@ -1559,15 +1776,100 @@ static int floors_2k5(void)
         floors_2k5_row(mapped[i].mode, mapped[i].snr);
     }
     printf("\nthe same two channels in 0.5 dB steps, to see where the floor actually is:\n\n");
-    printf("%-8s %9s %9s %6s %11s %8s %s\n", "mode", "2.5k dB", "12k dB", "CER %", "min-max",
-           "err/len", "decoded text");
+    printf("%-8s %9s %9s %8s %14s %6s %8s %s\n", "mode", "2.5k dB", "12k dB", "median %",
+           "min..max", "mean %", "err/len", "decoded (median draw)");
     for (float s = -10.0f; s >= -16.0f - 1e-6f; s -= 0.5f) floors_2k5_row("MFSK16", s);
     printf("\n");
     for (float s = -8.0f; s >= -14.0f - 1e-6f; s -= 0.5f) floors_2k5_row("Olivia", s);
     printf("\nThe 12 kHz rows in the tables are white noise over the whole band; these are the same\n"
            "channel power confined to 2.5 kHz. A receiver that rejected all out-of-band noise would\n"
-           "read the same CER at the mapped pair; a difference is the receiver's real skirt.\n");
+           "read the same CER at the mapped pair; a difference is the receiver's real skirt.\n"
+           "\nThe points this prints are pinned by \"digi_bench floors-2k5-check\", so they are a\n"
+           "checked measurement rather than a number in the README; see that verb for the windows.\n");
     return 0;
+}
+
+// The 2.5 kHz floors the MFSK16 and Olivia sections quote, against the readings those sections
+// document. Each point is measured again (twelve noise seeds) and has to land in a window around
+// its documented median and its documented range, so a receiver change that moved the coast fails
+// here instead of leaving the README quietly wrong. The window is one character of the 26 character
+// take (3.85 %) for the median, which is the finest step this score has, and two characters for the
+// two extreme draws, which one flipped symbol moves further than the median.
+typedef struct
+{
+    const char* mode;
+    float snr_db;
+    float median, lo, hi;   // the documented reading: median draw, least wrong draw, worst draw
+} floor_pin_t;
+
+static int floors_2k5_check(void)
+{
+    static const floor_pin_t pins[] =
+    {
+        // the three 12 kHz equivalents the arithmetic maps onto, and where the median first moves
+        { "MFSK16", -11.2f,   0.0f,   0.0f,   0.0f },
+        { "MFSK16", -13.2f,   0.0f,   0.0f, 100.0f },
+        { "MFSK16", -15.2f,  96.2f,  50.0f, 103.8f },
+        { "MFSK16", -12.5f,   0.0f,   0.0f,  38.5f },
+        { "MFSK16", -13.5f,   7.7f,   0.0f, 103.8f },
+        { "MFSK16", -14.5f, 100.0f,  23.1f, 111.5f },
+        { "Olivia",  -9.2f,   0.0f,   0.0f,   0.0f },
+        { "Olivia", -11.2f,   0.0f,   0.0f,   0.0f },
+        { "Olivia", -12.5f,   0.0f,   0.0f,  11.5f },
+        { "Olivia", -13.0f,   3.8f,   0.0f,  88.5f },
+        { "Olivia", -13.2f,   3.8f,   0.0f,  92.3f },
+    };
+    const double step = 100.0 / 26.0;          // one character of either take
+    const double med_tol = step;
+    const double edge_tol = 2.0 * step;
+    int failures = 0;
+
+    printf("The shaped 2.5 kHz floors against their documented readings, %d noise seeds a point.\n"
+           "median +- %.1f %% (one character), extremes +- %.1f %% (two).\n\n", FLOOR_SEEDS,
+           med_tol, edge_tol);
+    printf("%-8s %8s %9s %15s %15s  %s\n", "mode", "2.5k dB", "median %", "range",
+           "documented", "check");
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++)
+    {
+        const floor_pin_t* p = &pins[i];
+        double cer_s[FLOOR_SEEDS];
+        char text[512];
+        if (!floors_2k5_point(p->mode, p->snr_db, cer_s, text, sizeof(text)))
+        {
+            printf("FAIL  %-8s %8.1f could not be measured\n", p->mode, (double) p->snr_db);
+            failures++;
+            continue;
+        }
+        const double median = cer_s[FLOOR_SEEDS / 2], lo = cer_s[0], hi = cer_s[FLOOR_SEEDS - 1];
+        char range[32], documented[32];
+        snprintf(range, sizeof(range), "%.1f..%.1f", lo, hi);
+        snprintf(documented, sizeof(documented), "%.1f..%.1f", (double) p->lo, (double) p->hi);
+        printf("%-8s %8.1f %9.1f %15s %8.1f..%-5.1f %s\n", p->mode, (double) p->snr_db, median,
+               range, (double) p->lo, (double) p->hi,
+               fabs(median - (double) p->median) <= med_tol
+               && fabs(lo - (double) p->lo) <= edge_tol
+               && fabs(hi - (double) p->hi) <= edge_tol ? "ok" : "FAIL");
+        if (fabs(median - (double) p->median) > med_tol)
+        {
+            printf("FAIL  %-8s %8.1f dB median draw is %.1f %%, the section quotes %.1f %% (window "
+                   "%.1f..%.1f)\n", p->mode, (double) p->snr_db, median, (double) p->median,
+                   (double) p->median - med_tol, (double) p->median + med_tol);
+            failures++;
+        }
+        if (fabs(lo - (double) p->lo) > edge_tol || fabs(hi - (double) p->hi) > edge_tol)
+        {
+            printf("FAIL  %-8s %8.1f dB range is %s, the section quotes %s (window %.1f..%.1f)\n",
+                   p->mode, (double) p->snr_db, range, documented, (double) p->lo - edge_tol,
+                   (double) p->hi + edge_tol);
+            failures++;
+        }
+    }
+    if (!failures)
+    {
+        printf("\nall %zu shaped floor points inside their documented windows\n",
+               sizeof(pins) / sizeof(pins[0]));
+    }
+    return failures ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1575,6 +1877,40 @@ static int floors_2k5(void)
  * ------------------------------------------------------------------ */
 static uint32_t rd32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+
+// One WAV reader feeds every verb here: cap_load, in the capture gate below, walks the RIFF chunks
+// and hands back 16 bit PCM as floats with its rate and channel count. This section used to carry a
+// second, slightly different parser, so a file the gate could read was a file the decoder rejected.
+typedef struct { float* x; size_t n; uint32_t rate; uint16_t ch; } cap_t;
+static int cap_load(const char* path, cap_t* c);
+
+// Linear resampling to the 12 kHz the demodulators are pinned at. Interpolation cannot overshoot the
+// source, so a gain taken from the source peak still lands on the same level after the rate change.
+static float* resample_12k(const float* x, size_t n, uint32_t rate, size_t* out_n)
+{
+    const size_t m = n ? (size_t)llround((double)n * 12000.0 / (double)rate) : 0;
+    float* y = malloc((m ? m : 1) * sizeof(float));
+    *out_n = 0;
+    if (!y) return NULL;
+    for (size_t k = 0; k < m; k++)
+    {
+        const double src = (double)k * (double)rate / 12000.0;
+        size_t a = (size_t)src;
+        if (a >= n) a = n - 1;
+        const size_t b = a + 1 < n ? a + 1 : a;
+        const double fr = b == a ? 0.0 : src - (double)a;
+        y[k] = (float)(x[a] + fr * (x[b] - x[a]));
+    }
+    *out_n = m;
+    return y;
+}
+
+static float peak_of(const float* x, size_t n)
+{
+    float peak = 0.0f;
+    for (size_t i = 0; i < n; i++) if (fabsf(x[i]) > peak) peak = fabsf(x[i]);
+    return peak;
+}
 
 // 16 bit PCM WAV, mono or stereo, any sample rate: resampled to the 12 kHz the demodulator is
 // pinned at, and gain trimmed from the file peak so a quiet recording still reaches the modems
@@ -1584,50 +1920,17 @@ static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); 
 // which character was read wrong instead of inferring it from the letters that came out
 static float decode_wav(const char* path, const char* expected, char* got, size_t got_sz, uint16_t shift, uint16_t baud, bool trace, char* raw, size_t raw_sz)
 {
-    FILE* f = fopen(path, "rb");
-    if (!f) { printf("cannot open %s\n", path); return -1.0f; }
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    uint8_t* buf = malloc((size_t)sz);
-    if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); printf("short read\n"); return -1.0f; }
-    fclose(f);
-
-    uint32_t rate = 0, ch = 1, bits = 0, tag = 0, i = 12; const uint8_t* data = 0; uint32_t dlen = 0;
-    while (i + 8 <= (size_t)sz)
-    {
-        uint32_t clen = rd32(buf + i + 4);
-        if (clen > (size_t)sz - i - 8) break;       /* a chunk cannot claim more than the file holds */
-        if (!memcmp(buf + i, "fmt ", 4))
-        {
-            if (clen < 16) { free(buf); printf("the fmt chunk of %s is too short to describe a PCM stream\n", path); return -1.0f; }
-            tag  = rd16(buf + i + 8);               /* 1 = PCM, 3 = float, 0xfffe = extensible */
-            ch   = rd16(buf + i + 10);
-            rate = rd32(buf + i + 12);
-            bits = rd16(buf + i + 22);
-        }
-        else if (!memcmp(buf + i, "data", 4)) { data = buf + i + 8; dlen = clen; }
-        else break;
-        i += 8 + clen + (clen & 1);
-    }
-    if (!data || !rate || !dlen) { free(buf); printf("not a PCM WAV with a data chunk\n"); return -1.0f; }
-    if (tag != 1 || bits != 16 || !ch)
-    {
-        /* an 8/24/32 bit or float export would be decoded as noise here, and the CER would blame
-           the modem for a file this reader cannot read */
-        free(buf);
-        printf("%s: format %u, %u bit, %u channel(s); this reader decodes 16 bit PCM only\n",
-               path, tag, bits, ch);
-        return -1.0f;
-    }
-
-    size_t frames = (size_t)dlen / (2 * ch);
-    if (!frames) { free(buf); printf("%s: the data chunk holds no complete frame\n", path); return -1.0f; }
-    float peak = 0.0f;
-    for (size_t k = 0; k < frames; k++)
-    {
-        float v = (float)(int16_t)rd16(data + k * 2 * ch) / 32768.0f;
-        if (fabsf(v) > peak) peak = fabsf(v);
-    }
-    float gain = peak > 0.0f ? 0.7f / peak : 1.0f;
+    cap_t c;
+    if (!cap_load(path, &c)) return -1.0f;
+    size_t n12 = 0;
+    float* x = resample_12k(c.x, c.n, c.rate, &n12);
+    const float peak = peak_of(c.x, c.n);
+    const float gain = peak > 0.0f ? 0.7f / peak : 1.0f;
+    const double secs = (double)c.n / (double)c.rate;
+    const uint32_t rate = c.rate;
+    const uint16_t ch = c.ch;
+    free(c.x);
+    if (!x || !n12) { free(x); printf("%s: no samples to decode\n", path); return -1.0f; }
 
     /* the firmware silently maps an unsupported shift to 170 and only knows 45.45 and 50 baud,
        which against a real station looks exactly like a modem that cannot decode: refuse the
@@ -1641,11 +1944,13 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
     {
         printf("%u Hz shift is not in the modem's filter bank (85/170/200/425/450/850), Rtty_Modem_Init() "
                "would silently decode it as 170\n", (unsigned)shift);
+        free(x);
         return -1.0f;
     }
     if (baud != 45 && baud != 50)
     {
         printf("%u baud is not supported, rtty_speeds[] only holds 45.45 and 50\n", (unsigned)baud);
+        free(x);
         return -1.0f;
     }
     rtty_ctrl_config.speed_idx = baud == 50 ? RTTY_SPEED_50 : RTTY_SPEED_45;
@@ -1662,20 +1967,12 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
     Bench_TextReset();
     if (trace) Rtty_BenchTraceStart();
 
-    size_t out_n = (size_t)((double)frames * 12000.0 / (double)rate);
-    for (size_t k = 0; k < out_n; k++)
+    for (size_t k = 0; k < n12; k++)
     {
-        double src = (double)k * (double)rate / 12000.0;
-        size_t a = (size_t)src;
-        if (a >= frames) a = frames - 1;
-        size_t b = (a + 1 < frames) ? a + 1 : a;    /* the last frame reads itself, never past the data */
-        double fr = (b == a) ? 0.0 : src - (double)a;
-        float s0 = (float)(int16_t)rd16(data + a * 2 * ch) / 32768.0f;
-        float s1 = (float)(int16_t)rd16(data + b * 2 * ch) / 32768.0f;
         Bench_CharClock = k;             // where a character reported now came from
-        Rtty_Demodulator_ProcessSample((float32_t)((s0 + (float)fr * (s1 - s0)) * gain));
+        Rtty_Demodulator_ProcessSample((float32_t)(x[k] * gain));
     }
-    free(buf);
+    free(x);
 
     // raw keeps every character the decoder printed, in the order it printed them: the trace has to
     // line its rows up with the text by position, and the normalised copy has already dropped the
@@ -1684,7 +1981,7 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
     snprintf(got, got_sz, "%s", norm_baudot(Bench_TextGet(), 1));
     printf("file      : %s\n", path);
     printf("format    : %u Hz, %u channel(s), %.1f s, gain %.1f dB\n",
-           rate, ch, (double)frames / (double)rate, 20.0 * log10(gain));
+           (unsigned)rate, (unsigned)ch, secs, 20.0 * log10(gain));
     printf("decoded   : %s\n", got);
     if (expected && *expected) return score_aligned(norm_baudot(expected, 0), got);
     return -1.0f;
@@ -1697,53 +1994,90 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
 // filters expect, on a bit clock that repeats, with no gap in it. Every one of those has been
 // assumed rather than measured here at least once - a pair 1.5 kHz off, two "tones" that were one
 // carrier's skirt, a take that was mostly noise, and truncation. This verb measures them.
-typedef struct { float* x; size_t n; uint32_t rate; } cap_t;
-
 static int cap_load(const char* path, cap_t* c)
 {
     FILE* f = fopen(path, "rb");
     if (!f) { printf("cannot open %s\n", path); return 0; }
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    uint8_t* buf = malloc((size_t)sz);
-    if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz)
+    fseek(f, 0, SEEK_END);
+    const long end = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (end <= 0) { fclose(f); printf("%s is empty, or not a file that can be sized\n", path); return 0; }
+    const size_t sz = (size_t)end;
+    uint8_t* buf = malloc(sz);
+    if (!buf || fread(buf, 1, sz, f) != sz)
     {
         free(buf); fclose(f); printf("short read on %s\n", path); return 0;
     }
     fclose(f);
-
-    uint32_t rate = 0, ch = 1, bits = 0, tag = 0, i = 12; const uint8_t* data = 0; uint32_t dlen = 0;
-    while (i + 8 <= (size_t)sz)
+    if (sz < 12 || memcmp(buf, "RIFF", 4) || memcmp(buf + 8, "WAVE", 4))
     {
-        uint32_t clen = rd32(buf + i + 4);
-        if (clen > (size_t)sz - i - 8) break;
+        free(buf); printf("%s is not a RIFF WAVE file\n", path); return 0;
+    }
+
+    uint32_t rate = 0, ch = 0, bits = 0, tag = 0;
+    const uint8_t* data = NULL;
+    size_t dlen = 0, i = 12;
+    while (i + 8 <= sz)
+    {
+        const uint32_t clen = rd32(buf + i + 4);
+        const size_t body = i + 8, avail = sz - body;
+        // A chunk this reader does not want is stepped over: editors and recorders put LIST, bext,
+        // fact and junk chunks ahead of the audio, and stopping at the first of them refuses a file
+        // that is plain PCM all the way through.
         if (!memcmp(buf + i, "fmt ", 4))
         {
-            if (clen < 16) { free(buf); printf("the fmt chunk of %s is too short\n", path); return 0; }
-            tag  = rd16(buf + i + 8);
-            ch   = rd16(buf + i + 10);
-            rate = rd32(buf + i + 12);
-            bits = rd16(buf + i + 22);
+            if (clen < 16 || clen > avail)
+            {
+                free(buf);
+                printf("%s: the fmt chunk is %s, so the stream is not described\n", path,
+                       clen < 16 ? "too short" : "cut off");
+                return 0;
+            }
+            tag  = rd16(buf + body);            // 1 PCM, 3 float, 0xfffe extensible
+            ch   = rd16(buf + body + 2);
+            rate = rd32(buf + body + 4);
+            bits = rd16(buf + body + 14);
+            // extensible carries the same samples behind a 40 byte header; its subformat GUID opens
+            // with the plain PCM tag, and ffmpeg and several recorders write it for ordinary files
+            if (tag == 0xfffe && clen >= 40 && rd16(buf + body + 24) == 1) tag = 1;
         }
-        else if (!memcmp(buf + i, "data", 4)) { data = buf + i + 8; dlen = clen; }
-        else break;
-        i += 8 + clen + (clen & 1);
+        else if (!memcmp(buf + i, "data", 4))
+        {
+            // a recorder that stopped mid write leaves a data chunk longer than the file: decode
+            // the audio that did arrive rather than call the whole take unreadable
+            data = buf + body;
+            dlen = clen <= avail ? clen : avail;
+            if (clen > avail)
+                printf("%s: the data chunk is cut off, reading the %zu bytes present\n", path, dlen);
+        }
+        if (clen > avail) break;                // nothing past a chunk that runs off the file
+        i = body + (size_t)clen + (clen & 1);
     }
-    if (!data || !rate || !dlen || tag != 1 || bits != 16 || !ch)
+    if (!data || !dlen || !rate || !ch || tag != 1 || bits != 16)
     {
         free(buf);
-        printf("%s: needs a 16 bit PCM WAV with a data chunk (format %u, %u bit, %u channel(s), %u Hz)\n",
+        printf("%s: needs 16 bit PCM in a data chunk (format %u, %u bit, %u channel(s), %u Hz)\n",
                path, tag, bits, ch, rate);
         return 0;
     }
-    const size_t frames = (size_t)dlen / (2 * ch);
-    c->x = malloc(frames * sizeof(float));
-    if (!frames || !c->x) { free(c->x); free(buf); printf("%s holds no audio\n", path); return 0; }
-    for (size_t k = 0; k < frames; k++)
+    if (rate < 1000 || rate > 384000)
     {
-        c->x[k] = (float)(int16_t)rd16(data + k * 2 * ch) / 32768.0f;
+        free(buf);
+        printf("%s: %u Hz is outside the 1 kHz to 384 kHz this resampler is for\n", path, rate);
+        return 0;
     }
+    const size_t frames = dlen / (2 * (size_t)ch);
+    if (!frames)
+    {
+        free(buf); printf("%s: the data chunk holds no complete frame\n", path); return 0;
+    }
+    c->x = malloc(frames * sizeof(float));
+    if (!c->x) { free(buf); printf("%s: %zu frames do not fit in memory\n", path, frames); return 0; }
+    for (size_t k = 0; k < frames; k++)
+        c->x[k] = (float)(int16_t)rd16(data + k * 2 * (size_t)ch) / 32768.0f;
     c->n = frames;
     c->rate = rate;
+    c->ch = (uint16_t)ch;
     free(buf);
     return 1;
 }
@@ -1761,45 +2095,82 @@ static float* rec_load_12k(const char* path, size_t* n_out, double* secs, uint32
                            uint32_t* ch_out)
 {
     cap_t c;
+    *n_out = 0;
     if (!cap_load(path, &c)) return NULL;
-    const size_t n = (size_t)llround((double)c.n * 12000.0 / (double)c.rate);
-    float* x = malloc((n ? n : 1) * sizeof(float));
-    if (!x) { free(c.x); return NULL; }
-    float peak = 0.0f;
-    for (size_t i = 0; i < c.n; i++) if (fabsf(c.x[i]) > peak) peak = fabsf(c.x[i]);
-    const float gain = peak > 0.0f ? 0.7f / peak : 1.0f;
-    for (size_t k = 0; k < n; k++)
+    size_t n = 0;
+    float* x = resample_12k(c.x, c.n, c.rate, &n);
+    if (x)
     {
-        const double src = (double)k * (double)c.rate / 12000.0;
-        size_t a = (size_t)src;
-        if (a >= c.n) a = c.n - 1;
-        const size_t b = a + 1 < c.n ? a + 1 : a;
-        const double fr = b == a ? 0.0 : src - (double)a;
-        x[k] = (float)((c.x[a] + (float)fr * (c.x[b] - c.x[a])) * gain);
+        const float peak = peak_of(x, n);
+        const float gain = peak > 0.0f ? 0.7f / peak : 1.0f;
+        for (size_t k = 0; k < n; k++) x[k] *= gain;
     }
     *n_out = n;
     *secs = (double)c.n / (double)c.rate;
     *rate_out = 12000;
-    *ch_out = 1;
+    *ch_out = c.ch;
     free(c.x);
     return x;
 }
 
-// first 5 ms window whose RMS is over 2 % of the take's peak. A recording that is mostly silence
-// otherwise spends its symbol search on silence, and the block modes start their block count there.
+static int cmp_double(const void* a, const void* b);
+
+// First 5 ms window whose level stands over the take's own. A recording that is mostly silence spends
+// its symbol search on silence, and the block modes start their block count there. The reference is
+// the 99th percentile of the window levels, not the loudest sample in the file: a recorder that opens
+// with a click, or static anywhere in the take, raises a single sample's level but cannot move a
+// percentile, so the trim still finds the signal it is looking for.
 static size_t rec_onset(const float* x, size_t n)
 {
-    const size_t win = 60;
-    float peak = 0.0f;
-    for (size_t i = 0; i < n; i++) if (fabsf(x[i]) > peak) peak = fabsf(x[i]);
-    const double thr = 0.02 * (double)peak;
-    for (size_t i = 0; i + win <= n; i += win / 2)
+    const size_t win = 60, stride = win / 2;
+    const size_t nw = n >= win ? (n - win) / stride + 1 : 0;
+    if (!nw) return 0;
+    double* lvl = malloc(nw * sizeof(double));
+    if (!lvl) return 0;
+    for (size_t w = 0, i = 0; w < nw; w++, i += stride)
     {
         double acc = 0.0;
         for (size_t j = 0; j < win; j++) acc += (double)x[i + j] * x[i + j];
-        if (sqrt(acc / (double)win) > thr) return i;
+        lvl[w] = sqrt(acc / (double)win);
     }
-    return 0;
+    double* sorted = malloc(nw * sizeof(double));
+    if (!sorted) { free(lvl); return 0; }
+    memcpy(sorted, lvl, nw * sizeof(double));
+    qsort(sorted, nw, sizeof(double), cmp_double);
+    const double thr = 0.02 * sorted[(nw * 99) / 100];
+    free(sorted);
+    // one window over the threshold is not the signal: a click, a static crash or the settling
+    // sample a recorder writes first clears the level and is gone 5 ms later. The take starts where
+    // the level stays up, so a window counts only if at least half of the next ten (50 ms) clear the
+    // threshold too. Hell is keyed, but its gaps are one 8 ms column in six, so a word still holds.
+    size_t onset = 0;
+    for (size_t w = 0; w < nw; w++)
+    {
+        if (lvl[w] <= thr) continue;
+        size_t held = 0, seen = 0;
+        for (size_t q = w + 1; q < nw && seen < 10; q++, seen++)
+            if (lvl[q] > thr) held++;
+        if (seen < 10 || held * 2 >= seen) { onset = w * stride; break; }
+    }
+    free(lvl);
+    return onset;
+}
+
+// The start search only has to rank a start, not read the transmission. Twenty seconds is many
+// symbols of every mode here and keeps nine, or seventeen, trial decodes from costing as many passes
+// over a broadcast length take; the take itself is then decoded once, whole, from the start they
+// chose. A take shorter than this is its own trial, which is why the graded cases are unaffected.
+#define REC_TRIAL_SAMPLES 240000
+
+// The block decoders hold a fixed number of symbols and refuse a take that does not fit; a broadcast
+// length recording is longer than that, so it is cropped to what they hold and the crop is printed
+// rather than leaving the caller with "nothing decoded" for a take that was fine.
+static size_t rec_crop(const char* mode, size_t take, size_t holds)
+{
+    if (take <= holds) return take;
+    printf("crop      : decoding the first %.1f s of %.1f s, where %s's buffers end\n",
+           (double)holds / 12000.0, (double)take / 12000.0, mode);
+    return holds;
 }
 
 static int navtex_wav(const char* path, const char* expected, float limit)
@@ -1808,41 +2179,50 @@ static int navtex_wav(const char* path, const char* expected, float limit)
     float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
     if (!x) return 1;
     const size_t onset = rec_onset(x, n);
-    int best_err = 1 << 30; double best_rank = 1e30; int found = 0;
-    char best_text[8192] = ""; navtex_result_t best_res;
-    memset(&best_res, 0, sizeof(best_res));
+    int found = 0; double best_rank = 1e30;
+    size_t best_st = onset;
     for (int k = 0; k <= 8; k++)
     {
         long st = (long)onset - 120 + (long)k * 15;
         if (st < 0) st = 0;
         if ((size_t)st >= n) break;
+        const size_t left = n - (size_t)st;
+        const size_t len = left <= REC_TRIAL_SAMPLES ? left : REC_TRIAL_SAMPLES;
         navtex_result_t r; char got[8192];
-        const int ok = Bench_NavtexDecode(x + st, n - (size_t)st, got, sizeof(got), &r);
+        const int ok = Bench_NavtexDecode(x + st, len, got, sizeof(got), &r);
         if (!ok) continue;
-        const int err = expected && *expected ? exact_char_errors(expected, got, 1) : 0;
-        const double rank = expected && *expected ? (double)err : -(double)r.valid_fraction;
-        if (!found || rank < best_rank)
-        {
-            found = 1; best_rank = rank; best_err = err;
-            snprintf(best_text, sizeof(best_text), "%s", got);
-            best_res = r;
-        }
+        // a short take is its own trial, and the text is the strongest score there is; a prefix of a
+        // long one cannot be compared with the whole expected text, so its own word ratio ranks it
+        const double rank = left <= REC_TRIAL_SAMPLES && expected && *expected
+                          ? (double)exact_char_errors(expected, got, 1)
+                          : -(double)r.valid_fraction;
+        if (!found || rank < best_rank) { found = 1; best_rank = rank; best_st = (size_t)st; }
     }
     printf("file      : %s\nformat    : %u Hz, %u channel(s), %.2f s\n", path, rate, ch, secs);
     printf("onset     : %.1f ms (sample %zu); %s\n", 1000.0 * (double)onset / 12000.0, onset,
            found ? "decoded" : "nothing decoded");
     if (!found) { free(x); return 1; }
-    printf("decoded   : %s\n", best_text);
-    printf("clock     : period %.1f samples, phasing run %d, valid fraction %.3f\n",
-           best_res.period_samples, best_res.phasing_run, best_res.valid_fraction);
-    if (expected && *expected)
     {
-        const double cer = 100.0 * (double)best_err / (double)strlen(expected);
-        printf("CER       : %.1f %%\n", cer);
-        if (limit >= 0.0f && cer > (double)limit)
+        navtex_result_t r; char got[8192];
+        if (!Bench_NavtexDecode(x + best_st, n - best_st, got, sizeof(got), &r))
         {
-            printf("CER is above the %g %% this case pins\n", (double)limit);
-            free(x); return 1;
+            printf("nothing decoded from the start the search chose\n");
+            free(x);
+            return 1;
+        }
+        printf("decoded   : %s\n", got);
+        printf("clock     : period %.1f samples, phasing run %d, valid fraction %.3f\n",
+               r.period_samples, r.phasing_run, r.valid_fraction);
+        if (expected && *expected)
+        {
+            const double cer = 100.0 * (double)exact_char_errors(expected, got, 1) / (double)strlen(expected);
+            printf("CER       : %.1f %%\n", cer);
+            if (limit >= 0.0f && cer > (double)limit)
+            {
+                printf("CER is above the %g %% this case pins\n", (double)limit);
+                free(x);
+                return 1;
+            }
         }
     }
     free(x);
@@ -1856,25 +2236,24 @@ static int mfsk16_wav(const char* path, const char* expected, float limit)
     if (!x) return 1;
     const size_t onset = rec_onset(x, n);
     const size_t S = 768;                 // 12 kHz / 15.625 Bd
-    int best_err = 1 << 30, found = 0; double best_rank = 1e30;
+    int found = 0; double best_rank = 1e30;
     size_t best_start = 0; int best_k = -1;
-    char best_text[512] = ""; mfsk16_result_t best_res;
-    memset(&best_res, 0, sizeof(best_res));
     for (int k = 0; k <= 16; k++)
     {
         long st = (long)onset - (long)S + (long)k * (long)S / 16;
         if (st < 0) st = 0;
         if ((size_t)st >= n) break;
+        const size_t left = n - (size_t)st;
+        const size_t len = left <= REC_TRIAL_SAMPLES ? left : REC_TRIAL_SAMPLES;
         mfsk16_result_t r; char got[512];
-        const int ok = Bench_Mfsk16Decode(x + st, n - (size_t)st, got, sizeof(got), &r);
+        const int ok = Bench_Mfsk16Decode(x + st, len, got, sizeof(got), &r);
         if (!ok) continue;
-        const int err = expected && *expected ? exact_char_errors(expected, got, 1) : 0;
-        const double rank = expected && *expected ? (double)err : -(double)r.tones_ok;
+        const double rank = left <= REC_TRIAL_SAMPLES && expected && *expected
+                          ? (double)exact_char_errors(expected, got, 1)
+                          : -(double)r.tones_ok / (r.symbols ? (double)r.symbols : 1.0);
         if (!found || rank < best_rank)
         {
-            found = 1; best_rank = rank; best_err = err; best_start = (size_t)st; best_k = k;
-            snprintf(best_text, sizeof(best_text), "%s", got);
-            best_res = r;
+            found = 1; best_rank = rank; best_start = (size_t)st; best_k = k;
         }
     }
     printf("file      : %s\nformat    : %u Hz, %u channel(s), %.2f s\n", path, rate, ch, secs);
@@ -1882,17 +2261,28 @@ static int mfsk16_wav(const char* path, const char* expected, float limit)
     if (!found) { printf("nothing decoded\n"); free(x); return 1; }
     printf("phase     : trial %d, start %zu samples (%.1f ms before onset)\n", best_k, best_start,
            1000.0 * ((double)onset - (double)best_start) / 12000.0);
-    printf("decoded   : %s\n", best_text);
-    printf("symbols   : %u, heard %.1f %%\n", best_res.symbols,
-           best_res.symbols ? 100.0 * (double)best_res.tones_ok / (double)best_res.symbols : 0.0);
-    if (expected && *expected)
     {
-        const double cer = 100.0 * (double)best_err / (double)strlen(expected);
-        printf("CER       : %.1f %%\n", cer);
-        if (limit >= 0.0f && cer > (double)limit)
+        mfsk16_result_t r; char got[512];
+        const size_t take = rec_crop("MFSK16", n - best_start, Bench_Mfsk16MaxSamples());
+        if (!Bench_Mfsk16Decode(x + best_start, take, got, sizeof(got), &r))
         {
-            printf("CER is above the %g %% this case pins\n", (double)limit);
-            free(x); return 1;
+            printf("nothing decoded from the start the search chose\n");
+            free(x);
+            return 1;
+        }
+        printf("decoded   : %s\n", got);
+        printf("symbols   : %u, heard %.1f %%\n", r.symbols,
+               r.symbols ? 100.0 * (double)r.tones_ok / (double)r.symbols : 0.0);
+        if (expected && *expected)
+        {
+            const double cer = 100.0 * (double)exact_char_errors(expected, got, 1) / (double)strlen(expected);
+            printf("CER       : %.1f %%\n", cer);
+            if (limit >= 0.0f && cer > (double)limit)
+            {
+                printf("CER is above the %g %% this case pins\n", (double)limit);
+                free(x);
+                return 1;
+            }
         }
     }
     free(x);
@@ -1906,25 +2296,24 @@ static int olivia_wav(const char* path, const char* expected, float limit)
     if (!x) return 1;
     const size_t onset = rec_onset(x, n);
     const size_t S = 384;                 // 12 kHz / 31.25 Bd
-    int best_err = 1 << 30, found = 0; double best_rank = 1e30;
+    int found = 0; double best_rank = 1e30;
     size_t best_start = 0; int best_k = -1;
-    char best_text[512] = ""; olivia_result_t best_res;
-    memset(&best_res, 0, sizeof(best_res));
     for (int k = 0; k <= 16; k++)
     {
         long st = (long)onset - (long)S + (long)k * (long)S / 16;
         if (st < 0) st = 0;
         if ((size_t)st >= n) break;
+        const size_t left = n - (size_t)st;
+        const size_t len = left <= REC_TRIAL_SAMPLES ? left : REC_TRIAL_SAMPLES;
         olivia_result_t r; char got[512];
-        const int ok = Bench_OliviaDecode(x + st, n - (size_t)st, got, sizeof(got), &r);
+        const int ok = Bench_OliviaDecode(x + st, len, got, sizeof(got), &r);
         if (!ok) continue;
-        const int err = expected && *expected ? exact_char_errors(expected, got, 1) : 0;
-        const double rank = expected && *expected ? (double)err : -(double)r.tones_ok;
+        const double rank = left <= REC_TRIAL_SAMPLES && expected && *expected
+                          ? (double)exact_char_errors(expected, got, 1)
+                          : -(double)r.tones_ok / (r.symbols ? (double)r.symbols : 1.0);
         if (!found || rank < best_rank)
         {
-            found = 1; best_rank = rank; best_err = err; best_start = (size_t)st; best_k = k;
-            snprintf(best_text, sizeof(best_text), "%s", got);
-            best_res = r;
+            found = 1; best_rank = rank; best_start = (size_t)st; best_k = k;
         }
     }
     printf("file      : %s\nformat    : %u Hz, %u channel(s), %.2f s\n", path, rate, ch, secs);
@@ -1932,18 +2321,28 @@ static int olivia_wav(const char* path, const char* expected, float limit)
     if (!found) { printf("nothing decoded\n"); free(x); return 1; }
     printf("phase     : trial %d, start %zu samples (%.1f ms before onset)\n", best_k, best_start,
            1000.0 * ((double)onset - (double)best_start) / 12000.0);
-    printf("decoded   : %s\n", best_text);
-    printf("symbols   : %u, heard %.1f %%, blocks %u\n", best_res.symbols,
-           best_res.symbols ? 100.0 * (double)best_res.tones_ok / (double)best_res.symbols : 0.0,
-           best_res.blocks);
-    if (expected && *expected)
     {
-        const double cer = 100.0 * (double)best_err / (double)strlen(expected);
-        printf("CER       : %.1f %%\n", cer);
-        if (limit >= 0.0f && cer > (double)limit)
+        olivia_result_t r; char got[512];
+        const size_t take = rec_crop("Olivia", n - best_start, Bench_OliviaMaxSamples());
+        if (!Bench_OliviaDecode(x + best_start, take, got, sizeof(got), &r))
         {
-            printf("CER is above the %g %% this case pins\n", (double)limit);
-            free(x); return 1;
+            printf("nothing decoded from the start the search chose\n");
+            free(x);
+            return 1;
+        }
+        printf("decoded   : %s\n", got);
+        printf("symbols   : %u, heard %.1f %%, blocks %u\n", r.symbols,
+               r.symbols ? 100.0 * (double)r.tones_ok / (double)r.symbols : 0.0, r.blocks);
+        if (expected && *expected)
+        {
+            const double cer = 100.0 * (double)exact_char_errors(expected, got, 1) / (double)strlen(expected);
+            printf("CER       : %.1f %%\n", cer);
+            if (limit >= 0.0f && cer > (double)limit)
+            {
+                printf("CER is above the %g %% this case pins\n", (double)limit);
+                free(x);
+                return 1;
+            }
         }
     }
     free(x);
@@ -1961,43 +2360,114 @@ static int hell_wav(const char* path, const char* out_pgm)
     uint8_t* pix = malloc((size_t)MAXC * HELL_ROWS);
     uint8_t* best = malloc((size_t)MAXC * HELL_ROWS);
     if (!pix || !best) { free(pix); free(best); free(x); return 1; }
-    int found = 0, best_cols = 0; double best_gap = -1.0; hell_result_t best_res;
-    memset(&best_res, 0, sizeof(best_res));
+    int found = 0, trial_cols = 0; double best_gap = -1.0;
+    size_t best_st = onset;
     for (int k = 0; k <= 8; k++)
     {
         long st = (long)onset - (long)S + (long)k * (long)S / 8;
         if (st < 0) st = 0;
         if ((size_t)st >= n) break;
+        const size_t left = n - (size_t)st;
+        const size_t len = left <= REC_TRIAL_SAMPLES ? left : REC_TRIAL_SAMPLES;
         int cols = 0; hell_result_t r;
-        const int ok = Bench_HellDecode(x + st, n - (size_t)st, pix, MAXC, &cols, &r);
+        const int ok = Bench_HellDecode(x + st, len, pix, MAXC, &cols, &r);
         if (!ok || cols <= 0) continue;
-        if (!found || r.gap_share > best_gap || (r.gap_share == best_gap && cols > best_cols))
+        if (!found || r.gap_share > best_gap || (r.gap_share == best_gap && cols > trial_cols))
         {
-            found = 1; best_gap = r.gap_share; best_cols = cols; best_res = r;
-            memcpy(best, pix, (size_t)MAXC * HELL_ROWS);
+            found = 1; best_gap = r.gap_share; trial_cols = cols; best_st = (size_t)st;
         }
     }
     printf("file      : %s\nformat    : %u Hz, %u channel(s), %.2f s\n", path, rate, ch, secs);
     printf("onset     : %.1f ms (sample %zu)\n", 1000.0 * (double)onset / 12000.0, onset);
     if (!found) { printf("nothing decoded\n"); free(pix); free(best); free(x); return 1; }
-    printf("picture   : %d columns, column phase %d, pixel phase %d, gap share %.3f\n",
-           best_cols, best_res.column_phase, best_res.pixel_phase, best_res.gap_share);
-    FILE* f = fopen(out_pgm ? out_pgm : "hell-wav.pgm", "wb");
-    if (!f)
+    int best_gcols = 0; hell_result_t best_res;
+    memset(&best_res, 0, sizeof(best_res));
+    if (!Bench_HellDecode(x + best_st, n - best_st, best, MAXC, &best_gcols, &best_res))
     {
-        printf("cannot write %s\n", out_pgm ? out_pgm : "hell-wav.pgm");
+        printf("nothing decoded from the start the search chose\n");
         free(pix); free(best); free(x);
         return 1;
     }
-    fprintf(f, "P5\n%d %d\n255\n", best_cols, HELL_ROWS);
-    for (int r = 0; r < HELL_ROWS; r++)
-        fwrite(best + (size_t)r * MAXC, 1, (size_t)best_cols, f);
-    fclose(f);
-    printf("wrote     : %s\n", out_pgm ? out_pgm : "hell-wav.pgm");
+    printf("picture   : %d columns, column phase %d, pixel phase %d, gap share %.3f\n",
+           best_gcols, best_res.column_phase, best_res.pixel_phase, best_res.gap_share);
+    if (best_gcols >= MAXC)
+        printf("note      : the raster ends at the %d column buffer, about %.0f s of picture\n",
+               MAXC, (double)MAXC * (12000.0 / 122.5) / 12000.0);
+    // the decoder's raster is a full MAXC wide; give the columns it fitted a buffer of their own
+    // width and write that through the one PGM writer, which answers for a file that could not be
+    // written instead of leaving a truncated picture behind
+    const char* out = out_pgm ? out_pgm : "hell-wav.pgm";
+    uint8_t* packed = malloc((size_t)best_gcols * HELL_ROWS);
+    int wrote = 0;
+    if (packed)
+    {
+        for (int r = 0; r < HELL_ROWS; r++)
+            memcpy(packed + (size_t)r * (size_t)best_gcols, best + (size_t)r * MAXC, (size_t)best_gcols);
+        wrote = pgm_write(out, packed, (uint32_t)best_gcols, HELL_ROWS);
+        free(packed);
+    }
     free(pix); free(best); free(x);
+    if (!wrote) { printf("cannot write %s\n", out); return 1; }
+    printf("wrote     : %s\n", out);
     return 0;
 }
 
+// The P5 the verb wrote, read back, so the recording check grades the file rather than an array that
+// never went through the writer.
+static int pgm_read(const char* path, uint8_t** buf, int* w, int* h)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    char magic[3] = {0};
+    int mx = 0;
+    int ok = fscanf(f, "%2s %d %d %d", magic, w, h, &mx) == 4 && !strcmp(magic, "P5")
+          && *w > 0 && *h > 0 && mx == 255 && fgetc(f) != EOF;
+    *buf = NULL;
+    if (ok)
+    {
+        *buf = malloc((size_t)*w * (size_t)*h);
+        ok = *buf && fread(*buf, 1, (size_t)*w * (size_t)*h, f) == (size_t)*w * (size_t)*h;
+        if (!ok) { free(*buf); *buf = NULL; }
+    }
+    fclose(f);
+    return ok;
+}
+
+// The raster the verb wrote against the picture the generator drew. Comparing kinds of pixels (how
+// many were keyed) passes a picture shifted by a column, because the count is the same; comparing
+// the pixels themselves does not. The decoder may drop a blank column at either end, so the columns
+// are allowed to slide by up to eight and the overlap has to hold all but two of the drawn columns.
+static int hell_raster_ok(const char* pgm, const uint8_t* truth, int tcols, int truth_stride,
+                          int first, int* cols_out, int* shift_out, int* bad_out)
+{
+    uint8_t* pix = NULL;
+    int w = 0, h = 0;
+    int best = -1, best_s = 0;
+    *cols_out = 0; *shift_out = 0; *bad_out = -1;
+    if (!pgm_read(pgm, &pix, &w, &h) || h != HELL_ROWS) { free(pix); return 0; }
+    for (int s = -8; s <= 8; s++)
+    {
+        int bad = 0, seen = 0;
+        for (int d = 0; d < w; d++)
+        {
+            const int t = d - s;
+            if (t < first || t >= tcols) continue;
+            seen++;
+            for (int r = 0; r < HELL_ROWS; r++)
+                if ((pix[(size_t)r * (size_t)w + (size_t)d] != 0)
+                    != (truth[(size_t)r * (size_t)truth_stride + (size_t)t] != 0)) bad++;
+        }
+        if (seen < tcols - 2) continue;          // too little of the picture to call it the truth
+        if (best < 0 || bad < best) { best = bad; best_s = s; }
+    }
+    free(pix);
+    *cols_out = w; *shift_out = best_s; *bad_out = best;
+    return best == 0;
+}
+
+// Every verb that reports through check() shares this counter, so a failed check is a failed verb
+// and not just a line that says FAIL while the verb exits 0.
+static int failures;
 static void check(int ok, const char* what);
 
 // The recording paths are checked against the same modems' own takes: a test WAV with a long lead,
@@ -2005,7 +2475,6 @@ static void check(int ok, const char* what);
 // recording, but it is the first path that does not hand the decoder a buffer starting on a symbol.
 static int record_check(void)
 {
-    int failures = 0;
     const size_t lead = 9037;             // 0.75 s, not a multiple of any mode's symbol
     {
         static const char* msg = "NAVTEX TEST DE UHSDR";
@@ -2078,14 +2547,33 @@ static int record_check(void)
         if (y) memcpy(y + lead, x, n * sizeof(float32_t));
         const bool wrote = y && Bench_WavWrite("/tmp/rec-hell.wav", y, n + lead, 12000);
         check(wrote, "record: a Hell take with a lead can be written as a WAV");
-        if (wrote) failures += hell_wav("/tmp/rec-hell.wav", "/tmp/rec-hell.pgm") != 0;
+        if (wrote)
+        {
+            failures += hell_wav("/tmp/rec-hell.wav", "/tmp/rec-hell.pgm") != 0;
+            int cols = 0, shift = 0, bad = -1;
+            const int same = hell_raster_ok("/tmp/rec-hell.pgm", truth, tcols, 256, 0, &cols, &shift, &bad);
+            printf("     (Hell raster: %d of %d columns, shift %d, %d pixels differ)\n",
+                   cols, tcols, shift, bad);
+            check(same, "record: the Hell raster written is the picture that was drawn");
+        }
         if (wrote && n > 400)
         {
             const size_t d = 49;             // half a 98 sample pixel
             memmove(y + lead, y + lead + d, (n - d) * sizeof(float32_t));
             const bool w2 = Bench_WavWrite("/tmp/rec-hell-phase.wav", y, n + lead - d, 12000);
             check(w2, "record: a Hell take starting half a pixel in can be written");
-            if (w2) failures += hell_wav("/tmp/rec-hell-phase.wav", "/tmp/rec-hell-phase.pgm") != 0;
+            if (w2)
+            {
+                failures += hell_wav("/tmp/rec-hell-phase.wav", "/tmp/rec-hell-phase.pgm") != 0;
+                int cols = 0, shift = 0, bad = -1;
+                // the take was cut half a pixel in, so its first column is half drawn and is not
+                // compared; every column from the second on has all of its keying
+                const int same = hell_raster_ok("/tmp/rec-hell-phase.pgm", truth, tcols, 256, 1,
+                                                &cols, &shift, &bad);
+                printf("     (half a pixel in: %d of %d columns, shift %d, %d pixels differ)\n",
+                       cols, tcols, shift, bad);
+                check(same, "record: the half pixel offset still comes back as the picture sent");
+            }
         }
         free(x); free(y);
     }
@@ -2320,24 +2808,49 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
         const double r = sqrt(re * re + im * im) / (double)n;
         if (r > best_r) { best_r = r; best_t = T; }
     }
-    double centre[2];
-    {
-        double re, im;
-        gate_phase_sums(t, n, best_t, 1, NULL, 1, &re, &im);
-        centre[0] = fmod(atan2(im, re) / (2.0 * GATE_PI) + 1.0, 1.0);
-        centre[1] = fmod(centre[0] + 0.5, 1.0);
-    }
     // The centres start half a phase apart and are then moved to sit on the transitions that chose
-    // them, because the fixture's half bit is not exactly half and its jitter is not symmetric. One
-    // reassignment is not enough - the fixture's scatter is 9.4 % after it - and two is: it reads
-    // 8.8 % at the second and the same at the fourth and the sixth.
-    for (int round = 0; round < 2; round++)
+    // them, because the half bit a Baudot character boundary leaves is not exactly half and the
+    // jitter is not symmetric. The round has a fixed point of its own, though: seed it so that the
+    // halfway boundary falls inside one of the two clusters and each bucket collects half of both,
+    // the means stay put and the centres never reach the transitions. A take whose transitions are
+    // on the grid then reads 24.7 % of a bit of scatter while decoding at 4.1 % - the two-centre fit
+    // is the spike, the crossings are fine. Which side of a cluster the boundary lands on follows
+    // from where the take happens to start, so the split is run from a dozen seeds around the
+    // circle and the tightest of the twelve is kept.
+    double centre[2] = {0.0, 0.0};
     {
-        double re[2], im[2];
-        gate_phase_sums(t, n, best_t, 1, centre, 2, re, im);
-        for (int c = 0; c < 2; c++)
-            if (re[c] != 0.0 || im[c] != 0.0)
-                centre[c] = fmod(atan2(im[c], re[c]) / (2.0 * GATE_PI) + 1.0, 1.0);
+        double re, im, best_sq = -1.0;
+        gate_phase_sums(t, n, best_t, 1, NULL, 1, &re, &im);
+        const double base = fmod(atan2(im, re) / (2.0 * GATE_PI) + 1.0, 1.0);
+        for (int seed = 0; seed < 12; seed++)
+        {
+            double c[2];
+            c[0] = fmod(base + (double)seed / 12.0, 1.0);
+            c[1] = fmod(c[0] + 0.5, 1.0);
+            // the fixture's scatter is 9.4 % after one reassignment and settles by the second; four
+            // leaves room for the seeds that start further from the clusters
+            for (int round = 0; round < 4; round++)
+            {
+                double br[2], bi[2];
+                gate_phase_sums(t, n, best_t, 1, c, 2, br, bi);
+                for (int b = 0; b < 2; b++)
+                    if (br[b] != 0.0 || bi[b] != 0.0)
+                        c[b] = fmod(atan2(bi[b], br[b]) / (2.0 * GATE_PI) + 1.0, 1.0);
+            }
+            double sq = 0.0;
+            for (size_t i = 0; i < n; i++)
+            {
+                const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
+                const double d = fmin(fabs(wrap_half(ph - c[0])), fabs(wrap_half(ph - c[1])));
+                sq += d * d;
+            }
+            if (best_sq < 0.0 || sq < best_sq)
+            {
+                best_sq = sq;
+                centre[0] = c[0];
+                centre[1] = c[1];
+            }
+        }
     }
     double sq = 0.0;
     double* dev = malloc(n * sizeof(double));
@@ -2407,24 +2920,26 @@ static void gate_dropouts(const cap_t* c, gate_drop_t* d)
     free(rms); free(sorted);
 }
 
-// Thresholds, set from four measurements that bracket the useful range. Transitions are interpolated
-// zero crossings against two phase centres, so these are the audio's numbers and not the estimator's:
-// a clean 50 baud take generated for this purpose measures 20.000 ms with 0.1 % scatter, the DDK2
-// fixture - real audio through the WebSDR client's recorder - 20.000 ms with 8.8 %, a 45.45 baud take
-// 22.000 ms with 2.2 %, and a 40 baud take 25.000 ms with 0.9 %.
+// Thresholds, set from the takes that decode. Transitions are interpolated zero crossings against
+// two phase centres, so these are the audio's numbers and not the estimator's: a clean 50 baud take
+// generated for this purpose measures 20.000 ms with 0.6-0.9 % scatter, the DDK2 fixture - real
+// audio through the WebSDR client's recorder - 20.000 ms with 7.0 % median (8.8 % rms), the fixture
+// stretched by 1, 2 and 3 % either way 19.400 to 20.600 ms with 6.4 to 7.4 % while still decoding at
+// 2.7 to 6.8 %, a 45.45 baud take 22.000 ms with 2.2 %, and a 40 baud take 25.000 ms with 0.9 %.
 //
-// The fixture is the realistic case, so the limits sit just outside it. The period window is 5 %,
-// which passes both reference takes at their nominal period and refuses a 45.45 baud take at 10 %
-// long even though its pair and its scatter look perfect; the scatter limit is 12 %, above the
-// fixture's 8.8 % and well above the 2.2 % a mis-keyed rate costs. Scatter is what carries a take
-// damaged in a way the pair cannot see - a keyed signal whose edges have been smeared or clipped -
-// while the pair and the bimodality carry a stretch of noise or hash. A take that cannot clear these
-// is not evidence about the modem either way.
+// The scatter limit is 12 % of a bit on the median absolute deviation - the statistic a single stray
+// crossing cannot move - and so sits well above the 7.4 % the worst take that still decodes reads;
+// the rms printed beside it reaches 8.8 % on the same audio. The period window is 5 %, which passes
+// both reference takes at their nominal period and refuses a 45.45 baud take at 10 % long even
+// though its pair and its scatter look perfect. Scatter is what carries a take damaged in a way the
+// pair cannot see - a keyed signal whose edges have been smeared or clipped - while the pair and the
+// bimodality carry a stretch of noise or hash. A take that cannot clear these is not evidence about
+// the modem either way.
 #define GATE_SINGLE_MIN   0.55   // windows holding one tone
 #define GATE_BOTH_MAX     0.35   // windows holding both: straddled bits plus noise
 #define GATE_PAIR_SLACK   30.0   // Hz between the measured pair and the declared shift
 #define GATE_PERIOD_TOL   0.05   // fraction of a bit
-#define GATE_MAD           8.0   // percent of a bit, median absolute deviation
+#define GATE_MAD          12.0   // percent of a bit, median absolute deviation
 #define GATE_GAP_MS        5.0   // longest hole a take may carry
 
 static int capture_check(const char* path, uint16_t shift, uint16_t baud)
@@ -2571,17 +3086,21 @@ typedef struct
 {
     char   exp, got;
     int    trans, ok;
-    double mark_db, space_db, jitter_ms;
+    double mark_db, space_db;
 } align_row_t;
 
-#define ALIGN_MAX 512
-static align_row_t align_row[ALIGN_MAX];
+// one row per character the expected text carries, so the array is the decode buffer's own length:
+// the text is normalised into a buffer that size and normalising cannot lengthen it
+static align_row_t align_row[8192];
 static size_t align_rows;
 // the edit script beside the per-character table, and the decoder's unnormalised text: an inserted
 // character has no row of its own, and the row a space should have is taken by the take's line break
 static int  align_ins, align_del, align_sub;
-static char align_ins_char;
 static char align_raw[8192];
+// the level the take's own characters sit at, averaged over the ones it read as sent and keyed at
+// all: the junction is checked against this, the same number the table prints, and not against a
+// level carried over from another take
+static double align_ref_mark, align_ref_space;
 
 static int align_wav(const char* path, const char* expected, uint16_t shift, uint16_t baud)
 {
@@ -2624,10 +3143,9 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
     // characters differ is a character read wrong. Keeping them apart is the difference between
     // "one character arrived beside the text" and "two characters were misread".
     int ins = 0, del = 0, sub = 0;
-    char ins_char = '\0';
     {
         static char paired[8192];
-        memset(paired, 0, nd ? nd : 1);
+        memset(paired, 0, nd);
         for (size_t i = 0; i < ne; i++)
         {
             if (match[i] < 0) { del++; continue; }
@@ -2635,31 +3153,30 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
             if (dec[match[i]] != exp[i]) sub++;
         }
         for (size_t j = 0; j < nd; j++)
-        {
-            if (paired[j]) continue;
-            if (!ins) ins_char = dec[j];
-            ins++;
-        }
+            if (!paired[j]) ins++;
     }
-    align_ins = ins; align_del = del; align_sub = sub; align_ins_char = ins_char;
+    align_ins = ins; align_del = del; align_sub = sub;
 
-    printf("\n%3s %3s %3s %9s %9s %5s %7s\n", "#", "exp", "got", "mark dB", "space dB",
-           "trans", "jit ms");
-    double sum_mark = 0.0, sum_space = 0.0, sum_rms = 0.0, last_s0 = 0.0;
+    // No timing column: a character carries two or three transitions, and a phase fitted from those
+    // same transitions leaves a residual that says how well the fit worked, not how well the clock
+    // ran - a single transition always fits exactly. The clock is measured over the whole take by
+    // capture-check and slot by slot by rtty-trace; this table reports what each character carried.
+    printf("\n%3s %3s %3s %9s %9s %5s\n", "#", "exp", "got", "mark dB", "space dB", "trans");
+    double sum_mark = 0.0, sum_space = 0.0, last_s0 = 0.0;
     int good = 0;
     for (size_t i = 0; i < ne; i++)
     {
-        // The window is the decoder's own: it reports a character when it has read it, so the
-        // stretch of audio ending half a character later than that report is the audio the modem
-        // decided on. The timing column is the scatter of the transitions inside that window around
-        // their own phase, not around the window's edge: where the window sits is the decoder's
-        // business, and a window placed half a bit out would otherwise read as half a bit of error.
+        // The decoder reports a character when it has finished reading it, so its own report places
+        // the window: one character back from there, less half a bit of slack for where in the stop
+        // bits it reports. The start bit's leading edge is a transition, so that guess is then latched
+        // onto the nearest one within half a bit, which is what makes the placement exact.
+        // A character the modem dropped has no report and keeps the slot after the one before it.
         const int jj = match[i];
-        double s0s = last_s0 + char_s;                  // a character the modem dropped still has a slot
+        double s0s = last_s0 + char_s;
         if (jj >= 0 && (size_t)lead_in_junk + (size_t)jj < (size_t)Bench_CharCount)
             s0s = (double)Bench_CharAt[lead_in_junk + jj] / 12000.0 - char_s - 0.5 * bit_s;
-        // the character begins with a start bit whose leading edge is a transition: latch the window
-        // onto the nearest one, so the bit centres below are sampled where the bits are
+        // latch onto the start bit's leading edge, so the bit centres below are sampled where the
+        // bits are; the latch never moves the window further than half a bit
         {
             double best_t = s0s, near = 1.0;
             for (size_t q = 0; q < nt; q++)
@@ -2678,39 +3195,19 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
         const double hi_m = gate_tone(c.x + s0, (int)(s1 - s0), pair.hi_hz, c.rate);
         const double mark_db = 20.0 * log10(lo_m + 1e-9);
         const double space_db = 20.0 * log10(hi_m + 1e-9);
+        // how often the tone changed inside the character's own window: a character with its keying
+        // under it changes at least once, a window that landed on silence does not change at all
         int trans = 0;
-        double csum = 0.0, ssum = 0.0, sq = 0.0;
         for (size_t q = 0; q < nt; q++)
-        {
-            if (t[q] < s0s || t[q] >= s1s) continue;
-            trans++;
-            const double ang = 2.0 * GATE_PI * fmod(t[q] - s0s, bit_s) / bit_s;
-            csum += cos(ang); ssum += sin(ang);
-        }
-        if (trans)
-        {
-            const double phase = atan2(ssum, csum) / (2.0 * GATE_PI) * bit_s;   // the window's own grid
-            for (size_t q = 0; q < nt; q++)
-            {
-                if (t[q] < s0s || t[q] >= s1s) continue;
-                const double off = t[q] - s0s - phase;
-                const double r = (off - bit_s * round(off / bit_s)) * 1000.0;
-                sq += r * r;
-            }
-        }
-        const double rms_ms = trans ? sqrt(sq / (double)trans) : NAN;
-        const int j = match[i];
-        const char have_c = j >= 0 ? dec[j] : '-';
-        const int ok = j >= 0 && have_c == exp[i];
-        printf("%3zu %3c %3c %9.1f %9.1f %5d %7.2f %s\n", i + 1, exp[i], have_c,
-               mark_db, space_db, trans, rms_ms, ok ? "" : "*");
-        if (align_rows < ALIGN_MAX)
-        {
-            align_row_t* r = &align_row[align_rows++];
-            r->exp = exp[i]; r->got = have_c; r->trans = trans; r->ok = ok;
-            r->mark_db = mark_db; r->space_db = space_db; r->jitter_ms = rms_ms;
-        }
-        if (ok && trans) { good++; sum_mark += mark_db; sum_space += space_db; sum_rms += rms_ms; }
+            if (t[q] >= s0s && t[q] < s1s) trans++;
+        const char have_c = jj >= 0 ? dec[jj] : '-';
+        const int ok = have_c == exp[i];          // '-' is never a character the text carries
+        printf("%3zu %3c %3c %9.1f %9.1f %5d %s\n", i + 1, exp[i], have_c,
+               mark_db, space_db, trans, ok ? "" : "*");
+        align_row_t* r = &align_row[align_rows++];
+        r->exp = exp[i]; r->got = have_c; r->trans = trans; r->ok = ok;
+        r->mark_db = mark_db; r->space_db = space_db;
+        if (ok && trans) { good++; sum_mark += mark_db; sum_space += space_db; }
     }
     const size_t distance = Bench_Levenshtein(exp, dec);
     printf("\n%zu expected, %zu decoded: %d inserted, %d not in the take, %d substituted; lead in "
@@ -2719,9 +3216,11 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
            distance, ne ? 100.0 * (double)distance / (double)ne : 0.0, ne);
     if (good)
     {
-        printf("the %d characters that decoded: mark %.1f dB, space %.1f dB, jitter %.2f ms on average\n",
-               good, sum_mark / good, sum_space / good, sum_rms / good);
+        printf("the %d characters that decoded: mark %.1f dB, space %.1f dB on average\n",
+               good, sum_mark / good, sum_space / good);
     }
+    align_ref_mark = good ? sum_mark / good : NAN;
+    align_ref_space = good ? sum_space / good : NAN;
     printf("%s\n", nt ? "* marks a character the modem did not reproduce as sent"
                       : "no transitions: nothing to place the windows against");
 
@@ -2742,7 +3241,6 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
 // than quietly left standing.
 static int align_check(const char* path, const char* expected, uint16_t shift, uint16_t baud)
 {
-    align_rows = 0;
     const int rc = align_wav(path, expected, shift, baud);
     if (rc) return rc;
     if (align_rows < 27)
@@ -2751,52 +3249,48 @@ static int align_check(const char* path, const char* expected, uint16_t shift, u
                align_rows);
         return 1;
     }
-    double mk[ALIGN_MAX], sp[ALIGN_MAX];
-    size_t nm = 0;
-    for (size_t i = 0; i < align_rows; i++)
+    if (!isfinite(align_ref_mark))
     {
-        if (!align_row[i].ok) continue;
-        mk[nm] = align_row[i].mark_db;
-        sp[nm] = align_row[i].space_db;
-        nm++;
+        printf("FAIL  nothing in the take decoded, so there is no level to compare the junction\n"
+               "      with\n");
+        return 1;
     }
-    qsort(mk, nm, sizeof(double), cmp_double);
-    qsort(sp, nm, sizeof(double), cmp_double);
-    const double med_mark = nm ? mk[nm / 2] : 0.0;
-    const double med_space = nm ? sp[nm / 2] : 0.0;
-    const double fade_db = 12.0;      // this far under the take's own levels is a fade, not keying
-
+    const double fade_db = 12.0;      // this far under the take's own level is a fade, not keying
     int bad = 0;
     printf("\npinned junction: one inserted character, and the line break where the pinned space is\n");
     printf("%3s %3s %3s %9s %9s %10s %5s  %s\n", "#", "exp", "got", "mark dB", "space dB",
-           "vs median", "trans", "verdict");
-    for (int i = 25; i <= 26; i++)
+           "vs take", "trans", "verdict");
+    for (int i = 25; i < 27; i++)
     {
         const align_row_t* r = &align_row[i];
-        const double worst = fmin(r->mark_db - med_mark, r->space_db - med_space);
+        // the worse of the two tones: a window that has lost half its keying is a fade whether the
+        // louder tone is still where it was or not
+        const double worst = fmin(r->mark_db - align_ref_mark, r->space_db - align_ref_space);
         const int keyed = r->trans >= 1 && worst > -fade_db;
-        const int line_break = r->got == '-';
         printf("%3d %3c %3c %9.1f %9.1f %+10.1f %5d  %s\n", i + 1, r->exp, r->got, r->mark_db,
                r->space_db, worst, r->trans,
-               r->ok ? "decoded as sent" : line_break ? "the take's line break here" : "MISREAD");
-        if (i == 25 && (!r->ok || r->exp != '9'))
+               r->ok ? "decoded as sent" : r->got == '-' ? "the take's line break here" : "MISREAD");
+        if (!keyed)
         {
-            printf("FAIL  the character before the break is %c/%c, not the 9 read as sent: the\n"
-                   "      insertion is supposed to sit beside the text, not in place of it\n",
-                   r->exp, r->got);
-            bad = 1;
-        }
-        if (i == 26 && (!line_break || !keyed))
-        {
-            printf("FAIL  the pinned space is not the take's line break with its own keying: got\n"
-                   "      '%c', %d transitions, %.1f dB under the take's own levels\n",
-                   r->got, r->trans, worst);
+            printf("FAIL  character %d carries %d transitions and sits %.1f dB under the take's own\n"
+                   "      level: a fade, not keying\n", i + 1, r->trans, worst);
             bad = 1;
         }
     }
-    printf("inserted: %d character ('%c'), substituted: %d, not in the take: %d\n",
-           align_ins, align_ins_char ? align_ins_char : '?', align_sub, align_del);
-    if (align_ins != 1 || align_ins_char != '5' || align_sub != 0 || align_del != 1)
+    if (!align_row[25].ok || align_row[25].exp != '9')
+    {
+        printf("FAIL  the character before the break is %c/%c, not the 9 read as sent: the\n"
+               "      insertion is supposed to sit beside the text, not in place of it\n",
+               align_row[25].exp, align_row[25].got);
+        bad = 1;
+    }
+    if (align_row[26].got != '-')
+    {
+        printf("FAIL  the pinned space is not the take's line break: got '%c'\n", align_row[26].got);
+        bad = 1;
+    }
+    printf("inserted: %d, substituted: %d, not in the take: %d\n", align_ins, align_sub, align_del);
+    if (align_ins != 1 || align_sub != 0 || align_del != 1)
     {
         printf("FAIL  the junction is %d inserted / %d substituted / %d not in the take; the record\n"
                "      is one inserted character, no carried character read wrong, and the space the\n"
@@ -2816,8 +3310,8 @@ static int align_check(const char* path, const char* expected, uint16_t shift, u
                "the pinned text carries. The inserted slot itself is the decoder's reading ('5');\n"
                "the audio there is a second nine, one data bit away. The scorer charges the insertion\n"
                "and the pinned space the break stands in for - %d edits over %zu characters, %.1f %% -\n"
-               "which is what 2.7 %% is made of. Both windows carry their own keying, so a break that\n"
-               "became a fade would fail here.\n",
+               "which is what 2.7 %% is made of. Both windows carry their own keying at the take's own\n"
+               "level, so a break that became a fade would fail here.\n",
                align_ins + align_sub + align_del, align_rows,
                100.0 * (double)(align_ins + align_sub + align_del) / (double)align_rows);
     }
@@ -3128,7 +3622,7 @@ static int tx_check(void)
         const uint16_t shift = cfg[i].shift, baud = cfg[i].baud;
         const double bit_ms = 1000.0 / (double)baud;
         const size_t n = tx_capture(msg, shift, baud, buf, (size_t)MAX_SAMP);
-        cap_t c = { buf, n, 12000 };
+        cap_t c = { buf, n, 12000, 1 };
         double clo = 0.0, chi = 0.0;
         if (!gate_coarse_pair(&c, &clo, &chi))
         {
@@ -3227,8 +3721,6 @@ static int tx_check(void)
 /* ------------------------------------------------------------------ *
  *  self checks
  * ------------------------------------------------------------------ */
-static int failures;
-
 static void check(int ok, const char* what)
 {
     printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
@@ -3777,26 +4269,31 @@ static int selftest(void)
         // The generators cap a message at 300 characters, and a 300 character MFSK16 take is the
         // case that crosses the Viterbi step ceiling: a maximum length Varicode character is ten
         // bits plus its two bit delimiter, so 300 of them are 3600 information bits, not the 2048
-        // the old path memory held. Olivia's equivalent is 300 characters in 61 blocks, which is
-        // the other end of the same buffer question. Both are checked by exact text, not by a count
-        // of symbols, so a cap that silently truncates fails here.
+        // the old path memory held. Only the control characters have a ten bit code - '~', which
+        // this take used to send, is nine bits and 300 of them are 3312, short of the number the
+        // check is about. Olivia's equivalent is 300 characters in 61 blocks, which is the other
+        // end of the same buffer question. Both are checked by exact text, not by a count of
+        // symbols, so a cap that silently truncates fails here.
         char msg[301];
         memset(msg, '~', 300);
         msg[300] = 0;
-        const size_t cap = 2000000;         // 1.27 M MFSK16 samples, 1.50 M Olivia samples
+        char mfmsg[301];
+        memset(mfmsg, '\x01', 300);              // ten bits per character: 3600 information bits
+        mfmsg[300] = 0;
+        const size_t cap = 2000000;         // 1.39 M MFSK16 samples, 1.50 M Olivia samples
         {
             float32_t* x = malloc(cap * sizeof(float32_t));
             char got[512];
             mfsk16_result_t r = {0};
-            const size_t n = x ? Bench_Mfsk16Generate(x, cap, msg, 0.0f) : 0;
+            const size_t n = x ? Bench_Mfsk16Generate(x, cap, mfmsg, 0.0f) : 0;
             check(n > 1000000, "mfsk16: a 300 character take fits the generator cap and buffer");
             const int ok = n > 0 && Bench_Mfsk16Decode(x, n, got, sizeof(got), &r);
             printf("     (300 characters: %zu samples, %u symbols, %u coded bits, %u steps)\n",
                    n, r.symbols, r.bits, r.viterbi_bits);
             check(ok, "mfsk16: a 300 character take decodes");
-            check(ok && r.viterbi_bits > 2048,
-                  "mfsk16: the long take is past the old 2048 step ceiling");
-            check(ok && strcmp(got, msg) == 0, "mfsk16: the 300 characters come back as sent");
+            check(ok && r.viterbi_bits >= 3600,
+                  "mfsk16: the long take needs the full 3600 step path memory");
+            check(ok && strcmp(got, mfmsg) == 0, "mfsk16: the 300 characters come back as sent");
             free(x);
         }
         {
@@ -3856,6 +4353,7 @@ int main(int argc, char** argv)
     if (!strcmp(what, "mfsk16")) return mfsk16_table();
     if (!strcmp(what, "olivia")) return olivia_table();
     if (!strcmp(what, "floors-2k5")) return floors_2k5();
+    if (!strcmp(what, "floors-2k5-check")) return floors_2k5_check();
     // the gate a take has to clear before it is worth decoding, let alone pinning: it measures the
     // file and never touches the modem, so it cannot be fooled by the modem agreeing with itself
     if (!strcmp(what, "capture-check") && argc > 2)

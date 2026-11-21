@@ -31,6 +31,7 @@
 #define OL_SYMBOL   384                 // samples: 32 ms at 12 kHz
 #define OL_BITS     5                   // bits a symbol: log2 of the tone count
 #define OL_SYMS     64                  // symbols in a Walsh block
+#define OL_MAX_BLOCKS 102               // blocks the 512 character buffer holds, five a block
 #define OL_CHARS    5                   // characters in a block: 64 x 5 = 5 x 64 bits
 #define OL_SCRAMBLE 0xE257E6D0291574ECull
 #define OL_SHIFT    13                  // bits the scrambler rotates per character
@@ -203,6 +204,12 @@ static void ol_energies(const float32_t* x, size_t at, double* e)
     }
 }
 
+// The block buffer is the 512 character one the caller's text is read into, five characters a block.
+size_t Bench_OliviaMaxSamples(void)
+{
+    return (size_t)OL_MAX_BLOCKS * (size_t)OL_SYMS * (size_t)OL_SYMBOL;
+}
+
 int Bench_OliviaDecode(const float32_t* x, size_t n, char* out, size_t out_sz, olivia_result_t* res)
 {
     memset(res, 0, sizeof(*res));
@@ -244,8 +251,8 @@ int Bench_OliviaDecode(const float32_t* x, size_t n, char* out, size_t out_sz, o
     const size_t nsym = (n - (size_t)best_phase) / OL_SYMBOL;
     const size_t nblk = nsym / OL_SYMS;
     if (nblk < 1) return 0;
-    static int codes[512];
-    if (nblk * OL_CHARS > (size_t)(sizeof(codes) / sizeof(codes[0]))) return 0;
+    static int codes[OL_MAX_BLOCKS * OL_CHARS];
+    if (nblk > OL_MAX_BLOCKS) return 0;
 
     double soft[OL_SYMS][OL_BITS];
     for (size_t blk = 0; blk < nblk; blk++)

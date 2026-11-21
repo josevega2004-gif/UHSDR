@@ -26,4 +26,9 @@ size_t Bench_Mfsk16Generate(float32_t* out, size_t cap, const char* text, float 
 // interleaver, runs the Viterbi decoder and frames the result with the Varicode table.
 int Bench_Mfsk16Decode(const float32_t* x, size_t n, char* out, size_t out_sz, mfsk16_result_t* res);
 
+// How many samples that decode can take: the trellis keeps a predecessor per state per step, and a
+// longer take is refused rather than read short, so a recording bigger than this has to be cropped
+// and the crop reported.
+size_t Bench_Mfsk16MaxSamples(void);
+
 #endif

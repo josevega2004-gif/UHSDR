@@ -150,6 +150,10 @@ static void mf_deinterleave(const uint8_t* in, uint8_t* out, size_t blocks)
     }
 }
 
+// MF_MAX_STEPS trellis steps, two coded bits a step and four coded bits a symbol: the audio that
+// fits is half as many symbols as there are steps.
+size_t Bench_Mfsk16MaxSamples(void) { return (size_t)(MF_MAX_STEPS / 2) * (size_t)MF_SYMBOL; }
+
 size_t Bench_Mfsk16Generate(float32_t* out, size_t cap, const char* text, float tune_hz)
 {
     static uint8_t bits[8192], coded[8192], tx[8192];

@@ -26,4 +26,8 @@ size_t Bench_OliviaGenerate(float32_t* out, size_t cap, const char* text, float 
 // header the stream starts with.
 int Bench_OliviaDecode(const float32_t* x, size_t n, char* out, size_t out_sz, olivia_result_t* res);
 
+// How many samples that decode can take: five characters a block into a buffer of 512, after which
+// the take is refused rather than read short. A longer recording has to be cropped and said so.
+size_t Bench_OliviaMaxSamples(void);
+
 #endif
