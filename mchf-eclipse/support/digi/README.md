@@ -11,6 +11,7 @@ make -C support/digi navtex   # NAVTEX / SITOR-B through a reference modem: alph
 make -C support/digi hell     # Hellschreiber: on/off keyed raster, scored as a picture
 make -C support/digi mfsk16   # MFSK16: 16 tones, Varicode, rate 1/2 code, interleaver over 8 symbols
 make -C support/digi olivia   # Olivia: 32 tones, 64 symbol Walsh blocks, five characters a block
+make -C support/digi record-check # the four non RTTY modes reading a WAV with a long lead
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi fixture-align  # per character: what the take sent, what the modem read, and the audio
 make -C support/digi rtty-trace    # the demodulator's own bit decisions, for the same take
@@ -23,6 +24,12 @@ make -C support/digi fixture-check  # do fixtures/MANIFEST.md's numbers still de
 ./digi_bench rtty-wav <file.wav> [shift] ["expected text"] [45|50 baud] [max CER %]
                             # decode a recorded file with the firmware demodulator; the optional
                             # CER limit turns a pinned recording into a graded case
+./digi_bench navtex-wav <file.wav> ["expected text"] [max CER %]
+./digi_bench mfsk16-wav <file.wav> ["expected text"] [max CER %]
+./digi_bench olivia-wav <file.wav> ["expected text"] [max CER %]
+./digi_bench hell-wav <file.wav> [out.pgm]
+                            # the same recorded input for the other modes; leading silence is
+                            # trimmed and the start is searched across one symbol
 ```
 
 ## The capture gate, `capture-check`
@@ -83,6 +90,34 @@ way. The gate has already earned its place: a
 its windows holding both tones and is refused, while a synthetic 50 baud take - the same program,
 the same filters, where the pair really is switched - reads 0.00 both tones and 20.000 ms and is
 accepted.
+
+## Recorded input for NAVTEX, Hell, MFSK16 and Olivia
+
+`navtex-wav`, `mfsk16-wav`, `olivia-wav` and `hell-wav` are the recording paths for the modes whose
+tables otherwise hand the decoder a buffer starting on a symbol boundary. Each takes the same 16 bit
+PCM WAV as `rtty-wav`, resamples it to 12 kHz and trims gain from the file peak. It then finds the
+first 5 ms window above 2 % of the peak and starts the search there, so a recording may open with
+seconds of silence. The symbol clock has no phase known in advance: the block modes try starts over
+one symbol in sixteenths and keep the decode with the fewest characters wrong (or, when no text is
+given, the most symbols heard); NAVTEX and Hell are already fitting the bit/pixel phase and column
+grouping themselves, and are given the same short set of starts around the onset. `hell-wav` writes
+the decoded raster as a PGM, since Hell has no character alphabet to score.
+
+```
+./digi_bench mfsk16-wav recording.wav "MFSK16 TEST DE UHSDR 12345" 0
+  file      : recording.wav
+  format    : 12000 Hz, 1 channel(s), 7.41 s
+  onset     : 750.0 ms (sample 9000)
+  phase     : trial 5, start 8472 samples (44.0 ms before onset)
+  decoded   : MFSK16 TEST DE UHSDR 12345
+  symbols   : 104, heard 100.0 %
+  CER       : 0.0 %
+```
+
+The optional expected text and CER limit make a recording a graded case, as with `rtty-wav`; without
+them the verb prints the decode and the phase it chose. `make -C support/digi record-check` writes
+each mode's own take with a 0.75 s lead into `/tmp` and decodes it through these paths, which is the
+first check here that does not hand a decoder the transmission start.
 
 `rtty-wav` takes any 16 bit PCM WAV, any sample rate, mono or stereo: it resamples to the 12 kHz
 the demodulator is pinned at and trims gain from the file peak, so a quiet recording still reaches

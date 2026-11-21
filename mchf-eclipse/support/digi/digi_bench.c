@@ -1586,6 +1586,351 @@ static int cap_load(const char* path, cap_t* c)
     return 1;
 }
 
+/* ------------------------------------------------------------------ *
+ *  recorded input for the non RTTY modes
+ * ------------------------------------------------------------------ */
+// The tables above all hand a decoder a take that starts on a symbol boundary. A recording starts
+// wherever the recorder was: leading silence, and the first symbol somewhere inside the buffer.
+// These verbs trim the silence, then try starts across one symbol and keep the decode that scores
+// best. The decoders themselves fit the phase inside a symbol; the search here is what gives them a
+// buffer whose first symbol is close enough to find.
+
+static float* rec_load_12k(const char* path, size_t* n_out, double* secs, uint32_t* rate_out,
+                           uint32_t* ch_out)
+{
+    cap_t c;
+    if (!cap_load(path, &c)) return NULL;
+    const size_t n = (size_t)llround((double)c.n * 12000.0 / (double)c.rate);
+    float* x = malloc((n ? n : 1) * sizeof(float));
+    if (!x) { free(c.x); return NULL; }
+    float peak = 0.0f;
+    for (size_t i = 0; i < c.n; i++) if (fabsf(c.x[i]) > peak) peak = fabsf(c.x[i]);
+    const float gain = peak > 0.0f ? 0.7f / peak : 1.0f;
+    for (size_t k = 0; k < n; k++)
+    {
+        const double src = (double)k * (double)c.rate / 12000.0;
+        size_t a = (size_t)src;
+        if (a >= c.n) a = c.n - 1;
+        const size_t b = a + 1 < c.n ? a + 1 : a;
+        const double fr = b == a ? 0.0 : src - (double)a;
+        x[k] = (float)((c.x[a] + (float)fr * (c.x[b] - c.x[a])) * gain);
+    }
+    *n_out = n;
+    *secs = (double)c.n / (double)c.rate;
+    *rate_out = 12000;
+    *ch_out = 1;
+    free(c.x);
+    return x;
+}
+
+// first 5 ms window whose RMS is over 2 % of the take's peak. A recording that is mostly silence
+// otherwise spends its symbol search on silence, and the block modes start their block count there.
+static size_t rec_onset(const float* x, size_t n)
+{
+    const size_t win = 60;
+    float peak = 0.0f;
+    for (size_t i = 0; i < n; i++) if (fabsf(x[i]) > peak) peak = fabsf(x[i]);
+    const double thr = 0.02 * (double)peak;
+    for (size_t i = 0; i + win <= n; i += win / 2)
+    {
+        double acc = 0.0;
+        for (size_t j = 0; j < win; j++) acc += (double)x[i + j] * x[i + j];
+        if (sqrt(acc / (double)win) > thr) return i;
+    }
+    return 0;
+}
+
+static int navtex_wav(const char* path, const char* expected, float limit)
+{
+    size_t n; double secs; uint32_t rate, ch;
+    float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
+    if (!x) return 1;
+    const size_t onset = rec_onset(x, n);
+    int best_err = 1 << 30; double best_rank = 1e30; int found = 0;
+    char best_text[8192] = ""; navtex_result_t best_res;
+    memset(&best_res, 0, sizeof(best_res));
+    for (int k = 0; k <= 8; k++)
+    {
+        long st = (long)onset - 120 + (long)k * 15;
+        if (st < 0) st = 0;
+        if ((size_t)st >= n) break;
+        navtex_result_t r; char got[8192];
+        const int ok = Bench_NavtexDecode(x + st, n - (size_t)st, got, sizeof(got), &r);
+        if (!ok) continue;
+        const int err = expected && *expected ? exact_char_errors(expected, got, 1) : 0;
+        const double rank = expected && *expected ? (double)err : -(double)r.valid_fraction;
+        if (!found || rank < best_rank)
+        {
+            found = 1; best_rank = rank; best_err = err;
+            snprintf(best_text, sizeof(best_text), "%s", got);
+            best_res = r;
+        }
+    }
+    printf("file      : %s\nformat    : %u Hz, %u channel(s), %.2f s\n", path, rate, ch, secs);
+    printf("onset     : %.1f ms (sample %zu); %s\n", 1000.0 * (double)onset / 12000.0, onset,
+           found ? "decoded" : "nothing decoded");
+    if (!found) { free(x); return 1; }
+    printf("decoded   : %s\n", best_text);
+    printf("clock     : period %.1f samples, phasing run %d, valid fraction %.3f\n",
+           best_res.period_samples, best_res.phasing_run, best_res.valid_fraction);
+    if (expected && *expected)
+    {
+        const double cer = 100.0 * (double)best_err / (double)strlen(expected);
+        printf("CER       : %.1f %%\n", cer);
+        if (limit >= 0.0f && cer > (double)limit)
+        {
+            printf("CER is above the %g %% this case pins\n", (double)limit);
+            free(x); return 1;
+        }
+    }
+    free(x);
+    return 0;
+}
+
+static int mfsk16_wav(const char* path, const char* expected, float limit)
+{
+    size_t n; double secs; uint32_t rate, ch;
+    float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
+    if (!x) return 1;
+    const size_t onset = rec_onset(x, n);
+    const size_t S = 768;                 // 12 kHz / 15.625 Bd
+    int best_err = 1 << 30, found = 0; double best_rank = 1e30;
+    size_t best_start = 0; int best_k = -1;
+    char best_text[512] = ""; mfsk16_result_t best_res;
+    memset(&best_res, 0, sizeof(best_res));
+    for (int k = 0; k <= 16; k++)
+    {
+        long st = (long)onset - (long)S + (long)k * (long)S / 16;
+        if (st < 0) st = 0;
+        if ((size_t)st >= n) break;
+        mfsk16_result_t r; char got[512];
+        const int ok = Bench_Mfsk16Decode(x + st, n - (size_t)st, got, sizeof(got), &r);
+        if (!ok) continue;
+        const int err = expected && *expected ? exact_char_errors(expected, got, 1) : 0;
+        const double rank = expected && *expected ? (double)err : -(double)r.tones_ok;
+        if (!found || rank < best_rank)
+        {
+            found = 1; best_rank = rank; best_err = err; best_start = (size_t)st; best_k = k;
+            snprintf(best_text, sizeof(best_text), "%s", got);
+            best_res = r;
+        }
+    }
+    printf("file      : %s\nformat    : %u Hz, %u channel(s), %.2f s\n", path, rate, ch, secs);
+    printf("onset     : %.1f ms (sample %zu)\n", 1000.0 * (double)onset / 12000.0, onset);
+    if (!found) { printf("nothing decoded\n"); free(x); return 1; }
+    printf("phase     : trial %d, start %zu samples (%.1f ms before onset)\n", best_k, best_start,
+           1000.0 * ((double)onset - (double)best_start) / 12000.0);
+    printf("decoded   : %s\n", best_text);
+    printf("symbols   : %u, heard %.1f %%\n", best_res.symbols,
+           best_res.symbols ? 100.0 * (double)best_res.tones_ok / (double)best_res.symbols : 0.0);
+    if (expected && *expected)
+    {
+        const double cer = 100.0 * (double)best_err / (double)strlen(expected);
+        printf("CER       : %.1f %%\n", cer);
+        if (limit >= 0.0f && cer > (double)limit)
+        {
+            printf("CER is above the %g %% this case pins\n", (double)limit);
+            free(x); return 1;
+        }
+    }
+    free(x);
+    return 0;
+}
+
+static int olivia_wav(const char* path, const char* expected, float limit)
+{
+    size_t n; double secs; uint32_t rate, ch;
+    float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
+    if (!x) return 1;
+    const size_t onset = rec_onset(x, n);
+    const size_t S = 384;                 // 12 kHz / 31.25 Bd
+    int best_err = 1 << 30, found = 0; double best_rank = 1e30;
+    size_t best_start = 0; int best_k = -1;
+    char best_text[512] = ""; olivia_result_t best_res;
+    memset(&best_res, 0, sizeof(best_res));
+    for (int k = 0; k <= 16; k++)
+    {
+        long st = (long)onset - (long)S + (long)k * (long)S / 16;
+        if (st < 0) st = 0;
+        if ((size_t)st >= n) break;
+        olivia_result_t r; char got[512];
+        const int ok = Bench_OliviaDecode(x + st, n - (size_t)st, got, sizeof(got), &r);
+        if (!ok) continue;
+        const int err = expected && *expected ? exact_char_errors(expected, got, 1) : 0;
+        const double rank = expected && *expected ? (double)err : -(double)r.tones_ok;
+        if (!found || rank < best_rank)
+        {
+            found = 1; best_rank = rank; best_err = err; best_start = (size_t)st; best_k = k;
+            snprintf(best_text, sizeof(best_text), "%s", got);
+            best_res = r;
+        }
+    }
+    printf("file      : %s\nformat    : %u Hz, %u channel(s), %.2f s\n", path, rate, ch, secs);
+    printf("onset     : %.1f ms (sample %zu)\n", 1000.0 * (double)onset / 12000.0, onset);
+    if (!found) { printf("nothing decoded\n"); free(x); return 1; }
+    printf("phase     : trial %d, start %zu samples (%.1f ms before onset)\n", best_k, best_start,
+           1000.0 * ((double)onset - (double)best_start) / 12000.0);
+    printf("decoded   : %s\n", best_text);
+    printf("symbols   : %u, heard %.1f %%, blocks %u\n", best_res.symbols,
+           best_res.symbols ? 100.0 * (double)best_res.tones_ok / (double)best_res.symbols : 0.0,
+           best_res.blocks);
+    if (expected && *expected)
+    {
+        const double cer = 100.0 * (double)best_err / (double)strlen(expected);
+        printf("CER       : %.1f %%\n", cer);
+        if (limit >= 0.0f && cer > (double)limit)
+        {
+            printf("CER is above the %g %% this case pins\n", (double)limit);
+            free(x); return 1;
+        }
+    }
+    free(x);
+    return 0;
+}
+
+static int hell_wav(const char* path, const char* out_pgm)
+{
+    size_t n; double secs; uint32_t rate, ch;
+    float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
+    if (!x) return 1;
+    const size_t onset = rec_onset(x, n);
+    const size_t S = 98;                  // 12 kHz / 122.5 Bd, rounded
+    const int MAXC = 2000;
+    uint8_t* pix = malloc((size_t)MAXC * HELL_ROWS);
+    uint8_t* best = malloc((size_t)MAXC * HELL_ROWS);
+    if (!pix || !best) { free(pix); free(best); free(x); return 1; }
+    int found = 0, best_cols = 0; double best_gap = -1.0; hell_result_t best_res;
+    memset(&best_res, 0, sizeof(best_res));
+    for (int k = 0; k <= 8; k++)
+    {
+        long st = (long)onset - (long)S + (long)k * (long)S / 8;
+        if (st < 0) st = 0;
+        if ((size_t)st >= n) break;
+        int cols = 0; hell_result_t r;
+        const int ok = Bench_HellDecode(x + st, n - (size_t)st, pix, MAXC, &cols, &r);
+        if (!ok || cols <= 0) continue;
+        if (!found || r.gap_share > best_gap || (r.gap_share == best_gap && cols > best_cols))
+        {
+            found = 1; best_gap = r.gap_share; best_cols = cols; best_res = r;
+            memcpy(best, pix, (size_t)MAXC * HELL_ROWS);
+        }
+    }
+    printf("file      : %s\nformat    : %u Hz, %u channel(s), %.2f s\n", path, rate, ch, secs);
+    printf("onset     : %.1f ms (sample %zu)\n", 1000.0 * (double)onset / 12000.0, onset);
+    if (!found) { printf("nothing decoded\n"); free(pix); free(best); free(x); return 1; }
+    printf("picture   : %d columns, column phase %d, pixel phase %d, gap share %.3f\n",
+           best_cols, best_res.column_phase, best_res.pixel_phase, best_res.gap_share);
+    FILE* f = fopen(out_pgm ? out_pgm : "hell-wav.pgm", "wb");
+    if (!f)
+    {
+        printf("cannot write %s\n", out_pgm ? out_pgm : "hell-wav.pgm");
+        free(pix); free(best); free(x);
+        return 1;
+    }
+    fprintf(f, "P5\n%d %d\n255\n", best_cols, HELL_ROWS);
+    for (int r = 0; r < HELL_ROWS; r++)
+        fwrite(best + (size_t)r * MAXC, 1, (size_t)best_cols, f);
+    fclose(f);
+    printf("wrote     : %s\n", out_pgm ? out_pgm : "hell-wav.pgm");
+    free(pix); free(best); free(x);
+    return 0;
+}
+
+static void check(int ok, const char* what);
+
+// The recording paths are checked against the same modems' own takes: a test WAV with a long lead,
+// written through the same WAV writer a fixture uses, has to decode as sent. This is not a real
+// recording, but it is the first path that does not hand the decoder a buffer starting on a symbol.
+static int record_check(void)
+{
+    int failures = 0;
+    const size_t lead = 9037;             // 0.75 s, not a multiple of any mode's symbol
+    {
+        static const char* msg = "NAVTEX TEST DE UHSDR";
+        const size_t cap = 400000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        const size_t n = x ? Bench_NavtexGenerate(x, cap, msg, 0.0f, NAVTEX_ORDER_TABLE) : 0;
+        float32_t* y = n ? calloc(n + lead, sizeof(float32_t)) : NULL;
+        if (y) memcpy(y + lead, x, n * sizeof(float32_t));
+        const bool wrote = y && Bench_WavWrite("/tmp/rec-navtex.wav", y, n + lead, 12000);
+        check(wrote, "record: a NAVTEX take with a lead can be written as a WAV");
+        if (wrote) failures += navtex_wav("/tmp/rec-navtex.wav", msg, 0.0f) != 0;
+        if (wrote && n > 200)
+        {
+            const size_t d = 60;             // half a bit, cut from the start
+            memmove(y + lead, y + lead + d, (n - d) * sizeof(float32_t));
+            const bool w2 = Bench_WavWrite("/tmp/rec-navtex-phase.wav", y, n + lead - d, 12000);
+            check(w2, "record: a NAVTEX take starting half a bit in can be written");
+            if (w2) failures += navtex_wav("/tmp/rec-navtex-phase.wav", msg, 0.0f) != 0;
+        }
+        free(x); free(y);
+    }
+    {
+        static const char* msg = "MFSK16 TEST DE UHSDR 12345";
+        const size_t cap = 200000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        const size_t n = x ? Bench_Mfsk16Generate(x, cap, msg, 0.0f) : 0;
+        float32_t* y = n ? calloc(n + lead, sizeof(float32_t)) : NULL;
+        if (y) memcpy(y + lead, x, n * sizeof(float32_t));
+        const bool wrote = y && Bench_WavWrite("/tmp/rec-mfsk16.wav", y, n + lead, 12000);
+        check(wrote, "record: an MFSK16 take with a lead can be written as a WAV");
+        if (wrote) failures += mfsk16_wav("/tmp/rec-mfsk16.wav", msg, 0.0f) != 0;
+        if (wrote && n > 800)
+        {
+            const size_t d = 383;            // half a 768 sample symbol
+            memmove(y + lead, y + lead + d, (n - d) * sizeof(float32_t));
+            const bool w2 = Bench_WavWrite("/tmp/rec-mfsk16-phase.wav", y, n + lead - d, 12000);
+            check(w2, "record: an MFSK16 take starting half a symbol in can be written");
+            if (w2) failures += mfsk16_wav("/tmp/rec-mfsk16-phase.wav", msg, 0.0f) != 0;
+        }
+        free(x); free(y);
+    }
+    {
+        static const char* msg = "OLIVIA TEST DE UHSDR 12345";
+        const size_t cap = 200000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        const size_t n = x ? Bench_OliviaGenerate(x, cap, msg, 0.0f) : 0;
+        float32_t* y = n ? calloc(n + lead, sizeof(float32_t)) : NULL;
+        if (y) memcpy(y + lead, x, n * sizeof(float32_t));
+        const bool wrote = y && Bench_WavWrite("/tmp/rec-olivia.wav", y, n + lead, 12000);
+        check(wrote, "record: an Olivia take with a lead can be written as a WAV");
+        if (wrote) failures += olivia_wav("/tmp/rec-olivia.wav", msg, 0.0f) != 0;
+        if (wrote && n > 500)
+        {
+            const size_t d = 192;            // half a 384 sample symbol
+            memmove(y + lead, y + lead + d, (n - d) * sizeof(float32_t));
+            const bool w2 = Bench_WavWrite("/tmp/rec-olivia-phase.wav", y, n + lead - d, 12000);
+            check(w2, "record: an Olivia take starting half a symbol in can be written");
+            if (w2) failures += olivia_wav("/tmp/rec-olivia-phase.wav", msg, 0.0f) != 0;
+        }
+        free(x); free(y);
+    }
+    {
+        static const char* msg = "HELL TEST";
+        const size_t cap = 40000;
+        static uint8_t truth[HELL_ROWS * 256];
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        int tcols = 0;
+        const size_t n = x ? Bench_HellGenerate(x, cap, msg, truth, 256, &tcols, 1000.0f, 0.0f) : 0;
+        float32_t* y = n ? calloc(n + lead, sizeof(float32_t)) : NULL;
+        if (y) memcpy(y + lead, x, n * sizeof(float32_t));
+        const bool wrote = y && Bench_WavWrite("/tmp/rec-hell.wav", y, n + lead, 12000);
+        check(wrote, "record: a Hell take with a lead can be written as a WAV");
+        if (wrote) failures += hell_wav("/tmp/rec-hell.wav", "/tmp/rec-hell.pgm") != 0;
+        if (wrote && n > 400)
+        {
+            const size_t d = 49;             // half a 98 sample pixel
+            memmove(y + lead, y + lead + d, (n - d) * sizeof(float32_t));
+            const bool w2 = Bench_WavWrite("/tmp/rec-hell-phase.wav", y, n + lead - d, 12000);
+            check(w2, "record: a Hell take starting half a pixel in can be written");
+            if (w2) failures += hell_wav("/tmp/rec-hell-phase.wav", "/tmp/rec-hell-phase.pgm") != 0;
+        }
+        free(x); free(y);
+    }
+    printf("%s\n", failures ? "RECORD CHECKS FAILED" : "record checks passed");
+    return failures ? 1 : 0;
+}
+
 #define GATE_PI 3.14159265358979323846
 
 // magnitude of one frequency inside a window, normalised so windows of different length compare
@@ -3162,12 +3507,15 @@ int main(int argc, char** argv)
 {
     const char* what = argc > 1 ? argv[1] : "test";
     // every mode that feeds the modem goes through the receiver's AGC, so it is set up once, before
-    // any case. rtty-wav is left out on purpose: it decodes a recording that already went through a
-    // receiver's AGC, and running it through a second one would not be the radio's path.
+    // any case. The *-wav verbs are left out on purpose: they decode a recording that already went
+    // through a receiver's AGC, and running it through a second one would not be the radio's path.
     if (strcmp(what, "rtty-wav") && strcmp(what, "rtty-align") && strcmp(what, "align-check")
         && strcmp(what, "rtty-trace") && strcmp(what, "tx-check") && strcmp(what, "wefax")
         && strcmp(what, "navtex") && strcmp(what, "hell") && strcmp(what, "mfsk16")
-        && strcmp(what, "olivia") && strcmp(what, "capture-check"))
+        && strcmp(what, "olivia") && strcmp(what, "capture-check")
+        && strcmp(what, "navtex-wav") && strcmp(what, "hell-wav")
+        && strcmp(what, "mfsk16-wav") && strcmp(what, "olivia-wav")
+        && strcmp(what, "record-check"))
         radio_agc_setup();
     if (!strcmp(what, "test")) return selftest();
     if (!strcmp(what, "rtty")) { return rtty_table(RTTY_TABLE_MSG, false); }
@@ -3185,6 +3533,7 @@ int main(int argc, char** argv)
         }
         return rtty_table(msg, true);
     }
+    if (!strcmp(what, "record-check")) return record_check();
     if (!strcmp(what, "rtty-shift")) { return rtty_shift(); }
     if (!strcmp(what, "rtty-tune")) { return rtty_tune(); }
     if (!strcmp(what, "wefax")) return wefax_table();
@@ -3200,6 +3549,16 @@ int main(int argc, char** argv)
         const uint16_t baud = argc > 4 ? (uint16_t)atoi(argv[4]) : 50;
         return capture_check(argv[2], shift, baud);
     }
+    // the non RTTY modes read a recording the same way: load it, trim the lead, and try the
+    // starts one symbol apart that a recorder could have handed the decoder
+    if (!strcmp(what, "navtex-wav") && argc > 2)
+        return navtex_wav(argv[2], argc > 3 ? argv[3] : "", argc > 4 ? (float)atof(argv[4]) : -1.0f);
+    if (!strcmp(what, "mfsk16-wav") && argc > 2)
+        return mfsk16_wav(argv[2], argc > 3 ? argv[3] : "", argc > 4 ? (float)atof(argv[4]) : -1.0f);
+    if (!strcmp(what, "olivia-wav") && argc > 2)
+        return olivia_wav(argv[2], argc > 3 ? argv[3] : "", argc > 4 ? (float)atof(argv[4]) : -1.0f);
+    if (!strcmp(what, "hell-wav") && argc > 2)
+        return hell_wav(argv[2], argc > 3 ? argv[3] : NULL);
     if (!strcmp(what, "rtty-wav") && argc > 2)
     {
         char got[8192];
@@ -3248,6 +3607,11 @@ int main(int argc, char** argv)
     fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax|navtex"
                     "|rtty-multipath|tx-check|hell|mfsk16|olivia"
                     "|capture-check <file.wav> [shift] [45|50 baud]"
+                    "|navtex-wav <file.wav> [expected text] [max CER %%]"
+                    "|hell-wav <file.wav> [out.pgm]"
+                    "|mfsk16-wav <file.wav> [expected text] [max CER %%]"
+                    "|olivia-wav <file.wav> [expected text] [max CER %%]"
+                    "|record-check"
                     "|rtty-wav <file.wav> [shift] [expected text] [45|50 baud] [max CER %%]"
                     "|rtty-align <file.wav> <shift> \"expected text\" [45|50 baud]"
                     "|align-check <file.wav> <shift> \"expected text\" [45|50 baud]"

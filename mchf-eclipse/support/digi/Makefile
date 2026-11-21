@@ -84,6 +84,11 @@ mfsk16: digi_bench
 olivia: digi_bench
 	@./digi_bench olivia
 
+# the recording paths for the four non RTTY modes: the modems' own takes with a long lead, written
+# through the WAV reader a real capture goes through
+record-check: digi_bench
+	@./digi_bench record-check
+
 rtty-shift: digi_bench
 	@./digi_bench rtty-shift
 
