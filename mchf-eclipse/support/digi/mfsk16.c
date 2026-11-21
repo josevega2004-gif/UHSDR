@@ -34,6 +34,7 @@
 #define MF_G1       0x79u               // octal 171
 #define MF_G2       0x5Bu               // octal 133
 #define MF_BLOCK    8                   // symbols per interleaver block, 32 coded bits
+#define MF_MAX_STEPS 4096                // trellis steps: 300 maximum length Varicode characters
 
 // The IZ8BLY MFSK Varicode, indexed by 7 bit ASCII, with the framing "00" stripped: the table on
 // ZL1BPU's page lists each code with its terminator, so "100" there is the space and is "1" here.
@@ -244,9 +245,9 @@ static size_t mf_viterbi(const uint8_t* coded, size_t nbits, uint8_t* out)
     enum { S = 64 };
     const size_t steps = nbits / 2;
     static unsigned metric[2][S];
-    static uint8_t pred[2048 * S];
-    static uint8_t pick[2048 * S];
-    if (steps > 2048) return 0;
+    static uint8_t pred[MF_MAX_STEPS * S];
+    static uint8_t pick[MF_MAX_STEPS * S];
+    if (steps > MF_MAX_STEPS) return 0;
     for (int s = 0; s < S; s++) metric[0][s] = 0xFFFFu;
     metric[0][0] = 0u;              // the encoder starts in the all zero state, and nothing else does
 

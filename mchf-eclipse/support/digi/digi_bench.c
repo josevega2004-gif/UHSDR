@@ -3499,6 +3499,46 @@ static int selftest(void)
               "olivia: one symbol lost inside an interleaved block costs no character");
         free(x);
     }
+    {
+        // The generators cap a message at 300 characters, and a 300 character MFSK16 take is the
+        // case that crosses the Viterbi step ceiling: a maximum length Varicode character is ten
+        // bits plus its two bit delimiter, so 300 of them are 3600 information bits, not the 2048
+        // the old path memory held. Olivia's equivalent is 300 characters in 61 blocks, which is
+        // the other end of the same buffer question. Both are checked by exact text, not by a count
+        // of symbols, so a cap that silently truncates fails here.
+        char msg[301];
+        memset(msg, '~', 300);
+        msg[300] = 0;
+        const size_t cap = 2000000;         // 1.27 M MFSK16 samples, 1.50 M Olivia samples
+        {
+            float32_t* x = malloc(cap * sizeof(float32_t));
+            char got[512];
+            mfsk16_result_t r = {0};
+            const size_t n = x ? Bench_Mfsk16Generate(x, cap, msg, 0.0f) : 0;
+            check(n > 1000000, "mfsk16: a 300 character take fits the generator cap and buffer");
+            const int ok = n > 0 && Bench_Mfsk16Decode(x, n, got, sizeof(got), &r);
+            printf("     (300 characters: %zu samples, %u symbols, %u coded bits, %u steps)\n",
+                   n, r.symbols, r.bits, r.viterbi_bits);
+            check(ok, "mfsk16: a 300 character take decodes");
+            check(ok && r.viterbi_bits > 2048,
+                  "mfsk16: the long take is past the old 2048 step ceiling");
+            check(ok && strcmp(got, msg) == 0, "mfsk16: the 300 characters come back as sent");
+            free(x);
+        }
+        {
+            float32_t* x = malloc(cap * sizeof(float32_t));
+            char got[512];
+            olivia_result_t r = {0};
+            const size_t n = x ? Bench_OliviaGenerate(x, cap, msg, 0.0f) : 0;
+            check(n > 1000000, "olivia: a 300 character take fits the generator cap and buffer");
+            const int ok = n > 0 && Bench_OliviaDecode(x, n, got, sizeof(got), &r);
+            printf("     (300 characters: %zu samples, %u symbols in %u blocks, header %d)\n",
+                   n, r.symbols, r.blocks, r.header);
+            check(ok, "olivia: a 300 character take decodes");
+            check(ok && strcmp(got, msg) == 0, "olivia: the 300 characters come back as sent");
+            free(x);
+        }
+    }
     printf("%s\n", failures ? "SELF CHECKS FAILED" : "all self checks passed");
     return failures ? 1 : 0;
 }
