@@ -138,6 +138,59 @@ void Bench_AddNoise(float32_t* x, size_t n, float snr_db, float rms)
     }
 }
 
+// Gaussian noise shaped to a band, as a 2.5 kHz channel hears it. A 12 kHz white floor and a
+// 2.5 kHz floor are not the same channel: the arithmetic 10*log10(12000/2500) = 6.8 dB assumes the
+// receiver rejects everything outside the channel, and that assumption is what this measures. The
+// filtered noise is normalised to the requested total RMS, so snr_db is the SNR over the shaped
+// band; at the same PSD inside the band, a 2.5 kHz channel is the 12 kHz SNR plus 6.8 dB.
+static void design_bandpass(float* h, int taps, float lo_hz, float hi_hz, float fs)
+{
+    const int M = taps - 1;
+    for (int k = 0; k <= M; k++)
+    {
+        const int m = k - M / 2;
+        const double s_lo = m ? sin(2.0 * M_PI * lo_hz / fs * m) / (M_PI * m) : 2.0 * lo_hz / fs;
+        const double s_hi = m ? sin(2.0 * M_PI * hi_hz / fs * m) / (M_PI * m) : 2.0 * hi_hz / fs;
+        const double w = 0.54 - 0.46 * cos(2.0 * M_PI * k / M);   // Hamming
+        h[k] = (float) ((s_hi - s_lo) * w);
+    }
+    // unity gain at the centre, so the filter is a channel shape and not an extra level change
+    const double fc = 0.5 * (lo_hz + hi_hz);
+    double gain = 0.0;
+    for (int k = 0; k <= M; k++) gain += h[k] * cos(2.0 * M_PI * fc / fs * (k - M / 2));
+    if (fabs(gain) > 1e-12)
+        for (int k = 0; k <= M; k++) h[k] = (float) (h[k] / gain);
+}
+
+void Bench_AddNoiseBand(float32_t* x, size_t n, float snr_db, float rms, float lo_hz, float hi_hz)
+{
+    enum { TAPS = 257 };
+    float signal_rms = rms > 0.0f ? rms : rms_of(x, n);
+    float noise_rms = signal_rms / powf(10.0f, snr_db / 20.0f);
+    float* w = malloc(n * sizeof(float));
+    float* y = malloc(n * sizeof(float));
+    if (!w || !y) { free(w); free(y); return; }
+    for (size_t i = 0; i < n; i++) w[i] = Bench_Gauss();
+
+    float h[TAPS];
+    design_bandpass(h, TAPS, lo_hz, hi_hz, 12000.0f);
+    for (size_t i = 0; i < n; i++)
+    {
+        double acc = 0.0;
+        const size_t k0 = i >= TAPS - 1 ? i - (TAPS - 1) : 0;
+        for (size_t k = k0; k <= i; k++) acc += (double) h[i - k] * w[k];
+        y[i] = (float) acc;
+    }
+
+    double sum = 0.0;
+    for (size_t i = 0; i < n; i++) sum += (double) y[i] * y[i];
+    const double have = n ? sqrt(sum / (double) n) : 0.0;
+    const double scale = have > 1e-12 ? (double) noise_rms / have : 0.0;
+    for (size_t i = 0; i < n; i++) x[i] += (float) (y[i] * scale);
+    free(w);
+    free(y);
+}
+
 void Bench_AddQsb(float32_t* x, size_t n, float rate_hz, float depth_db)
 {
     if (rate_hz <= 0.0f || depth_db <= 0.0f) return;

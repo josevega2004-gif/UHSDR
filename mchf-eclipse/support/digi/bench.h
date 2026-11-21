@@ -23,6 +23,8 @@ int           Bench_TxRemoveCalls(void);
 void     Bench_RngSeed(uint32_t seed);
 float    Bench_Gauss(void);                      // deterministic, seeded
 void     Bench_AddNoise(float32_t* x, size_t n, float snr_db, float rms);
+void     Bench_AddNoiseBand(float32_t* x, size_t n, float snr_db, float rms, float lo_hz,
+                            float hi_hz);
 void     Bench_AddQsb(float32_t* x, size_t n, float rate_hz, float depth_db);
 
 /* ---- scoring ---- */
