@@ -2473,12 +2473,14 @@ static int rtty_multipath(void)
     char got[8192];
     int failures = 0;
 
-    // Measured with a live noise generator: no cell costs the text. The old record - 7 ms at -6 dB
-    // losing 100 % - was taken while the noise generator's state never advanced, so that row had no
-    // noise on it at all. With real noise the same cell decodes at 0.0 %, and the only non-zero cell
-    // in the table is 7 ms at -3 dB (4.2 %, 2/48). The pin is therefore on the channel: a cell above
-    // 5 % is a notch somebody introduced, not the echo this row is supposed to measure. Longer delays
-    // read clean, which this bench records and does not explain.
+    // Measured with a live noise generator: no cell costs the text. The only non-zero cell is 7 ms
+    // at -3 dB (4.2 %, 2/48); 7 ms at -6 dB reads 0.0 %, and with the noise removed entirely both
+    // cells read 0.0 % too. The 100 % once recorded at 7 ms and -6 dB was not the echo: restoring the
+    // old generator, where every sample received the same Gaussian value, reproduces 20.8 % at -3 dB
+    // and 100 % at -6 dB. That is a constant offset, which biases the receiver's level rather than
+    // dithering it, and it is why the cell disappeared when the generator started advancing.
+    // The pin is therefore on the channel: a cell above 5 % is a notch somebody introduced, not the
+    // echo this sweep is supposed to map.
     const float max_cer = 5.0f;
 
     printf("RTTY with a second path: the same signal echo_ms later and echo_db down, summed onto the\n"
@@ -2514,12 +2516,33 @@ static int rtty_multipath(void)
         printf("\n");
     }
     printf("\nThe columns are the echo level, the rows its delay; 0.0 ms is the direct path alone.\n"
-           "No cell costs the text: the only one above zero is 7 ms at -3 dB (4.2 %%, two characters\n"
-           "of forty eight), and delays of a whole bit or more read clean. The 100 %% notch this\n"
-           "table used to record at 7 ms and -6 dB was measured against a noise generator that never\n"
-           "advanced its state, so that cell carried no noise at all; with real noise it decodes.\n"
-           "What the table now says is that a second path at these delays moves characters but does\n"
-           "not take the message, which this bench records and does not explain.\n");
+           "No cell of this sweep costs the text: the only one above zero is 7 ms at -3 dB (4.2 %%, two\n"
+           "characters of forty eight), and 7 ms at -6 dB reads 0.0 %%. The 100 %% this table once\n"
+           "carried there was the old generator's constant, not the echo: with no noise at all that\n"
+           "cell also reads 0.0 %%, while restoring the stuck generator brings the 100 %% back.\n");
+
+    // The sweep is where an echo moves characters without taking the message; it is not the whole
+    // channel. A path 18 ms late - four fifths of a bit - arrives while the receiver is deciding the
+    // next bit, and at -3 dB it costs the message. That is the echo failure this table exists to
+    // exercise, pinned from below so a decoder that became immune to it would fail here.
+    {
+        rtty_case_t c = { .label = "echo 18 ms", .shift = 170, .snr_db = 20.0f, .max_cer = 100.0f };
+        c.echo_ms = 18.0f;
+        c.echo_db = -3.0f;
+        int eot = 0;
+        const float cer = rtty_run(&c, msg, false, got, sizeof(got), &eot);
+        printf("\na path 18 ms late at -3 dB: %.1f %% of the text\n", (double)cer);
+        if (cer < 40.0f)
+        {
+            printf("FAIL  the echo 18 ms late no longer costs the message (%.1f %%)\n", (double)cer);
+            failures++;
+        }
+        if (eot != 1)
+        {
+            printf("FAIL  the transmission was cut off before EOT\n");
+            failures++;
+        }
+    }
     return failures ? 1 : 0;
 }
 

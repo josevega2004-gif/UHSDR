@@ -684,12 +684,21 @@ make -C support/digi rtty-multipath
 
 The same 45.45 Bd transmission with a second path: ten delays from 0 to 20 ms and three echo levels
 at -3, -6 and -10 dB below the direct signal, thirty cells of character error rate. It is the only
-channel here that puts the same bit in two places in the audio. Measured with a live noise
-generator, **no cell costs the text**: the only one above zero is 7 ms at -3 dB (4.2 %, two
-characters of forty eight), and delays of a whole bit or more read clean. The 100 % notch this table
-once recorded at 7 ms and -6 dB was measured while the noise generator never advanced its state, so
-that cell had no noise on it; with real noise it decodes. The pin is on the channel now - a cell
-above 5 % is a notch somebody introduced - rather than on a failure the channel no longer produces.
+channel here that puts the same bit in two places in the audio.
+
+With a live noise generator **no cell of that sweep costs the text**: the only one above zero is
+7 ms at -3 dB (4.2 %, two characters of forty eight), and 7 ms at -6 dB reads 0.0 %. The 100 % notch
+this table once recorded at 7 ms and -6 dB was not the echo. Restoring the old noise generator, where
+every sample received the same Gaussian value, reproduces 20.8 % at -3 dB and 100 % at -6 dB; with
+the noise removed entirely both cells read 0.0 %. A constant offset is not a noise floor - it is a
+bias on the receiver's input - and that cell's failure belongs to the bias, not to the second path.
+
+The echo failure is real, just later. At 18 ms - four fifths of a bit - the delayed copy's tone is
+still arriving while the receiver decides the next bit, and a -3 dB path costs **64.6 %** (31/48) at
+20 dB SNR. The grid around it is sharp: 16 ms and 20 ms read 0.0 % at -3 dB, and 18 ms itself reads
+0.0 % at -6 and -10 dB. That case runs outside the sweep and is pinned from below, so the channel
+still exercises the failure it exists for; the sweep is pinned from above at 5 %, where a non-zero
+cell is a notch somebody introduced rather than the echo this map records.
 
 ### `tx-check`
 

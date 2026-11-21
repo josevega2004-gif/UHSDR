@@ -113,8 +113,8 @@ rtty-trace: digi_bench
 	@./digi_bench rtty-trace fixtures/ddk2-4583.wav 450 "$(DDK2_TEXT)" 50
 
 # a second path, the channel shape nothing else here produces: the same bit at two places in the
-# audio. Fails if any delay/level cell costs more than 5 % of the text: measured with real noise, the
-# echo moves characters but takes no message (7 ms at -3 dB is the only non-zero cell, 4.2 %)
+# audio. The sweep must stay under 5 % per cell (7 ms at -3 dB is its only non-zero cell, 4.2 %),
+# and the 18 ms case outside it must keep costing the message: that is the echo failure itself
 rtty-multipath: digi_bench
 	@./digi_bench rtty-multipath
 
