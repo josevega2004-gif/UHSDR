@@ -99,9 +99,10 @@ DDK2_TEXT := CQ CQ CQ DE DDK2 DDH7 DDK9 FREQUENCIES   4583 KHZ   7646 KHZ   1010
 rtty-ddk2: digi_bench
 	@./digi_bench rtty-wav fixtures/ddk2-4583.wav 450 "$(DDK2_TEXT)" 50 3
 
-# what that 2.7 % is made of: the two characters the take gets wrong, named, with the mark and space
-# level of each one's own window against the take's median. It fails if they stop being the ones the
-# record names, or if either window loses the keying that makes a fade the wrong explanation.
+# what that 2.7 % is made of: one inserted code 16 (read as '5') and the space the take's line break
+# stands in for, named with the mark and space level of each window against the take's median. It
+# fails if the insertion becomes a misread, if the nine stops decoding as sent, if the break moves,
+# or if either window loses the keying that makes a fade the wrong explanation.
 fixture-align: digi_bench
 	@./digi_bench align-check fixtures/ddk2-4583.wav 450 "$(DDK2_TEXT)" 50
 
@@ -112,7 +113,8 @@ rtty-trace: digi_bench
 	@./digi_bench rtty-trace fixtures/ddk2-4583.wav 450 "$(DDK2_TEXT)" 50
 
 # a second path, the channel shape nothing else here produces: the same bit at two places in the
-# audio. Fails if a delay inside a tenth of a bit stops decoding or a quarter bit stops costing text
+# audio. Fails if any delay/level cell costs more than 5 % of the text: measured with real noise, the
+# echo moves characters but takes no message (7 ms at -3 dB is the only non-zero cell, 4.2 %)
 rtty-multipath: digi_bench
 	@./digi_bench rtty-multipath
 

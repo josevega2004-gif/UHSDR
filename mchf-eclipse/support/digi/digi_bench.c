@@ -2039,13 +2039,15 @@ static int align_chars(const char* exp, const char* dec, int* match)
             d[i * W + j] = best;
         }
     for (size_t i = 0; i <= ne; i++) match[i] = -1;
+    // Gaps before substitutions when the cost is the same. One character arriving beside the text
+    // and one character being read wrong as its neighbour are the same edit distance, but they are
+    // not the same record: preferring the gap keeps every identical character matched, so an
+    // insertion is reported as an insertion and a misread as a misread.
     for (size_t i = ne, j = nd; i > 0 || j > 0; )
     {
-        if (i > 0 && j > 0 &&
-            d[i * W + j] == d[(i - 1) * W + (j - 1)] + (exp[i - 1] == dec[j - 1] ? 0 : 1))
-        { match[i - 1] = (int)(j - 1); i--; j--; }
-        else if (i > 0 && d[i * W + j] == d[(i - 1) * W + j] + 1) i--;
-        else j--;
+        if (i > 0 && d[i * W + j] == d[(i - 1) * W + j] + 1) i--;
+        else if (j > 0 && d[i * W + j] == d[i * W + (j - 1)] + 1) j--;
+        else { match[i - 1] = (int)(j - 1); i--; j--; }
     }
     free(d);
     return 0;
@@ -2063,6 +2065,11 @@ typedef struct
 #define ALIGN_MAX 512
 static align_row_t align_row[ALIGN_MAX];
 static size_t align_rows;
+// the edit script beside the per-character table, and the decoder's unnormalised text: an inserted
+// character has no row of its own, and the row a space should have is taken by the take's line break
+static int  align_ins, align_del, align_sub;
+static char align_ins_char;
+static char align_raw[8192];
 
 static int align_wav(const char* path, const char* expected, uint16_t shift, uint16_t baud)
 {
@@ -2074,7 +2081,8 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
     align_rows = 0;
     char got[8192];
     Bench_CharCount = 0;
-    if (decode_wav(path, expected, got, sizeof(got), shift, baud, false, NULL, 0) < 0.0f) return 1;
+    if (decode_wav(path, expected, got, sizeof(got), shift, baud, false, align_raw,
+                   sizeof(align_raw)) < 0.0f) return 1;
 
     const char* exp = norm_baudot(expected, 0);
     const char* dec = got + lead_in_junk;          // the score skips the junk before the lock
@@ -2099,10 +2107,34 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
         return 1;
     }
 
+    // The edit script, read from the expected side: a row with no partner is a character the take
+    // does not carry, a decoded character with no row is one the take added, and a paired row whose
+    // characters differ is a character read wrong. Keeping them apart is the difference between
+    // "one character arrived beside the text" and "two characters were misread".
+    int ins = 0, del = 0, sub = 0;
+    char ins_char = '\0';
+    {
+        static char paired[8192];
+        memset(paired, 0, nd ? nd : 1);
+        for (size_t i = 0; i < ne; i++)
+        {
+            if (match[i] < 0) { del++; continue; }
+            paired[match[i]] = 1;
+            if (dec[match[i]] != exp[i]) sub++;
+        }
+        for (size_t j = 0; j < nd; j++)
+        {
+            if (paired[j]) continue;
+            if (!ins) ins_char = dec[j];
+            ins++;
+        }
+    }
+    align_ins = ins; align_del = del; align_sub = sub; align_ins_char = ins_char;
+
     printf("\n%3s %3s %3s %9s %9s %5s %7s\n", "#", "exp", "got", "mark dB", "space dB",
            "trans", "jit ms");
     double sum_mark = 0.0, sum_space = 0.0, sum_rms = 0.0, last_s0 = 0.0;
-    int good = 0, wrong = 0;
+    int good = 0;
     for (size_t i = 0; i < ne; i++)
     {
         // The window is the decoder's own: it reports a character when it has read it, so the
@@ -2166,11 +2198,13 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
             r->exp = exp[i]; r->got = have_c; r->trans = trans; r->ok = ok;
             r->mark_db = mark_db; r->space_db = space_db; r->jitter_ms = rms_ms;
         }
-        if (!ok) wrong++;
-        else if (trans) { good++; sum_mark += mark_db; sum_space += space_db; sum_rms += rms_ms; }
+        if (ok && trans) { good++; sum_mark += mark_db; sum_space += space_db; sum_rms += rms_ms; }
     }
-    printf("\n%zu expected, %zu decoded, %d wrong (%.1f %%); lead in %d characters\n",
-           ne, nd, wrong, ne ? 100.0 * (double)wrong / (double)ne : 0.0, lead_in_junk);
+    const size_t distance = Bench_Levenshtein(exp, dec);
+    printf("\n%zu expected, %zu decoded: %d inserted, %d not in the take, %d substituted; lead in "
+           "%d characters\n", ne, nd, ins, del, sub, lead_in_junk);
+    printf("edit distance %zu (%.1f %% over %zu characters), which is what the scorer charges\n",
+           distance, ne ? 100.0 * (double)distance / (double)ne : 0.0, ne);
     if (good)
     {
         printf("the %d characters that decoded: mark %.1f dB, space %.1f dB, jitter %.2f ms on average\n",
@@ -2186,10 +2220,11 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
 /* ------------------------------------------------------------------ *
  *  the pinned junction: which characters, not only how many
  * ------------------------------------------------------------------ */
-// The two characters this take gets wrong, checked by name, with the audio under them. "The
-// remaining 2.7 % is signal quality" was an assumption here until the alignment table showed these
-// rows carrying the same keying as the characters on either side of them. If that stops being true -
-// a row loses its tones, or the take starts getting a different pair wrong - the record has to be
+// What is left at the DDK9 junction is one inserted character, not two misreads. A per-character
+// table cannot show an insertion - it has a row per character the pinned text carries - so the record
+// is checked from both sides: the edit script names the insertion, the table says the nine came back
+// as sent, and the take's own line break is what stands where the pinned text has a space. If the
+// insertion stops being an insertion, or a character starts being read wrong, the record has to be
 // rewritten rather than quietly left standing.
 static int align_check(const char* path, const char* expected, uint16_t shift, uint16_t baud)
 {
@@ -2204,25 +2239,21 @@ static int align_check(const char* path, const char* expected, uint16_t shift, u
     }
     double mk[ALIGN_MAX], sp[ALIGN_MAX];
     size_t nm = 0;
-    int wrong = 0;
     for (size_t i = 0; i < align_rows; i++)
     {
-        if (align_row[i].ok)
-        {
-            mk[nm] = align_row[i].mark_db;
-            sp[nm] = align_row[i].space_db;
-            nm++;
-        }
-        else wrong++;
+        if (!align_row[i].ok) continue;
+        mk[nm] = align_row[i].mark_db;
+        sp[nm] = align_row[i].space_db;
+        nm++;
     }
     qsort(mk, nm, sizeof(double), cmp_double);
     qsort(sp, nm, sizeof(double), cmp_double);
     const double med_mark = nm ? mk[nm / 2] : 0.0;
     const double med_space = nm ? sp[nm / 2] : 0.0;
-    const double fade_db = 12.0;      // this far under the take's own levels is a fade, not a misread
+    const double fade_db = 12.0;      // this far under the take's own levels is a fade, not keying
 
     int bad = 0;
-    printf("\npinned junction: the two characters this take gets wrong, and the audio under them\n");
+    printf("\npinned junction: one inserted character, and the line break where the pinned space is\n");
     printf("%3s %3s %3s %9s %9s %10s %5s  %s\n", "#", "exp", "got", "mark dB", "space dB",
            "vs median", "trans", "verdict");
     for (int i = 25; i <= 26; i++)
@@ -2230,37 +2261,49 @@ static int align_check(const char* path, const char* expected, uint16_t shift, u
         const align_row_t* r = &align_row[i];
         const double worst = fmin(r->mark_db - med_mark, r->space_db - med_space);
         const int keyed = r->trans >= 1 && worst > -fade_db;
+        const int line_break = r->got == '-';
         printf("%3d %3c %3c %9.1f %9.1f %+10.1f %5d  %s\n", i + 1, r->exp, r->got, r->mark_db,
                r->space_db, worst, r->trans,
-               r->ok ? "decoded as sent" : keyed ? "misread, keying present" : "FADED OUT");
-        if (r->ok || !keyed)
+               r->ok ? "decoded as sent" : line_break ? "the take's line break here" : "MISREAD");
+        if (i == 25 && (!r->ok || r->exp != '9'))
         {
-            printf("FAIL  character %d is%s; it has to be the misread the record names, with its\n"
-                   "      keying within %.0f dB of the take's own %.1f / %.1f dB\n", i + 1,
-                   r->ok ? " decoded correctly now" : " faded out", fade_db, med_mark, med_space);
+            printf("FAIL  the character before the break is %c/%c, not the 9 read as sent: the\n"
+                   "      insertion is supposed to sit beside the text, not in place of it\n",
+                   r->exp, r->got);
+            bad = 1;
+        }
+        if (i == 26 && (!line_break || !keyed))
+        {
+            printf("FAIL  the pinned space is not the take's line break with its own keying: got\n"
+                   "      '%c', %d transitions, %.1f dB under the take's own levels\n",
+                   r->got, r->trans, worst);
             bad = 1;
         }
     }
-    if (align_row[25].exp != '9' || align_row[25].got != '5'
-        || align_row[26].exp != ' ' || align_row[26].got != '9')
+    printf("inserted: %d character ('%c'), substituted: %d, not in the take: %d\n",
+           align_ins, align_ins_char ? align_ins_char : '?', align_sub, align_del);
+    if (align_ins != 1 || align_ins_char != '5' || align_sub != 0 || align_del != 1)
     {
-        printf("FAIL  the junction now reads %c/%c and %c/%c, not the 9/5 and space/9 the record "
-               "names\n", align_row[25].exp, align_row[25].got, align_row[26].exp, align_row[26].got);
+        printf("FAIL  the junction is %d inserted / %d substituted / %d not in the take; the record\n"
+               "      is one inserted '5', no character read wrong, and the space the take breaks the\n"
+               "      line at\n", align_ins, align_sub, align_del);
         bad = 1;
     }
-    if (wrong != 2)
+    if (!strstr(align_raw, "DDK59\r\nFREQ"))
     {
-        printf("FAIL  the take gets %d characters wrong; the pinned record is 2 of %zu (2.7 %%)\n",
-               wrong, align_rows);
+        printf("FAIL  the decoded take no longer reads DDK59, a line break, then FREQUENCIES: the\n"
+               "      insertion or the break has moved\n");
         bad = 1;
     }
     if (!bad)
     {
-        printf("\n2 of %zu characters wrong (%.1f %%), and both wrong windows carry their own keying:\n"
-               "the residual is the demodulator reading a code where a space belonged, not a fade\n"
-               "under the character. The levels around it are the take's own, so a row that does\n"
-               "fade out fails here instead of being quoted as signal quality.\n",
-               align_rows, 100.0 * 2.0 / (double)align_rows);
+        printf("\nOne character inserted at the junction and nothing read wrong: the take prints\n"
+               "DDK59, breaks the line, then FREQUENCIES, and the nine is the character the pinned\n"
+               "text carries. The scorer charges the insertion and the pinned space the break stands\n"
+               "in for - %d edits over %zu characters, %.1f %% - which is what 2.7 %% is made of.\n"
+               "Both windows carry their own keying, so a break that became a fade would fail here.\n",
+               align_ins + align_sub + align_del, align_rows,
+               100.0 * (double)(align_ins + align_sub + align_del) / (double)align_rows);
     }
     return bad ? 1 : 0;
 }
@@ -2295,7 +2338,16 @@ static int rtty_trace(const char* path, const char* expected, uint16_t shift, ui
     // every row after the first stripped stop against the wrong character, which is exactly what this
     // column did before the trace was pointed at this take.
     const char* exp = expected;
-    const char* dec = raw;
+    // Line breaks are not data. The take breaks a line where the pinned text has a space, and
+    // aligning CR or LF against that space would report a misread of a character the receiver never
+    // had to read: a break is formatting. The comparison therefore runs on the printable characters,
+    // while the rows still show each break where it happened.
+    static char printable[8192];
+    size_t npr = 0;
+    for (const char* p = raw; *p && npr + 1 < sizeof(printable); p++)
+        if (*p != '\r' && *p != '\n') printable[npr++] = *p;
+    printable[npr] = '\0';
+    const char* dec = printable;
     const size_t ne = strlen(exp), nd = strlen(dec);
     const double bit_ms = 1000.0 / (double)baud;
 
@@ -2319,6 +2371,7 @@ static int rtty_trace(const char* path, const char* expected, uint16_t shift, ui
     // control and does not print. The groups that produced a printed character are therefore not the
     // groups that were read, and the rows would all be shifted by one without this counter.
     int groups = 0, printed = 0, abandoned = 0, diff_chars = 0, off_clock = 0;
+    int breaks = 0, inserted = 0;
     for (int k = 0; k < Rtty_BenchTraceCount; )
     {
         if (Rtty_BenchTraceBits[k].slot != 1) { k++; continue; }
@@ -2336,6 +2389,31 @@ static int rtty_trace(const char* path, const char* expected, uint16_t shift, ui
         int diff = 0;
         char bits[8];
         for (int s = 0; s < 5; s++) code |= (unsigned)(g[s].bit & 1) << s;
+        // The spacing of the decisions: one bit apart is a DPLL in step, and anything else is a
+        // relock at a start bit, which is what a phase slip looks like from outside the decoder.
+        double sp_mean = 0.0, dev_max = 0.0;
+        for (int s = 1; s < len; s++)
+        {
+            const double d = (double)(g[s].at - g[s - 1].at) / 12.0;
+            sp_mean += d / (double)(len - 1);
+            if (fabs(d - bit_ms) > dev_max) dev_max = fabs(d - bit_ms);
+        }
+        if (dev_max > 0.5) off_clock++;
+        if (code == 8u || code == 2u)
+        {
+            // CR and LF carry no character: a station that breaks a line where the pinned text has
+            // a space has read nothing wrong. The slot is shown, and not compared with the text.
+            for (int s = 0; s < 5; s++) bits[s] = (g[s].bit & 1) ? '1' : '0';
+            bits[5] = 0;
+            printf("%-4d %-9.1f %-10s %-8s %c%c    %8.3f %7.3f  line break\n", groups + 1,
+                   (double)g[0].at / 12.0, code == 8u ? "break CR" : "break LF", bits,
+                   (g[5].bit & 1) ? '1' : '0',
+                   len > 6 ? ((g[6].bit & 1) ? '1' : ' ') : ' ', sp_mean, dev_max);
+            breaks++;
+            groups++;
+            k += len;
+            continue;
+        }
         if (code == 27u || code == 31u)
         {
             // a shift is a character slot but not a character: the decoder consumes it and prints
@@ -2347,21 +2425,12 @@ static int rtty_trace(const char* path, const char* expected, uint16_t shift, ui
         const int ci = printed;
         const int ei = (size_t)ci < nd ? from[ci] : -1;
         const unsigned sent = ei >= 0 ? Rtty_BenchTxCodeForAscii(exp[ei]) : 0;
+        if (ei < 0) inserted++;
         if (ei >= 0)
             for (int s = 0; s < 5; s++) if (((sent >> s) & 1) != (g[s].bit & 1)) diff |= 1 << s;
         for (int s = 0; s < 5; s++)
             bits[s] = (diff >> s) & 1 ? '*' : ((g[s].bit & 1) ? '1' : '0');
         bits[5] = 0;
-        // The spacing of the decisions: one bit apart is a DPLL in step, and anything else is a
-        // relock at a start bit, which is what a phase slip looks like from outside the decoder.
-        double sp_mean = 0.0, dev_max = 0.0;
-        for (int s = 1; s < len; s++)
-        {
-            const double d = (double)(g[s].at - g[s - 1].at) / 12.0;
-            sp_mean += d / (double)(len - 1);
-            if (fabs(d - bit_ms) > dev_max) dev_max = fabs(d - bit_ms);
-        }
-        if (dev_max > 0.5) off_clock++;
         if (diff) diff_chars++;
         char sent_read[24];
         if (ei >= 0) snprintf(sent_read, sizeof(sent_read), "%u->%u", sent, code);
@@ -2373,9 +2442,9 @@ static int rtty_trace(const char* path, const char* expected, uint16_t shift, ui
         groups++;
         k += len;
     }
-    printf("\n%d character slots read, %d of them shift codes, %d abandoned at a stop bit, %d with a "
-           "data bit\nthat differs from what was sent\n", groups, groups - printed, abandoned,
-           diff_chars);
+    printf("\n%d character slots read, %d shift codes, %d line breaks, %d abandoned at a stop bit,\n"
+           "%d inserted with no counterpart in the text, %d with a data bit that differs from what\n"
+           "was sent\n", groups, groups - printed - breaks, breaks, abandoned, inserted, diff_chars);
     if (off_clock)
         printf("%d of them had a decision spacing more than 0.5 ms off the bit: the DPLL relocked "
                "inside\nthe character, so its clock and the audio's disagreed there\n", off_clock);
@@ -2404,11 +2473,13 @@ static int rtty_multipath(void)
     char got[8192];
     int failures = 0;
 
-    // Pinned from the table below, and not where the model first guessed: a delay inside a tenth of
-    // a bit decodes, and the failure is a notch at about a third of a bit (7 ms) with the echo at
-    // half the direct amplitude (100 % of the text lost at -6 dB, 20.8 % at -3 dB, nothing at -10).
-    // Longer delays read clean here, which this bench records and does not explain.
-    const float clean_ms = 2.0f, gone_ms = 7.0f, pin_db = -6.0f;
+    // Measured with a live noise generator: no cell costs the text. The old record - 7 ms at -6 dB
+    // losing 100 % - was taken while the noise generator's state never advanced, so that row had no
+    // noise on it at all. With real noise the same cell decodes at 0.0 %, and the only non-zero cell
+    // in the table is 7 ms at -3 dB (4.2 %, 2/48). The pin is therefore on the channel: a cell above
+    // 5 % is a notch somebody introduced, not the echo this row is supposed to measure. Longer delays
+    // read clean, which this bench records and does not explain.
+    const float max_cer = 5.0f;
 
     printf("RTTY with a second path: the same signal echo_ms later and echo_db down, summed onto the\n"
            "direct one. 45.45 Bd, 170 Hz shift, 20 dB SNR; a bit is 22.0 ms.\n\n");
@@ -2426,18 +2497,12 @@ static int rtty_multipath(void)
             int eot = 0;
             const float cer = rtty_run(&c, msg, false, got, sizeof(got), &eot);
             printf(" %10.1f", (double)cer);
-            if (delays[d] == clean_ms && levels[l] == pin_db && cer > 5.0f)
+            if (cer > max_cer)
             {
-                printf("\nFAIL  a path %.1f ms late at %.0f dB costs %.1f %% of the text; a delay "
-                       "inside a\n      tenth of a bit is supposed to be survivable\n",
-                       (double)clean_ms, (double)pin_db, (double)cer);
-                failures++;
-            }
-            if (delays[d] == gone_ms && levels[l] == pin_db && cer < 50.0f)
-            {
-                printf("\nFAIL  a path %.1f ms late at %.0f dB now decodes at %.1f %%; the pinned "
-                       "record is\n      that the notch there costs the text\n",
-                       (double)gone_ms, (double)pin_db, (double)cer);
+                printf("\nFAIL  a path %.1f ms late at %.0f dB costs %.1f %% of the text; this "
+                       "channel's\n      record is that the echo moves the error rate but no cell "
+                       "costs the message\n",
+                       (double)delays[d], (double)levels[l], (double)cer);
                 failures++;
             }
             if (eot != 1)
@@ -2449,12 +2514,12 @@ static int rtty_multipath(void)
         printf("\n");
     }
     printf("\nThe columns are the echo level, the rows its delay; 0.0 ms is the direct path alone.\n"
-           "The failure is a notch and not a slope: 7 ms at -6 dB loses the whole text, 5 ms and\n"
-           "10 ms at the same level lose none of it, and 7 ms at -10 dB loses none either. That is\n"
-           "what two paths at half amplitude do at the instant the receiver samples - the two tones\n"
-           "are comparable and the decision is a coin toss - and it is a property of where the sample\n"
-           "sits rather than of the delay being long. Delays of a whole bit or more read clean here;\n"
-           "this bench records that and does not explain it.\n");
+           "No cell costs the text: the only one above zero is 7 ms at -3 dB (4.2 %%, two characters\n"
+           "of forty eight), and delays of a whole bit or more read clean. The 100 %% notch this\n"
+           "table used to record at 7 ms and -6 dB was measured against a noise generator that never\n"
+           "advanced its state, so that cell carried no noise at all; with real noise it decodes.\n"
+           "What the table now says is that a second path at these delays moves characters but does\n"
+           "not take the message, which this bench records and does not explain.\n");
     return failures ? 1 : 0;
 }
 

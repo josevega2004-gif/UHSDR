@@ -12,6 +12,10 @@ make -C support/digi hell     # Hellschreiber: on/off keyed raster, scored as a 
 make -C support/digi mfsk16   # MFSK16: 16 tones, Varicode, rate 1/2 code, interleaver over 8 symbols
 make -C support/digi olivia   # Olivia: 32 tones, 64 symbol Walsh blocks, five characters a block
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
+make -C support/digi fixture-align  # per character: what the take sent, what the modem read, and the audio
+make -C support/digi rtty-trace    # the demodulator's own bit decisions, for the same take
+make -C support/digi rtty-multipath  # the same modem against a second path: delay spread, 30 cells
+make -C support/digi tx-check      # the modulator's own keying through the receiver's gate
 make -C support/digi capture-check  # is a recording fit to be pinned: pair, bit clock, continuity
 make -C support/digi fixture-check  # do fixtures/MANIFEST.md's numbers still describe the wav
 ./digi_bench rtty-tune     # how much tuning error the demodulator survives, in Hz and ppm
@@ -59,7 +63,8 @@ fitted on the squared phase, which cancels that half bit and leaves the bit itse
 phases come back as two centres that the scatter is measured against. Without the split the fixture
 fitted to 18.75 ms - 6 % short of the rate the modem decodes it at - with 13.9 % scatter, and that
 shape looked like a recorder rate error; with it the same audio reads 20.000 ms and 8.8 %, so the
-take's 2.7 % CER is signal quality, not a stretched time base. A clean synthetic take measures
+take's 2.7 % CER is the character the signal inserted plus the pinned space its line break stands in
+for, not a stretched time base. A clean synthetic take measures
 20.000 ms and 0.1 %, and a 45.45 baud take measures 22.000 ms with 2.2 % and is refused on the
 period alone, though its pair and its scatter look perfect. The fit searches 30 % either side of
 the nominal period rather than at it, so a take at the wrong rate reports the rate it carries: a
@@ -538,15 +543,24 @@ CER     : 2.7 %
 ```
 
 `101008` is not a decode error: `norm_baudot()` keeps only A-Z, 0-9 and space, so the decimal point
-never reaches the report. The one real error is the `5` at the `DDK9 FREQUENCIES` junction, and it is
-**not** a shift-handling defect. `rtty.c` has no unshift-on-space at all - only codes 27 and 31
-change `charSetMode`, and a space is `' '` in both tables - so `'5'`, which is `RTTYSymbols[16]`,
-means code 16 arrived while the decoder sat in FIGS. A synthesised stream of this text decodes at
-**0.0 %**, and the same stream with `[FIGS][9][SP]` replaced by `[FIGS][16][9]` reproduces
-`DDK59FREQUENCIES` at 2.7 %: the decoder prints what arrives. Three takes of the same transmission
-read `DDK9`, `DDK95` and `DDK59` there, so the corruption came with the signal rather than with the
-logic. Two wrong characters of the **73** scored is 2.74 %, which the report rounds to the 2.7 % this
-case pins; the target fails it above 3 %.
+never reaches the report. What the take carries at the `DDK9` junction is **one inserted character**,
+not two misreads. `rtty-trace` shows the extra slot as a code 16 (`'5'` in FIGS) with no counterpart
+in the sent text, the `9` after it read correctly, and every other character matching; the decoder
+prints `DDK59`, then a **line break**, then `FREQUENCIES`, and the break stands where the pinned text
+has a space. `fixture-align` names the same thing from the other side - one insertion, no
+substitution, the pinned space absent because the take breaks the line there - and both windows
+carry the take's own keying.
+
+That insertion is **not** a shift-handling defect. `rtty.c` has no unshift-on-space at all - only
+codes 27 and 31 change `charSetMode`, and a space is `' '` in both tables - so `'5'`, which is
+`RTTYSymbols[16]`, means code 16 arrived while the decoder sat in FIGS. A synthesised stream of this
+text decodes at **0.0 %**, so the alphabet and the decoder reproduce the line exactly and the extra
+character is in the take. Three takes of the same transmission read `DDK9`, `DDK95` and `DDK59`
+there, so the corruption came with the signal rather than with the logic.
+
+The scorer charges the insertion and the pinned space the line break stands in for: 2 edits over the
+**73** characters is 2.74 %, which is the 2.7 % this case pins, and the target fails it above 3 %.
+The take's own reading is one inserted character and nothing misread.
 
 ### The pair, measured
 
@@ -591,8 +605,9 @@ which is worth knowing before quoting an absolute audio frequency - do not carry
 4583 kHz without measuring it there.
 
 **What one 13.7 s take cannot show.** This is a single night path, one receiver, no fading and no
-QRM, so it says nothing about weak or fading signals, and its 2.7 % is one particular slip - a code
-16 where a space belonged - not an error rate to quote for the mode. What it does pin is that the
+QRM, so it says nothing about weak or fading signals, and its 2.7 % is one inserted code 16 (plus
+the pinned space its line break stands in for), not an error rate to quote for the mode. What it
+does pin is that the
 decoder handles the DWD shifting correctly on real audio, and that any modem change which moves this
 output has to be explained.
 
@@ -615,6 +630,79 @@ The comparison this case lacks is a propagation problem, not a bench one: retry 
 is open to Europe, and prove any new receiver by copying DDK2 through it to a few percent before
 trusting a 10100.8 kHz take. A receiver's S-meter is not evidence; the tone pair plus a clean decode
 is.
+
+## Reading a take: `fixture-align`, `rtty-trace` and the other two verbs
+
+Four bench verbs answer questions that a character error rate cannot. `rtty-ddk2` says the take
+scores 2.7 %; these say what that number is made of, and one of them measures the transmitter instead
+of the receiver.
+
+### `fixture-align` (the `align-check` verb)
+
+```
+make -C support/digi fixture-align
+./digi_bench align-check <file.wav> <shift> "expected text" [45|50]
+```
+
+One row per character the expected text carries: what was sent, what the modem read, the mark and
+space level of that character's own 7.5 bit window against the take's median, the transitions inside
+it, and their scatter. A character the take does not carry is printed `-` in the `got` column, and
+the edit script below the table separates **inserted**, **not in the take** and **substituted** -
+one character arriving beside the text and two characters being read wrong have the same edit
+distance but are not the same fault, and the old table could not tell them apart.
+
+The DDK2 junction is then pinned by name rather than by count: one inserted `5`, the `9` read as
+sent, the pinned space replaced by the station's line break, and the keying under both windows. It
+fails if the insertion becomes a misread, if the break moves, if the `9` stops decoding as sent, or
+if a window loses its tones - a fade is the one explanation that would make the record wrong rather
+than the decoder.
+
+### `rtty-trace`
+
+```
+make -C support/digi rtty-trace
+./digi_bench rtty-trace <file.wav> <shift> "expected text" [45|50]
+```
+
+The demodulator's own decisions, recorded inside its loop: for every character slot, the time, the
+code sent and the code read, the five data bits with `*` on each one that differs, the stop bit, the
+spacing between decisions, and the largest deviation from one bit. Shift codes get no row (they are
+slots, not characters), and CR/LF are shown as **line breaks** and not compared with the text: a
+station that breaks a line where the pinned text has a space has read nothing wrong. The summary
+counts shift codes, breaks, slots abandoned at a stop bit, inserted characters and differing bits,
+and says whether the DPLL ever relocked inside a character - which is the difference between a
+slicer error and a clock slip, and no letter can show it.
+
+On the DDK2 take it reads: one inserted code 16, four line breaks, one abandoned slot, **zero**
+differing data bits, every decision one bit apart.
+
+### `rtty-multipath`
+
+```
+make -C support/digi rtty-multipath
+```
+
+The same 45.45 Bd transmission with a second path: ten delays from 0 to 20 ms and three echo levels
+at -3, -6 and -10 dB below the direct signal, thirty cells of character error rate. It is the only
+channel here that puts the same bit in two places in the audio. Measured with a live noise
+generator, **no cell costs the text**: the only one above zero is 7 ms at -3 dB (4.2 %, two
+characters of forty eight), and delays of a whole bit or more read clean. The 100 % notch this table
+once recorded at 7 ms and -6 dB was measured while the noise generator never advanced its state, so
+that cell had no noise on it; with real noise it decodes. The pin is on the channel now - a cell
+above 5 % is a notch somebody introduced - rather than on a failure the channel no longer produces.
+
+### `tx-check`
+
+```
+make -C support/digi tx-check
+```
+
+The transmitter's own 12 kHz output through the receiver's gate, for the two settings RTTY sends:
+170 Hz / 45.45 Bd and 450 Hz / 50 Bd. It measures the keyed pair against 915 and 915+shift, the bit
+period and its scatter, and then the property only a keyer can fail - every interval between tone
+changes is a whole number of bits, with two bit stop runs and no 1.5 bit ones. A receiver loopback
+cannot see a keyer that sends a half stop bit, because the firmware's setting is 1.5 and
+`Rtty_BaudotAdd()` sends two; this gate can.
 
 ## NAVTEX / SITOR-B, `make -C support/digi navtex`
 
