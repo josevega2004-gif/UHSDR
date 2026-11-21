@@ -592,7 +592,9 @@ that accepted anything; the refusals alone would pass a walk that rejected every
 why the packed blocks are built to the format's own arithmetic (128 samples of width 4, one run bit
 and four mantissa bits each, 640 bits in all) so the walk has to land on the byte the builder wrote,
 not merely accept it. None of the eight needs a client or a network, because all are decided before
-the decoder is loaded - which is why they are what CI runs.
+the decoder is loaded - which is why they are what CI runs. The missing-rate stream is refused by the
+decode rather than by the walk, since the rate is what the decode needs before it can index the
+messages at all, and that case goes red if the check is dropped instead of passing on the walk's.
 
 The DDH 8 capture quoted below was taken from NA5B. The station list, baud rates and shifts came
 from the DWD table on the Franks-Weather page,

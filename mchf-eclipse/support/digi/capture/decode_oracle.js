@@ -140,13 +140,11 @@ function walkMessage(b, st, frame) {
   return null;
 }
 
-// ---- the whole file, before the decoder sees any of it ---------------------------------------
+// ---- the framing: the whole file, before the decoder sees any of it --------------------------
 
-// A stream that never declares a rate would be decoded at the client's 8000 Hz default and every
-// sample count would be wrong, so both the walk and the decode refuse it - with the same words, so
-// the rule cannot drift between them.
-const NO_RATE = 'no usable sample-rate element: the decoder would fall back to its 8000 Hz default';
-
+// The walk alone: known elements, message lengths that add up, nothing after the last message.  What
+// a take has to have before it can be recorded at all - a rate element, and no silence run past 2 s -
+// is checked in decodeStream, where those values are used.
 function readStream(streamPath) {
   const raw = fs.readFileSync(streamPath);
   const st = { rate: 0, rateFrame: -1, samples: 0, blocks8: 0, blocks14: 0,
@@ -169,12 +167,6 @@ function readStream(streamPath) {
     frames.push({ body: msg, samplesBefore });
   }
   if (off !== raw.length) fail((raw.length - off) + ' trailing bytes after the last message');
-  if (!st.rate) fail(NO_RATE);
-  if (st.maxSilence > 2 * st.rate) {
-    fail('the stream goes silent for ' + (st.maxSilence / st.rate).toFixed(2) + ' s (limit 2 s at ' +
-         st.rate + ' Hz); the client\'s recorder stops appending after that and truncates the take ' +
-         'without saying so');
-  }
   return { frames, st };
 }
 
@@ -223,10 +215,20 @@ function loadDecoder(clientPath) {
 function decodeStream(streamPath, outPath, clientPath) {
   const { frames, st } = readStream(streamPath);
 
-  // readStream refuses a stream with no rate element, and this makes the same refusal rather than
-  // relying on that order: the two lines below index the messages by the frame the rate was found in,
-  // and rateFrame is -1 when there was none, where there is no message and .samplesBefore throws.
-  if (st.rateFrame < 0) fail(NO_RATE);
+  // The two rules a take has to meet to be recordable, kept here rather than in the walk because this
+  // is where the rate is used: with no element the client would decode at its 8000 Hz default and
+  // every count would be wrong, and its recorder stops appending after 2 s of silence and truncates
+  // the take without saying so.  `!st.rate` also covers an element that declares 0 Hz, which is not
+  // a usable rate either; a usable rate always leaves rateFrame on a message, so this is what keeps
+  // the frame index below from being -1, where frames[] holds no message to read.
+  if (!st.rate) {
+    fail('no usable sample-rate element: the decoder would fall back to its 8000 Hz default');
+  }
+  if (st.maxSilence > 2 * st.rate) {
+    fail('the stream goes silent for ' + (st.maxSilence / st.rate).toFixed(2) + ' s (limit 2 s at ' +
+         st.rate + ' Hz); the client\'s recorder stops appending after that and truncates the take ' +
+         'without saying so');
+  }
 
   // rec_start snapshots the client's current rate, which is its 8000 Hz default until the rate
   // element has been processed, so the frame carrying the rate is fed first and recording starts
@@ -414,7 +416,9 @@ function selfTest() {
   // from a rule that has moved behind loadDecoder(), where the missing client answers first - fails
   // on that line instead of passing on the exit status.  The 2 s run is the first whole count of
   // 128-zero markers over the rule; the random fill walks 281 bytes of the format before it reaches
-  // a message type the client would have skipped silently.
+  // a message type the client would have skipped silently.  The missing rate row is the decode's own
+  // guard, not a twin of one in the walk: readStream hands back a walk with no rate in it, so
+  // deleting that guard turns this row red instead of leaving the refusal to the walk.
   const RATE = 7119;
   const refusals = [
     ['random bytes, on an unknown message type', randomStream(),
@@ -428,7 +432,7 @@ function selfTest() {
      /^0\.05 s of audio arrives in messages before the rate element, so it could not be recorded at the stream's 7119 Hz$/],
     ['the cut-off block', streamOf([rateElement(RATE)], [block8().subarray(0, 128)]),
      /^message 1 at byte 7: 8-bit block cut off at byte 0 \(128 of 129 bytes\)$/],
-    ['the missing rate', streamOf([block8()]),
+    ['the missing rate, at the decode', streamOf([block8()]),
      /^no usable sample-rate element: the decoder would fall back to its 8000 Hz default$/],
     ['the trailing bytes', Buffer.concat([conformantStream(), Buffer.from([1, 2, 3])]),
      /^3 trailing bytes after the last message$/],
