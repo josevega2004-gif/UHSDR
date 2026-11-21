@@ -1767,6 +1767,27 @@ static size_t gate_crossings(const cap_t* c, double lo, double hi, double** out)
     return n;
 }
 
+// Every phase measurement in the clock fit is the same sum: one unit phasor per transition on a grid
+// of the given period, folded at `harmonic` times the phase. Harmonic 2 is the squared phase, which
+// cancels the half bit a Baudot character's stop leaves and reads the bit; harmonic 1 is the
+// fundamental the two centres are shifted and measured in. With more than one centre the transitions
+// are split into a bucket each, nearest by folded distance, which is how a centre is moved onto the
+// transitions that chose it; one bucket sums them all into a single phasor.
+static void gate_phase_sums(const double* t, size_t n, double period_ms, int harmonic,
+                            const double* centres, int buckets, double* re, double* im)
+{
+    for (int b = 0; b < buckets; b++) { re[b] = 0.0; im[b] = 0.0; }
+    for (size_t i = 0; i < n; i++)
+    {
+        const double ph = fmod(t[i] * 1000.0, period_ms) / period_ms;
+        int b = 0;
+        if (buckets > 1)
+            b = fabs(wrap_half(ph - centres[1])) < fabs(wrap_half(ph - centres[0])) ? 1 : 0;
+        re[b] += cos((double)harmonic * 2.0 * GATE_PI * ph);
+        im[b] += sin((double)harmonic * 2.0 * GATE_PI * ph);
+    }
+}
+
 static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_clock_t* k)
 {
     k->transitions = 0; k->period_ms = 0.0; k->dispersion_pct = 0.0; k->mad_pct = 0.0;
@@ -1787,25 +1808,15 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
     double best_t = nominal, best_r = -1.0;
     for (double T = nominal * 0.70; T <= nominal * 1.30; T += 0.005)
     {
-        double re = 0.0, im = 0.0;
-        for (size_t i = 0; i < n; i++)
-        {
-            const double ph = fmod(t[i] * 1000.0, T) / T;
-            re += cos(4.0 * GATE_PI * ph);
-            im += sin(4.0 * GATE_PI * ph);
-        }
+        double re, im;
+        gate_phase_sums(t, n, T, 2, NULL, 1, &re, &im);
         const double r = sqrt(re * re + im * im) / (double)n;
         if (r > best_r) { best_r = r; best_t = T; }
     }
     double centre[2];
     {
-        double re = 0.0, im = 0.0;
-        for (size_t i = 0; i < n; i++)
-        {
-            const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
-            re += cos(2.0 * GATE_PI * ph);
-            im += sin(2.0 * GATE_PI * ph);
-        }
+        double re, im;
+        gate_phase_sums(t, n, best_t, 1, NULL, 1, &re, &im);
         centre[0] = fmod(atan2(im, re) / (2.0 * GATE_PI) + 1.0, 1.0);
         centre[1] = fmod(centre[0] + 0.5, 1.0);
     }
@@ -1815,14 +1826,8 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
     // 8.8 % at the second and the same at the fourth and the sixth.
     for (int round = 0; round < 2; round++)
     {
-        double re[2] = {0.0, 0.0}, im[2] = {0.0, 0.0};
-        for (size_t i = 0; i < n; i++)
-        {
-            const double ph = fmod(t[i] * 1000.0, best_t) / best_t;
-            const int k = fabs(wrap_half(ph - centre[1])) < fabs(wrap_half(ph - centre[0])) ? 1 : 0;
-            re[k] += cos(2.0 * GATE_PI * ph);
-            im[k] += sin(2.0 * GATE_PI * ph);
-        }
+        double re[2], im[2];
+        gate_phase_sums(t, n, best_t, 1, centre, 2, re, im);
         for (int c = 0; c < 2; c++)
             if (re[c] != 0.0 || im[c] != 0.0)
                 centre[c] = fmod(atan2(im[c], re[c]) / (2.0 * GATE_PI) + 1.0, 1.0);
