@@ -2783,6 +2783,14 @@ static void gate_phase_sums(const double* t, size_t n, double period_ms, int har
     }
 }
 
+// The clock fit's search window, as a fraction of the declared bit.  It is wider than the 5 % the
+// gate accepts, on purpose: a take whose time base is 20 % off still has a grid, and finding it is
+// what lets the gate say "40 baud, not 50" instead of handing back the nominal period.  What the ends
+// have to stay clear of is the lattice a two bit take sits on - half a bit either side, the whole
+// point of the window - so both are asserted in the bench's clock section.
+#define GATE_CLOCK_LO     0.70
+#define GATE_CLOCK_HI     1.30
+
 static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_clock_t* k)
 {
     k->transitions = 0; k->period_ms = 0.0; k->dispersion_pct = 0.0; k->mad_pct = 0.0;
@@ -2801,7 +2809,7 @@ static void gate_clock(const cap_t* c, double lo, double hi, double baud, gate_c
     // reporting the nominal period for a take that has no such period at all
     const double nominal = 1000.0 / baud;
     double best_t = nominal, best_r = -1.0;
-    for (double T = nominal * 0.70; T <= nominal * 1.30; T += 0.005)
+    for (double T = nominal * GATE_CLOCK_LO; T <= nominal * GATE_CLOCK_HI; T += 0.005)
     {
         double re, im;
         gate_phase_sums(t, n, T, 2, NULL, 1, &re, &im);
@@ -4115,9 +4123,16 @@ static int selftest(void)
         // every 40 ms, so 40 ms explains the transitions exactly as well as 20 does and 10 ms fits
         // their phases too. The reported period has to be the bit the modem will key at, which is
         // the fundamental of that grid, and not the coarser lattice the crossings alone allow.
-        // What holds this is the search window as much as the fit: it runs 30 % either side of the
-        // declared 50 baud, so 21..26 ms, and 40 ms is never a candidate. The case pins the outcome
-        // for the day the window or the fit changes, not a rule inside the fit.
+        // What holds the lattice out is the search window as much as the fit, so the window is
+        // asserted as a rule before the take goes through it: 30 % either side of the declared bit
+        // leaves 14..26 ms here, clear of the 10 ms whose phases fit the same transitions and of the
+        // 40 ms that explains them. The window is a fraction of the bit, so the same two bounds hold
+        // at every declared rate; the case after them pins what the fit reports.
+        const double bit_ms = 1000.0 / 50.0;
+        check(bit_ms * GATE_CLOCK_LO > 0.5 * bit_ms,
+              "clock: the search window starts above half a bit, where a two bit take's phases fit");
+        check(bit_ms * GATE_CLOCK_HI < 2.0 * bit_ms,
+              "clock: and ends below twice the bit, so a two bit take is never fitted to its 40 ms spacing");
         for (int i = 0; i < NSLOT; i++) slots[i] = (uint8_t)((i / 2) & 1);
         check(synth_take(&c, slots, NSLOT, 20.0, 775.0, 1225.0),
               "clock: a take that repeats on a two bit lattice can be built in memory");

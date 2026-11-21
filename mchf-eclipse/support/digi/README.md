@@ -92,6 +92,8 @@ sends where the pinned text has a space - not a copy that faded. A clean synthet
 period alone, though its pair and its scatter look perfect. The fit searches 30 % either side of
 the nominal period rather than at it, so a take at the wrong rate reports the rate it carries: a
 40 baud take reads 25.00 ms and 40.0 baud, and the rejection line names that beside the period.
+The window is a fraction of the bit and the bench asserts that both its ends sit clear of half a bit
+and of twice a bit, so a take repeating on a two bit lattice can only be read as its bit.
 - **dropouts** are 1 ms slots below 15 % of the median level, reported as a count and the longest
 run. Trimming the ends of a take does not remove a stall in the middle of one.
 
