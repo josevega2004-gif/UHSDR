@@ -149,14 +149,15 @@ record-check: digi_bench
 	@./digi_bench record-check
 
 # the capture decoder's own self-test, in capture/decode_oracle.js: a stream built element by
-# element there has to pass the framing walk with the counts it was built from, and four streams
-# built to break one rule each - random bytes, a silence run over 2 s, a rate that changes
-# mid-stream, audio before the rate element - have to be refused with a nonzero exit, no WAV and the
-# reason each was built to hit.  The first case is what catches a walk that has stopped accepting
-# valid traffic; the other four say it is still strict.  That is the check on the piece that decides
-# whether a .stream is worth decoding at all - the client it loads is not committed (see the licence
-# note in README.md), so this grades the framing walk and the refusals, and needs no capture, no
-# client and no network.
+# element there has to pass the framing walk with the counts it was built from, and seven streams
+# built to break one rule each - random bytes, stopped on an unknown message type, a silence run over
+# 2 s, a rate that changes mid-stream, audio before the rate element, an 8-bit block one byte short,
+# audio with no rate element, bytes after the last message - have to be refused with a nonzero exit,
+# no WAV and the whole complaint each was built to draw.  The first case is what catches a walk that
+# has stopped accepting valid traffic; the other seven say it is still strict.  That is the check on
+# the piece that decides whether a .stream is worth decoding at all - the client it loads is not
+# committed (see the licence note in README.md), so this grades the framing walk and the refusals,
+# and needs no capture, no client and no network.
 oracle-check:
 	@command -v node >/dev/null 2>&1 || { echo "FAIL  node is needed for capture/decode_oracle.js"; exit 1; }
 	@node capture/decode_oracle.js --self-test

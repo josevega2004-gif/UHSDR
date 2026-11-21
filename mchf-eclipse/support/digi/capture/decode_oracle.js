@@ -25,15 +25,17 @@
 // WAV writer below are all checked into this tree.
 //
 // usage: node decode_oracle.js <stream-file> <out.wav> [--client <websdr-sound.js>]
-//        node decode_oracle.js --self-test   (a built conformant stream must walk clean, and four
+//        node decode_oracle.js --self-test   (a built conformant stream must walk clean, and seven
 //                                             streams built to break one rule each must be refused)
 //
 // --self-test needs no client, on purpose: every case is decided by the framing walk and the checks
 // in front of the decoder, so CI can grade them without the client file or a network.  The
 // conformant case is the one that catches a walk which has stopped accepting valid traffic - a
-// refusal test alone cannot tell a strict walk from one that rejects everything - and the four
-// refusals pin the rules a later simplification could quietly loosen: random bytes, a silence run
-// over 2 s, a rate that changes mid-stream, and audio in a message before the rate element.
+// refusal test alone cannot tell a strict walk from one that rejects everything - and the seven
+// refusals pin the rules a later simplification could quietly loosen: random bytes, which stop on an
+// unknown message type, a silence run over 2 s, a rate that changes mid-stream, audio in a message
+// before the rate element, a block cut off, a stream with no rate element, and bytes after the last
+// message.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -139,6 +141,12 @@ function walkMessage(b, st, frame) {
 }
 
 // ---- the whole file, before the decoder sees any of it ---------------------------------------
+
+// A stream that never declares a rate would be decoded at the client's 8000 Hz default and every
+// sample count would be wrong, so both the walk and the decode refuse it - with the same words, so
+// the rule cannot drift between them.
+const NO_RATE = 'no usable sample-rate element: the decoder would fall back to its 8000 Hz default';
+
 function readStream(streamPath) {
   const raw = fs.readFileSync(streamPath);
   const st = { rate: 0, rateFrame: -1, samples: 0, blocks8: 0, blocks14: 0,
@@ -161,7 +169,7 @@ function readStream(streamPath) {
     frames.push({ body: msg, samplesBefore });
   }
   if (off !== raw.length) fail((raw.length - off) + ' trailing bytes after the last message');
-  if (!st.rate) fail('no usable sample-rate element: the decoder would fall back to its 8000 Hz default');
+  if (!st.rate) fail(NO_RATE);
   if (st.maxSilence > 2 * st.rate) {
     fail('the stream goes silent for ' + (st.maxSilence / st.rate).toFixed(2) + ' s (limit 2 s at ' +
          st.rate + ' Hz); the client\'s recorder stops appending after that and truncates the take ' +
@@ -214,6 +222,11 @@ function loadDecoder(clientPath) {
 
 function decodeStream(streamPath, outPath, clientPath) {
   const { frames, st } = readStream(streamPath);
+
+  // readStream refuses a stream with no rate element, and this makes the same refusal rather than
+  // relying on that order: the two lines below index the messages by the frame the rate was found in,
+  // and rateFrame is -1 when there was none, where there is no message and .samplesBefore throws.
+  if (st.rateFrame < 0) fail(NO_RATE);
 
   // rec_start snapshots the client's current rate, which is its 8000 Hz default until the rate
   // element has been processed, so the frame carrying the rate is fed first and recording starts
@@ -285,7 +298,7 @@ function decodeStream(streamPath, outPath, clientPath) {
       ' ms) shared the rate message and are not in the file\n' : ''));
 }
 
-// ---- self-test: a conformant stream must walk, and four rules must still refuse ---------------
+// ---- self-test: a conformant stream must walk, and seven rules must still refuse -------------
 
 // A packed block is not arbitrary bytes: it is 128 samples at width G = 4, each with a zero run
 // length and a zero mantissa, so the client spends one bit on the run and four on the mantissa per
@@ -330,30 +343,28 @@ function conformantStream() {
   ]);
 }
 
-// One stream per refusal, each built to trip exactly one rule and to be right everywhere else.  They
-// are run through the whole script rather than through readStream alone, which also pins that each
-// rule is decided before the WebSDR client is loaded: one that moved behind loadDecoder() would
-// refuse these for a missing client, and the reason each case demands below would not match.
-function silenceStream() {
-  // a marker is 128 zeros, so this is the first whole number of markers over the 2 s rule
-  const n = Math.floor(2 * 7119 / 128) + 1;
-  return Buffer.concat([streamMessage(rateElement(7119)), streamMessage(Array(n).fill(132))]);
+// A whole stream from its messages, each message written out as its elements.
+function streamOf(...messages) {
+  return Buffer.concat(messages.map((elements) => streamMessage(...elements)));
 }
 
-function rateChangeStream() {
-  return Buffer.concat([
-    streamMessage(rateElement(7119)),
-    streamMessage(block8()),
-    streamMessage(rateElement(8000)),
-  ]);
-}
-
-function earlierAudioStream() {
-  return Buffer.concat([
-    streamMessage(block8(), block8(), block8()),    // 384 samples before any rate is known
-    streamMessage(rateElement(7119)),
-    streamMessage(block8()),
-  ]);
+// 169 frames of the size a real take arrives in, filled from a fixed linear congruential sequence
+// rather than Math.random, so the refusal is the same on every run and can be pinned to its reason.
+// A fresh draw each time would move which element it trips on, and whichever came first could mask
+// a rule that had stopped firing.
+function randomStream() {
+  const buf = Buffer.alloc(169 * (4 + 905));
+  let x = 12345;
+  let off = 0;
+  for (let i = 0; i < 169; i++) {
+    buf.writeUInt32BE(905, off);
+    off += 4;
+    for (let k = 0; k < 905; k++) {
+      x = (Math.imul(x, 1103515245) + 12345) >>> 0;
+      buf[off++] = (x >>> 16) & 0xFF;
+    }
+  }
+  return buf;
 }
 
 // Write one stream, run the script on it the way a capture is run, and require no WAV, a nonzero
@@ -366,14 +377,14 @@ function expectRefusal(dir, name, buf, why) {
   const out = path.join(dir, slug + '.wav');
   fs.writeFileSync(stream, buf);
   const r = spawnSync(process.execPath, [__filename, stream, out], { encoding: 'utf8' });
-  if (fs.existsSync(out)) fail(name + ' left a WAV behind');
-  if (r.status === 0) fail(name + ' was accepted (exit 0)');
+  if (fs.existsSync(out)) fail(name + ': left a WAV behind');
+  if (r.status === 0) fail(name + ': accepted (exit 0)');
   const said = (r.stderr || '').trim().split('\n')[0];
-  if (!/^oracle: FAIL /.test(said)) {
-    fail(name + ' was refused by something other than a format check: ' + said);
-  }
-  if (!why.test(said)) fail(name + ' was refused for the wrong reason: ' + said);
-  process.stdout.write('oracle:   ' + name + ' is refused: ' + said + '\n');
+  const prefix = 'oracle: FAIL ';
+  if (!said.startsWith(prefix)) fail(name + ': not refused by a format check (a crash?): ' + said);
+  // the cases below match the text after the prefix, and match all of it
+  if (!why.test(said.slice(prefix.length))) fail(name + ': refused for the wrong reason: ' + said);
+  process.stdout.write('oracle:   ' + name + ': refused - ' + said + '\n');
 }
 
 function selfTest() {
@@ -385,41 +396,46 @@ function selfTest() {
   const good = path.join(dir, 'conformant.stream');
   fs.writeFileSync(good, conformantStream());
   const walk = readStream(good);
-  const want = { rate: 7119, samples: 512, blocks8: 1, blocks14: 2, silence: 1 };
+  const got = Object.assign({ frames: walk.frames.length }, walk.st);
+  const want = { frames: 3, rate: 7119, samples: 512, blocks8: 1, blocks14: 2, silence: 1 };
   for (const k of Object.keys(want)) {
-    if (walk.st[k] !== want[k]) {
-      fail('the conformant self-test stream walked as ' + k + '=' + walk.st[k] + ', not ' +
-           want[k] + ': the framing walk now miscounts or refuses valid traffic');
+    if (got[k] !== want[k]) {
+      fail('the conformant self-test stream walked as ' + k + '=' + got[k] + ', not ' + want[k] +
+           ': the framing walk now miscounts or refuses valid traffic');
     }
-  }
-  if (walk.frames.length !== 3) {
-    fail('the conformant self-test stream walked as ' + walk.frames.length + ' messages, not 3');
   }
   process.stdout.write(
     'oracle:   built stream walked: ' + walk.frames.length + ' messages, ' + walk.st.rate + ' Hz, ' +
     walk.st.samples + ' samples (' + walk.st.blocks8 + ' 8-bit, ' + walk.st.blocks14 + ' packed, ' +
     walk.st.silence + ' silence)\n');
 
-  // the refusal the self-test has always made, on bytes that are not a message at all
-  const buf = Buffer.alloc(169 * (4 + 905));
-  let off = 0;
-  for (let i = 0; i < 169; i++) {
-    buf.writeUInt32BE(905, off);
-    off += 4;
-    for (let k = 0; k < 905; k++) buf[off++] = Math.floor(Math.random() * 256);
-  }
-  expectRefusal(dir, 'random bytes', buf, /^oracle: FAIL /);
-
-  // and one per rule that would otherwise only be checked by hand
-  expectRefusal(dir, 'the 2 s silence run', silenceStream(),
-                /goes silent for 2\.0\d s \(limit 2 s at 7119 Hz\)/);
-  expectRefusal(dir, 'the rate change', rateChangeStream(),
-                /sample rate changed mid-stream: 7119 -> 8000/);
-  expectRefusal(dir, 'the early audio', earlierAudioStream(),
-                /s of audio arrives in messages before the rate element/);
-
-  process.stdout.write('oracle: self-test ok - the built stream walks, and 4 streams were refused' +
-                       ' for the reason each was built to hit\n');
+  // One stream per refusal, each built to trip exactly one rule and be right everywhere else, with
+  // the whole complaint it has to draw.  A refusal that still arrives but for another reason - or
+  // from a rule that has moved behind loadDecoder(), where the missing client answers first - fails
+  // on that line instead of passing on the exit status.  The 2 s run is the first whole count of
+  // 128-zero markers over the rule; the random fill walks 281 bytes of the format before it reaches
+  // a message type the client would have skipped silently.
+  const RATE = 7119;
+  const refusals = [
+    ['random bytes, on an unknown message type', randomStream(),
+     /^message 0 at byte 0: unknown message type 0x8c at byte 281 \(the client would invent samples from it or skip it silently\)$/],
+    ['the 2 s silence run',
+     streamOf([rateElement(RATE)], [Array(Math.floor(2 * RATE / 128) + 1).fill(132)]),
+     /^the stream goes silent for 2\.01 s \(limit 2 s at 7119 Hz\); the client's recorder stops appending after that and truncates the take without saying so$/],
+    ['the rate change', streamOf([rateElement(RATE)], [block8()], [rateElement(8000)]),
+     /^message 2 at byte 140: sample rate changed mid-stream: 7119 -> 8000$/],
+    ['the early audio', streamOf([block8(), block8(), block8()], [rateElement(RATE)], [block8()]),
+     /^0\.05 s of audio arrives in messages before the rate element, so it could not be recorded at the stream's 7119 Hz$/],
+    ['the cut-off block', streamOf([rateElement(RATE)], [block8().subarray(0, 128)]),
+     /^message 1 at byte 7: 8-bit block cut off at byte 0 \(128 of 129 bytes\)$/],
+    ['the missing rate', streamOf([block8()]),
+     /^no usable sample-rate element: the decoder would fall back to its 8000 Hz default$/],
+    ['the trailing bytes', Buffer.concat([conformantStream(), Buffer.from([1, 2, 3])]),
+     /^3 trailing bytes after the last message$/],
+  ];
+  for (const [name, buf, why] of refusals) expectRefusal(dir, name, buf, why);
+  process.stdout.write('oracle: self-test ok - the built stream walks, and ' + refusals.length +
+                       ' streams were refused for the reason each was built to hit\n');
 }
 
 // ---- main ------------------------------------------------------------------------------------
