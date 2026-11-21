@@ -633,8 +633,8 @@ do all the work:
   seven bits taken across a character boundary land on a constant ratio word by accident about a
   fifth of the time and seven bits taken inside one always do. The receiver searches the bit phase,
   the bit length and the group boundary together and keeps the alignment that maximises the share of
-  words in the alphabet: 1.000 on a clean take, 0.967 with one block's direct copy erased, 0.402 once
-  the tuning error inverts the polarity.
+  words in the alphabet: 1.000 on a clean take, 0.967 with one block's direct copy erased, 0.492 once
+  the tuning error walks the tones off their bins.
 * **there is no return path, so the correction is time diversity.** Each character is sent twice, the
   direct (DX) copy and a repeat (RX) copy five character slots - 350 ms - later, in blocks of five. A
   copy that is not a constant ratio word has already been detected as broken and is dropped, and the
@@ -647,9 +647,11 @@ The bit order is the one thing a loopback cannot catch on its own: CCIR 476 is w
 significant bit first and SITOR sends each character least significant bit first, but a reversed
 4-of-7 word is still 4-of-7. The receiver therefore decides the order from the phasing signal it is
 about to look for: that is SIA `0x0F` / SIB `0x33` in the table's order and `0x78` / `0x66` in the
-reverse one, so an alternation of CR and RPT is the tell. The mechanism is measured here against a
-take generated in the table's order; it has not been shown on a reversed one, because no such take
-exists yet.
+reverse one, so an alternation of CR and RPT is the tell. The generator can now key either order,
+phasing pair included, so the reversed take is audio the receiver did not frame in its own order and
+the decode can only come from that detection - it does, 0.0 % with the `rev` column at 1. What a
+wrong detection would cost is measured rather than assumed: a take whose phasing is in the table's
+order and whose text is reversed is read as the table's order, and 84.8 % of the message is wrong.
 
 Measured on a 46 character message at 12 kHz; each row's own SNR and channel are in its name:
 
@@ -662,7 +664,9 @@ Measured on a 46 character message at 12 kHz; each row's own SNR and channel are
 | burst over one block's direct copy (280 ms) | 0.0 | 0/46 | **4** | 0 | 0.967 |
 | burst over both copies (700 ms) | **10.9** | 5/46 | 0 | 5 | 0.918 |
 | tuning error +50 Hz | 0.0 | 0/46 | 0 | 0 | 1.000 |
-| tuning error +100 Hz | **87.0** | 40/46 | 45 | 3 | **0.402** |
+| tuning error +100 Hz | **84.8** | 39/46 | 45 | 3 | **0.492** |
+| reversed bit order, 20 dB | 0.0 | 0/46 | 0 | 0 | 1.000 |
+| phasing in the table order, text reversed | **84.8** | 39/46 | 0 | 0 | 1.000 |
 
 The first four rows are what the alphabet and the correction buy. The burst row is the mode working:
 four characters of a block lose their direct copy and all four come back from the repeat, with the
@@ -672,10 +676,22 @@ there was none would fail here rather than read as an improvement.
 
 The tuning rows are the two-bin geometry, not a filter skirt: the demodulator decides each bit by
 comparing the energy at 1615 and 1785 Hz, so a tone that has moved stays on its own side of the
-midpoint until the error passes half the shift. +50 Hz is inside that and decodes clean; +100 Hz puts
-the space tone nearer the mark bin, every word inverts, and the constant ratio share falls to 0.402.
-There is no AFC here either, so this is the same cliff the RTTY section describes, at the one place
-it can be computed: half the shift, 85 Hz.
+midpoint until the error passes half the shift. +50 Hz is inside that and decodes clean; +100 Hz moves
+the space tone closer to the mark bin than to its own, so the words stop being words rather than
+inverting cleanly into other valid ones - the constant ratio share falls to 0.492 and 39 of 46
+characters are wrong. There is no AFC here either, so this is the same cliff the RTTY section
+describes, at the one place it can be computed: half the shift, 85 Hz.
+
+The last two rows are the bit order. Reversal is not damage - every reversed 4-of-7 word is another
+member of the alphabet - so the reversed take keeps its 1.000 share and decodes exactly, which is the
+detection and nothing else: the ratio that finds the group boundary is blind to the order. The
+wrong-order row is what happens when that detection is told the wrong thing: the phasing says the
+table's order and the text is reversed, so every character the receiver reports is the reversal of the
+one sent. Both copies are reversed the same way, so the repeat has nothing to disagree about - `fix`
+is 0 and `lost` is 0 - and the 4-of-7 share is still 1.000, because every word really is a word. Time
+diversity cannot repair an error both copies share, which is why the row is pinned from below: a
+receiver that hedged by trying both orders would decode this, and would then also be inventing text
+out of noise.
 
 ## Hellschreiber, `make -C support/digi hell`
 

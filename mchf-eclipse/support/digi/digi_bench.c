@@ -876,6 +876,7 @@ typedef struct
     float tune_hz;          // both tones moved by this much: the receiver's bins do not follow them
     float erase_ms;         // a burst starting this far into the take, this many ms long, erased
     float erase_len_ms;     // (signal and noise together, which is what a fade looks like)
+    int   order;            // NAVTEX_ORDER_*: which bit order the take is generated in
     float max_cer;
     float min_cer;          // a floor for the rows that have to keep failing
 } navtex_case_t;
@@ -908,6 +909,16 @@ static int navtex_table(void)
         { .name = "tune +50 Hz", .snr_db = 20.0f, .tune_hz = 50.0f, .max_cer = 5.0f },
         { .name = "tune +100 Hz", .snr_db = 20.0f, .tune_hz = 100.0f, .max_cer = 100.0f,
           .min_cer = 50.0f },
+        // The other bit order. Every word is keyed most significant bit first, phasing pair included,
+        // which is a take this receiver's generator did not used to be able to make at all. Nothing
+        // else about the take changes: a decode that comes back as sent can only have come from the
+        // phasing pair, because every reversed 4-of-7 word is another valid character - the ratio
+        // that finds the boundary cannot tell the two orders apart.
+        { .name = "reversed bits", .snr_db = 20.0f, .order = NAVTEX_ORDER_REVERSED, .max_cer = 5.0f },
+        // The same text with the phasing left in the table's order: the receiver is told the wrong
+        // order and reads every character backwards. This is the cost, so it is pinned from below.
+        { .name = "wrong order", .snr_db = 20.0f, .order = NAVTEX_ORDER_MIXED, .max_cer = 95.0f,
+          .min_cer = 75.0f },
     };
     const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
     int failures = 0;
@@ -915,8 +926,8 @@ static int navtex_table(void)
     printf("NAVTEX / SITOR-B through the reference modem: 100 Bd, 170 Hz shift, CCIR 476 4-of-7,\n"
            "each character sent twice five slots (350 ms) apart. Text is %zu characters.\n\n",
            strlen(msg));
-    printf("%-14s %6s %8s %6s %7s %7s %6s %6s  %s\n", "case", "CER %", "err/len", "lead",
-           "bit ms", "4of7", "fix", "lost", "decoded");
+    printf("%-14s %6s %8s %6s %7s %7s %6s %6s %3s  %s\n", "case", "CER %", "err/len", "lead",
+           "bit ms", "4of7", "fix", "lost", "rev", "decoded");
     for (size_t i = 0; i < n_cases; i++)
     {
         const navtex_case_t* c = &cases[i];
@@ -926,7 +937,7 @@ static int navtex_table(void)
         if (!x || !got) { free(x); free(got); printf("out of memory\n"); return 1; }
         // the tones are where the transmitter put them, or moved by a reference error that the
         // receiver's 1615/1785 Hz bins do not follow
-        size_t n = Bench_NavtexGenerate(x, cap, msg, c->tune_hz);
+        size_t n = Bench_NavtexGenerate(x, cap, msg, c->tune_hz, c->order);
         if (c->snr_db < 90.0f)
         {
             Bench_RngSeed(0x4E4156u);
@@ -948,9 +959,9 @@ static int navtex_table(void)
         const int wrong = (int)lround((double)cer * (double)need / 100.0);
         char counted[32];
         snprintf(counted, sizeof(counted), "%d/%zu", wrong, need);
-        printf("%-14s %6.1f %8s %6d %7.3f %7.3f %6u %6u  %.44s%s\n", c->name, (double)cer, counted,
-               skip, res.period_samples / 12.0, res.valid_fraction, res.repaired, res.both_bad,
-               got, strlen(got) > 44 ? " ..." : "");
+        printf("%-14s %6.1f %8s %6d %7.3f %7.3f %6u %6u %3d  %.44s%s\n", c->name, (double)cer,
+               counted, skip, res.period_samples / 12.0, res.valid_fraction, res.repaired,
+               res.both_bad, res.reversed, got, strlen(got) > 44 ? " ..." : "");
         if (!ok)
         {
             printf("FAIL  %-14s the receiver found no alignment to read\n", c->name);
@@ -975,7 +986,8 @@ static int navtex_table(void)
            "the time, a right one always, so it is the synchroniser as well as the error detector.\n"
            "'fix' counts the characters whose two copies differed, which is one copy dropped as broken\n"
            "and the other taken, and 'lost' the ones where neither copy was a word and the pair was\n"
-           "too far from every valid word to correct.\n");
+           "too far from every valid word to correct. 'rev' is the bit order the receiver took from the\n"
+           "phasing pair: 0 for the table's order, 1 for its reversal.\n");
     if (!failures)
     {
         printf("\nall %zu cases inside their character error rate limits\n", n_cases);
@@ -2926,7 +2938,7 @@ static int selftest(void)
         float32_t* x = malloc(cap * sizeof(float32_t));
         char got[1024];
         navtex_result_t res;
-        const size_t n = Bench_NavtexGenerate(x, cap, msg, 0.0f);
+        const size_t n = Bench_NavtexGenerate(x, cap, msg, 0.0f, NAVTEX_ORDER_TABLE);
         check(n > 0 && Bench_NavtexDecode(x, n, got, sizeof(got), &res),
               "navtex: a clean SITOR-B transmission decodes");
         printf("     (aligned on %.2f ms bits, %.3f of its words 4-of-7)\n",
@@ -2943,6 +2955,30 @@ static int selftest(void)
                burst.phasing_run, got);
         check(ok && strstr(got, "NAVTEX TEST DE UHSDR") != NULL && burst.repaired > 0,
               "navtex: the repeat copy carries a block whose direct copy was erased");
+
+        // The other bit order, phasing pair included. Every reversed 4-of-7 word is a valid
+        // character, so the ratio that finds the group boundary says nothing about the order: the
+        // decode can only come right if the receiver read it off the phasing, which is what the
+        // result flag has to show.
+        const size_t nrev = Bench_NavtexGenerate(x, cap, msg, 0.0f, NAVTEX_ORDER_REVERSED);
+        navtex_result_t rorder;
+        const int rev_ok = nrev > 0 && Bench_NavtexDecode(x, nrev, got, sizeof(got), &rorder);
+        printf("     (same text in the other bit order: ok %d, detected %d, phasing run %d, %.3f "
+               "4-of-7) [%s]\n", rev_ok, rorder.reversed, rorder.phasing_run,
+               rorder.valid_fraction, got);
+        check(rev_ok && rorder.reversed == 1 && strstr(got, "NAVTEX TEST DE UHSDR") != NULL,
+              "navtex: a take in the other bit order decodes, its order read from the phasing pair");
+
+        // Phasing in the table's order and text in the other one: the receiver is told the wrong
+        // order, so it has to read the text wrong rather than hedge. A receiver that quietly tried
+        // both would decode this, and would then also be inventing characters out of noise.
+        const size_t nmix = Bench_NavtexGenerate(x, cap, msg, 0.0f, NAVTEX_ORDER_MIXED);
+        navtex_result_t rmix;
+        const int mix_ok = nmix > 0 && Bench_NavtexDecode(x, nmix, got, sizeof(got), &rmix);
+        printf("     (phasing in the table order, text reversed: ok %d, detected %d) [%s]\n",
+               mix_ok, rmix.reversed, got);
+        check(mix_ok && rmix.reversed == 0 && strstr(got, "NAVTEX TEST DE UHSDR") == NULL,
+              "navtex: text in the other order than its phasing does not decode as the text sent");
         free(x);
     }
     {

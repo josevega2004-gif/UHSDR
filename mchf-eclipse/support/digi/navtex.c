@@ -23,6 +23,9 @@
  * significant bit first, as ITA2 does. A reversed bit order is still 4-of-7, so a receiver cannot
  * tell from the ratio alone - but the phasing pair it is about to look for is 0x0F/0x33, whose
  * reversals are 0x78/0x66, so the receiver detects the order from the phasing and says which it used.
+ * The transmitter here can key either order, phasing included, and can also key a take whose phasing
+ * is in one order and whose text is in the other: the first is a decode the receiver has to get from
+ * the phasing alone, the second prices a detection that guessed wrong instead of assuming it is free.
  */
 #include <math.h>
 #include <stdio.h>
@@ -37,6 +40,7 @@
 #define NV_MARK_HZ    1785.0      // '1', the high tone: SITOR makes the high tone the mark
 #define NV_BAUD        100.0
 #define NV_BIT_SAMPLES 120        // exactly one bit at 12 kHz
+#define NV_PHASING      20        // phasing characters before the text, alternating SIA and SIB
 
 // the characters SITOR uses beyond the 32 ITA2 code points
 #define NV_SIA   0x0F             // phasing signal 1
@@ -160,7 +164,7 @@ static size_t nv_frame(const uint8_t* codes, size_t n, uint8_t* out, size_t cap)
     return m;
 }
 
-size_t Bench_NavtexGenerate(float32_t* out, size_t cap, const char* text, float tune_hz)
+size_t Bench_NavtexGenerate(float32_t* out, size_t cap, const char* text, float tune_hz, int order)
 {
     // tune_hz moves both tones by the same number of Hz, which is what a reference or tuning error
     // does to a received pair: the shift is unchanged and the receiver's fixed bins no longer sit on
@@ -174,7 +178,7 @@ size_t Bench_NavtexGenerate(float32_t* out, size_t cap, const char* text, float 
     size_t na = 0;
     // the phasing signal: at least 15 characters of alternating SIA and SIB, which is what tells a
     // receiver where the seven bit groups are before there is any text to find them in
-    for (int i = 0; i < 20; i++) all[na++] = (i & 1) ? NV_SIB : NV_SIA;
+    for (int i = 0; i < NV_PHASING; i++) all[na++] = (i & 1) ? NV_SIB : NV_SIA;
     memcpy(all + na, framed, nf);
     na += nf;
     // end of emission: phasing signal 1 three times
@@ -184,9 +188,17 @@ size_t Bench_NavtexGenerate(float32_t* out, size_t cap, const char* text, float 
     double phase = 0.0;
     for (size_t c = 0; c < na; c++)
     {
+        // The bit order belongs to the transmitter, so it is applied to the word before it is keyed
+        // rather than by walking the bits backwards here: the reversed code is what the other
+        // convention puts on the air, and it is still 4-of-7. The phasing pair goes with it - that
+        // is what lets the receiver detect the order - unless the take is the mixed one, which
+        // deliberately leaves the phasing in the table's order so the receiver is told the wrong one.
+        unsigned word = all[c];
+        if (order == NAVTEX_ORDER_REVERSED || (order == NAVTEX_ORDER_MIXED && c >= NV_PHASING))
+            word = nv_reverse(word);
         for (int b = 0; b < 7; b++)
         {
-            const double f = ((all[c] >> b) & 1u) ? hi_hz : lo_hz;
+            const double f = ((word >> b) & 1u) ? hi_hz : lo_hz;
             for (int s = 0; s < NV_BIT_SAMPLES && n < cap; s++)
             {
                 out[n++] = (float32_t)(0.4 * sin(phase));
