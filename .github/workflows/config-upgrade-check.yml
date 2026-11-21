@@ -89,8 +89,9 @@ jobs:
         run: make -C support/digi rtty
 
       # A build with one receiver assumption deliberately broken: the receiver is told the other
-      # symbol speed. The target succeeds only when the RTTY table fails, so a table that stopped
-      # seeing receiver faults fails here instead of passing quietly.
+      # symbol speed. The target first has to see the real build pass the same table, then the broken
+      # build fail it on the clean 170 row and run to the end of the table, so a crash or an unrelated
+      # row cannot stand in for the receiver fault this control exists to catch.
       - name: Check the bench fails a broken receiver
         working-directory: mchf-eclipse
         run: make -C support/digi break-rx
@@ -142,6 +143,15 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi tx-check
 
+      # The MFSK16 and Olivia sections quote a 2.5 kHz floor that is measured, not converted. This
+      # reruns the documented points (twelve noise seeds each) and fails when a median draw or the
+      # range of a point leaves the window the section quotes, so the numbers are guarded instead of
+      # being a README claim nobody re-measures. The full step curve is `make -C support/digi
+      # floors-2k5`, which this job does not run.
+      - name: Check the shaped 2.5 kHz floors against the readings the README documents
+        working-directory: mchf-eclipse
+        run: make -C support/digi floors-2k5-check
+
       # NAVTEX is the first mode here that is not the radio's: a reference SITOR-B modem, graded on
       # the two mechanisms the mode is built from. The table has rows that have to fail as well as
       # rows that have to pass - a burst over both copies of a block loses it, and a tuning error past
@@ -166,3 +176,27 @@ jobs:
       - name: Run the Olivia reference modem
         working-directory: mchf-eclipse
         run: make -C support/digi olivia
+
+      # Every step above hands a decoder a buffer that starts on a symbol boundary, which no
+      # recording does. This one writes each mode's own take with a 0.75 s lead into a WAV, loads it
+      # back through the file reader, trims it by its own level, searches one symbol for the start
+      # and decodes it; Hell's PGM is read back and compared with the picture the generator drew, so
+      # a misplaced or malformed raster fails. The four recording verbs were only ever run by hand,
+      # which is the gap that let rtty-multipath fail unnoticed.
+      - name: Run the recording paths through a WAV with a lead
+        working-directory: mchf-eclipse
+        run: make -C support/digi record-check
+
+      # The decoder that turns a captured .stream into a WAV is now in the tree, so the piece that
+      # decides whether a take is worth pinning is graded too: 169 frames of the size a real take
+      # arrives in, filled with random bytes, have to be refused with a nonzero exit and no WAV.
+      # The WebSDR client that script loads is not committed (its licence allows it only to be
+      # served by the receiver; see the licence note in support/digi/README.md), so this step
+      # grades the framing walk and the refusal, not the decode.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check the capture decoder refuses random bytes
+        working-directory: mchf-eclipse
+        run: make -C support/digi oracle-check

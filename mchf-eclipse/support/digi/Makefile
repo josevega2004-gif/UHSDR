@@ -1,8 +1,9 @@
 # Host bench for the UHSDR digital modes. Builds nothing into the radio.
 #
 #   make test    self checks (used by CI)
-#   make break-rx  negative control: a build with the receiver told the other symbol speed must
-#                fail the RTTY table, or the table is not measuring the receiver
+#   make break-rx  negative control: the real build has to pass the RTTY table and the build with
+#                the receiver told the other symbol speed has to fail it on the clean 170 row, or
+#                the table is not measuring the receiver
 #   make rtty    RTTY shift/SNR character error rate matrix (used by CI, fails above the per case
 #                limit), firmware modem looped back on itself
 #   make rtty-long  the same matrix with eight copies of the message: 0.26 % is one character
@@ -72,14 +73,39 @@ digi_bench-break-rx: digi_bench.break-rx.o $(filter-out digi_bench.o,$(BENCH_OBJ
 digi_bench.break-rx.o: digi_bench.c bench.h
 	$(CC) $(CFLAGS) $(DEFINES) -DBENCH_BREAK_RX $(INCLUDES) -c -o $@ $<
 
-break-rx: digi_bench-break-rx
+# A nonzero exit on its own proves nothing: the bench could have crashed, or failed on a row that
+# has nothing to do with the receiver's speed setting. So the real build first has to pass the same
+# table, the broken build has to fail, the failure has to name the clean 170 row and its character
+# error rate, and the run has to reach the end of the table - all of which a crash or an unrelated
+# row cannot do.
+break-rx: digi_bench digi_bench-break-rx
+	@./digi_bench rtty >/tmp/digi-break-rx-normal.log 2>&1 || { \
+		echo "FAIL  the real receiver does not pass the RTTY table, so a broken build failing it would prove nothing"; \
+		grep -m3 FAIL /tmp/digi-break-rx-normal.log || tail -5 /tmp/digi-break-rx-normal.log; \
+		exit 1; \
+	}
+	@grep -q "all .* cases within their character error rate limits" /tmp/digi-break-rx-normal.log || { \
+		echo "FAIL  the real receiver's run printed no all cases summary, so it did not measure the whole table"; \
+		tail -5 /tmp/digi-break-rx-normal.log; \
+		exit 1; \
+	}
 	@if ./digi_bench-break-rx rtty >/tmp/digi-break-rx.log 2>&1; then \
 		echo "FAIL  the broken receiver passed the RTTY table, so the table is not measuring it"; \
 		tail -3 /tmp/digi-break-rx.log; \
 		exit 1; \
-	fi; \
-	echo "ok    the broken receiver fails the RTTY table, as it must"; \
-	grep -m2 "FAIL" /tmp/digi-break-rx.log || true
+	fi
+	@grep -qE "^FAIL +clean 170 +character error rate .*is above" /tmp/digi-break-rx.log || { \
+		echo "FAIL  the broken receiver failed, but not on the clean 170 row: a nonzero exit from anywhere else is not this control"; \
+		grep -m3 "^FAIL" /tmp/digi-break-rx.log || tail -5 /tmp/digi-break-rx.log; \
+		exit 1; \
+	}
+	@grep -q "note: the shift setting is graded" /tmp/digi-break-rx.log || { \
+		echo "FAIL  the broken run stopped before the end of the RTTY table, so it did not measure the receiver"; \
+		tail -5 /tmp/digi-break-rx.log; \
+		exit 1; \
+	}
+	@echo "ok    the real build passes the table, and the broken receiver fails it on clean 170:"
+	@grep -m1 "^FAIL  clean 170" /tmp/digi-break-rx.log
 
 rtty: digi_bench
 	@./digi_bench rtty
@@ -111,10 +137,25 @@ olivia: digi_bench
 floors-2k5: digi_bench
 	@./digi_bench floors-2k5
 
+# the same measurement against the readings the README documents: eleven points, twelve seeds each,
+# and a failure if a median or a range has moved outside its window. This is the step CI runs; the
+# target above is the full coast, for reading.
+floors-2k5-check: digi_bench
+	@./digi_bench floors-2k5-check
+
 # the recording paths for the four non RTTY modes: the modems' own takes with a long lead, written
 # through the WAV reader a real capture goes through
 record-check: digi_bench
 	@./digi_bench record-check
+
+# the capture decoder's own self-test, in capture/decode_oracle.js: 169 frames of the size a real
+# take arrives in, filled with random bytes, have to be refused with a nonzero exit and no WAV.
+# That is the check on the piece that decides whether a .stream is worth decoding at all - the
+# client it loads is not committed (see the licence note in README.md), so this grades the framing
+# walk and the refusal, and needs no capture, no client and no network.
+oracle-check:
+	@command -v node >/dev/null 2>&1 || { echo "FAIL  node is needed for capture/decode_oracle.js"; exit 1; }
+	@node capture/decode_oracle.js --self-test
 
 rtty-shift: digi_bench
 	@./digi_bench rtty-shift
