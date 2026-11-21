@@ -26,6 +26,10 @@ make -C support/digi fixture-check  # do fixtures/MANIFEST.md's numbers still de
 ./digi_bench rtty-wav <file.wav> [shift] ["expected text"] [45|50 baud] [max CER %]
                             # decode a recorded file with the firmware demodulator; the optional
                             # CER limit turns a pinned recording into a graded case
+./digi_bench rtty-align <file.wav> <shift> "expected text" [45|50 baud]
+                            # the same per character table for any take: what the modem read of
+                            # each character and the audio under it, without the DDK2 junction
+                            # check align-check pins
 ./digi_bench navtex-wav <file.wav> ["expected text"] [max CER %]
 ./digi_bench mfsk16-wav <file.wav> ["expected text"] [max CER %]
 ./digi_bench olivia-wav <file.wav> ["expected text"] [max CER %]
@@ -72,8 +76,10 @@ fitted on the squared phase, which cancels that half bit and leaves the bit itse
 phases come back as two centres that the scatter is measured against. Without the split the fixture
 fitted to 18.75 ms - 6 % short of the rate the modem decodes it at - with 13.9 % scatter, and that
 shape looked like a recorder rate error; with it the same audio reads 20.000 ms and 8.8 %, so the
-take's 2.7 % CER is the character the signal inserted plus the pinned space its line break stands in
-for, not a stretched time base. A clean synthetic take measures
+take's 2.7 % is not a stretched time base. It is not a reading of the copy either: the characters
+the scorer charges are both carried at full keying in the take, `fixture-align` reading their own
+mark and space within 7 dB of the take's median, so 2.7 % is the station's extra character and its
+line break, not something the signal lost. A clean synthetic take measures
 20.000 ms and 0.1 %, and a 45.45 baud take measures 22.000 ms with 2.2 % and is refused on the
 period alone, though its pair and its scatter look perfect. The fit searches 30 % either side of
 the nominal period rather than at it, so a take at the wrong rate reports the rate it carries: a
@@ -87,11 +93,10 @@ reference takes at their nominal period and refuses a 45.45 baud take at 10 % lo
 limit is a third above the fixture's 8.8 % and inside the 10.6-13.6 % the five noise takes on hand
 read, so scatter alone does not refuse those; what refuses them is the period, and none of the five
 holds one (16.5 to 25.7 ms measured). A take that fails these is not evidence about the modem either
-way. The gate has already earned its place: a
-24 s take of the 10.1 MHz band whose free decode was `VXTYGJJUKD` reads 234 Hz apart with 0.66 of
-its windows holding both tones and is refused, while a synthetic 50 baud take - the same program,
-the same filters, where the pair really is switched - reads 0.00 both tones and 20.000 ms and is
-accepted.
+way. The gate has already earned its place: a 24 s take of the 10.1 MHz band whose free decode was
+`VXTYGJJUKD` reads 234 Hz apart with 0.66 of its windows holding both tones and is refused, while a
+synthetic 50 baud take - the same program, the same filters, where the pair really is switched -
+reads 0.00 both tones and 20.000 ms and is accepted.
 
 ## Recorded input for NAVTEX, Hell, MFSK16 and Olivia
 
@@ -594,7 +599,8 @@ away from the code 24 (`'9'` in FIGS) the audio carries - then a **line break**,
 The `9` before the extra character and every character the pinned text carries are read correctly.
 `fixture-align` names the same insertion from the other side: one inserted, no substitution, the
 pinned space absent because the take breaks the line there - and both windows carry the take's own
-keying.
+keying at level, not a faded copy of it: the nine's mark and space read -53.6 and -32.8 dB, the
+break -52.0 and -31.1 dB, against the take's -46.5 / -38.4 dB median.
 
 The junction was read back from the audio without the decoder's decisions: 12 ms Goertzel windows at
 the two keying tones (929 Hz mark, 1357 Hz space), one window per data bit, aligned on each character.
@@ -663,12 +669,12 @@ which is worth knowing before quoting an absolute audio frequency - do not carry
 4583 kHz without measuring it there.
 
 **What one 13.7 s take cannot show.** This is a single night path, one receiver, no fading and no
-QRM, so it says nothing about weak or fading signals, and its 2.7 % is one extra character (a
-second nine, which the decoder prints as `'5'`) plus the pinned space its line break stands in for,
-not an error rate to quote for the mode. What it
-does pin is that the
-decoder handles the DWD shifting correctly on real audio, and that any modem change which moves this
-output has to be explained.
+QRM, so it says nothing about weak or fading signals, and its 2.7 % is not a quality reading of any
+kind: both characters it charges sit in the audio at full keying, within 7 dB of the take's own
+median, so the number counts what the station sent - a second nine, which the decoder prints as
+`'5'`, and a line break where the pinned text has a space - and not what the take lost. What it
+does pin is that the decoder handles the DWD shifting correctly on real audio, and that any modem
+change which moves this output has to be explained.
 
 ### The second on-air case, DDK9 on 10100.8 kHz, is not pinned
 
@@ -709,6 +715,10 @@ it, and their scatter. A character the take does not carry is printed `-` in the
 the edit script below the table separates **inserted**, **not in the take** and **substituted** -
 one character arriving beside the text and two characters being read wrong have the same edit
 distance but are not the same fault, and the old table could not tell them apart.
+
+`rtty-align` is that table for any take: the same rows and the same edit script, with the DDK2
+junction left out, so a new recording can be read character by character before anything about it is
+pinned. `align-check` is `rtty-align` plus the junction pinned by name.
 
 The DDK2 junction is then pinned by name rather than by count: one inserted `5`, the `9` read as
 sent, the pinned space replaced by the station's line break, and the keying under both windows. It
