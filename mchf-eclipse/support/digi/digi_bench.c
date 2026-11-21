@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "bench.h"
+#include "navtex.h"
 #include "rtty.h"
 #include "softdds.h"
 #include "audio_agc.h"
@@ -812,6 +813,166 @@ static int wefax_table(void)
     }
     return failures ? 1 : 0;
 }
+
+/* ------------------------------------------------------------------ *
+ *  NAVTEX / SITOR-B
+ * ------------------------------------------------------------------ */
+// The first mode here that is not the radio's: navtex.c is a reference modulator and demodulator that
+// exist only in this bench, the way wefax.c does. It is graded on the same terms as the rest - a
+// synthesised transmission, a channel, and the text that comes back - and its two error control
+// mechanisms are the ones that have to hold: the constant ratio alphabet, which makes a single wrong
+// bit visible, and the repeat copy five character slots later, which is what a burst has to be
+// survivable without. What it does not prove is that a real station was copied; no take of one has
+// been made here, and the receiver fits the bit clock over a +-2 % window, which is enough for the
+// rate a bench generates and not for an arbitrary recording.
+static float navtex_score(const char* expected, const char* got, int* skip)
+{
+    const size_t need = strlen(expected);
+    float best = 100.0f;
+    *skip = 0;
+    for (int s = 0; s < 40 && got[s]; s++)
+    {
+        const size_t wrong = Bench_Levenshtein(expected, got + s);
+        const float cer = need ? 100.0f * (float)wrong / (float)need : 0.0f;
+        if (cer < best) { best = cer; *skip = s; }
+    }
+    return best;
+}
+
+typedef struct
+{
+    const char* name;
+    float snr_db, qsb_rate, qsb_depth;
+    float tune_hz;          // both tones moved by this much: the receiver's bins do not follow them
+    float erase_ms;         // a burst starting this far into the take, this many ms long, erased
+    float erase_len_ms;     // (signal and noise together, which is what a fade looks like)
+    float max_cer;
+    float min_cer;          // a floor for the rows that have to keep failing
+} navtex_case_t;
+
+static int navtex_table(void)
+{
+    static const char* msg = "NAVTEX TEST MESSAGE DE UHSDR BENCH 12345 CQ CQ";
+    // A character is 70 ms and a block of five is 350 ms, so the message starts at 1400 ms (after the
+    // twenty phasing characters) and every block is sent twice with 350 ms between the copies. The
+    // burst row erases 280 ms of the first block's direct copy, which is the whole point of the mode:
+    // the repeat 350 ms later is outside it.
+    static const navtex_case_t cases[] =
+    {
+        { .name = "clean", .snr_db = 100.0f, .max_cer = 0.0f },
+        { .name = "snr 20", .snr_db = 20.0f, .max_cer = 5.0f },
+        { .name = "snr 10", .snr_db = 10.0f, .max_cer = 10.0f },
+        { .name = "snr 10 qsb", .snr_db = 10.0f, .qsb_rate = 0.5f, .qsb_depth = 6.0f,
+          .max_cer = 10.0f },
+        { .name = "burst on DX", .snr_db = 20.0f, .erase_ms = 1400.0f, .erase_len_ms = 280.0f,
+          .max_cer = 5.0f },
+        // the same burst over both copies: 700 ms covers a direct block and its repeat, so there is
+        // nothing left to combine. This is the row that says the mode has a limit rather than a
+        // habit of decoding, and it is pinned from below for the same reason the wrong speed rows
+        // in the RTTY matrix are.
+        { .name = "burst both", .snr_db = 20.0f, .erase_ms = 1400.0f, .erase_len_ms = 700.0f,
+          .max_cer = 100.0f, .min_cer = 10.0f },
+        // the pair survives a tuning error until the moved tones are closer to each other's bin than
+        // to their own, which for a 170 Hz shift is 85 Hz. +50 Hz is inside that and +100 is past it,
+        // where the space tone reads as mark and every word inverts.
+        { .name = "tune +50 Hz", .snr_db = 20.0f, .tune_hz = 50.0f, .max_cer = 5.0f },
+        { .name = "tune +100 Hz", .snr_db = 20.0f, .tune_hz = 100.0f, .max_cer = 100.0f,
+          .min_cer = 50.0f },
+    };
+    const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
+    int failures = 0;
+
+    printf("NAVTEX / SITOR-B through the reference modem: 100 Bd, 170 Hz shift, CCIR 476 4-of-7,\n"
+           "each character sent twice five slots (350 ms) apart. Text is %zu characters.\n\n",
+           strlen(msg));
+    printf("%-14s %6s %8s %6s %7s %7s %6s %6s  %s\n", "case", "CER %", "err/len", "lead",
+           "bit ms", "4of7", "fix", "lost", "decoded");
+    for (size_t i = 0; i < n_cases; i++)
+    {
+        const navtex_case_t* c = &cases[i];
+        const size_t cap = 400000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        char* got = malloc(8192);
+        if (!x || !got) { free(x); free(got); printf("out of memory\n"); return 1; }
+        // the tones are where the transmitter put them, or moved by a reference error that the
+        // receiver's 1615/1785 Hz bins do not follow
+        size_t n = Bench_NavtexGenerate(x, cap, msg, c->tune_hz);
+        if (c->snr_db < 90.0f)
+        {
+            Bench_RngSeed(0x4E4156u);
+            Bench_AddNoise(x, n, c->snr_db, 0.0f);
+        }
+        Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
+        if (c->erase_len_ms > 0.0f)
+        {
+            const size_t a = (size_t)(c->erase_ms * 12.0);
+            const size_t b = a + (size_t)(c->erase_len_ms * 12.0);
+            for (size_t k = a; k < b && k < n; k++) x[k] = 0.0f;
+        }
+
+        navtex_result_t res;
+        const int ok = Bench_NavtexDecode(x, n, got, 8192, &res);
+        int skip = 0;
+        const float cer = ok ? navtex_score(msg, got, &skip) : 100.0f;
+        const size_t need = strlen(msg);
+        const int wrong = (int)lround((double)cer * (double)need / 100.0);
+        char counted[32];
+        snprintf(counted, sizeof(counted), "%d/%zu", wrong, need);
+        printf("%-14s %6.1f %8s %6d %7.3f %7.3f %6u %6u  %.44s%s\n", c->name, (double)cer, counted,
+               skip, res.period_samples / 12.0, res.valid_fraction, res.repaired, res.both_bad,
+               got, strlen(got) > 44 ? " ..." : "");
+        if (!ok)
+        {
+            printf("FAIL  %-14s the receiver found no alignment to read\n", c->name);
+            failures++;
+        }
+        else if (cer > c->max_cer)
+        {
+            printf("FAIL  %-14s character error rate %.1f %% is above the %.1f %% this case allows\n",
+                   c->name, (double)cer, (double)c->max_cer);
+            failures++;
+        }
+        else if (cer < c->min_cer)
+        {
+            printf("FAIL  %-14s character error rate %.1f %% is below the %.1f %% this case has to "
+                   "stay above\n", c->name, (double)cer, (double)c->min_cer);
+            failures++;
+        }
+        free(x); free(got);
+    }
+    printf("\n'4of7' is the share of the seven bit words at the fitted alignment that are members of\n"
+           "the constant ratio alphabet: a wrong alignment lands on one by accident about a fifth of\n"
+           "the time, a right one always, so it is the synchroniser as well as the error detector.\n"
+           "'fix' counts the characters whose two copies differed, which is one copy dropped as broken\n"
+           "and the other taken, and 'lost' the ones where neither copy was a word and the pair was\n"
+           "too far from every valid word to correct.\n");
+    if (!failures)
+    {
+        printf("\nall %zu cases inside their character error rate limits\n", n_cases);
+    }
+    return failures ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Hellschreiber
+ * ------------------------------------------------------------------ */
+// The mode with no alphabet and no error control: the transmitter draws the text as a raster of
+// keyed pixels and the receiver prints the raster. There is nothing to score by character error rate,
+// so the score is the picture - the share of pixels the receiver got wrong, and how many of the
+// glyph cells came out exactly as drawn (a cell being exact is what "the character is legible" means
+// for a mode that has no characters). A receiver needs no glyph synchroniser: a human reads the
+// picture wherever it lands, so the score allows a vertical roll and a horizontal offset and reports
+// which it used.
+typedef struct
+{
+    const char* name;
+    float snr_db, qsb_rate, qsb_depth;
+    float tune_hz;          // the keying tone moved by this much: the receiver's envelope stays at 1 kHz
+    float clk_pct;          // the transmitter's pixel clock error against the receiver's, percent
+    float max_pixel;        // percent of pixels the case allows to be wrong
+    int   max_missing;      // glyph cells this case may fail to reproduce exactly
+    int   min_missing;      // and the cells that have to stay missing, for the rows that must fail
+} hell_case_t;
 
 /* ------------------------------------------------------------------ *
  *  decoding a recorded file: the input path any real feed will use
@@ -1813,6 +1974,34 @@ static int selftest(void)
               "clock: a two bit lattice is reported as the 20 ms bit, not its 40 ms spacing");
         free(c.x);
     }
+    {
+        // NAVTEX rests on two things and both are checked here: the constant ratio alphabet, which
+        // is what lets the receiver find the character boundary at all, and the repeat copy, which
+        // is the only correction a broadcast has. Erasing one copy of a block has to cost nothing.
+        static const char* msg = "NAVTEX TEST DE UHSDR";
+        const size_t cap = 200000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        char got[1024];
+        navtex_result_t res;
+        const size_t n = Bench_NavtexGenerate(x, cap, msg, 0.0f);
+        check(n > 0 && Bench_NavtexDecode(x, n, got, sizeof(got), &res),
+              "navtex: a clean SITOR-B transmission decodes");
+        printf("     (aligned on %.2f ms bits, %.3f of its words 4-of-7)\n",
+               res.period_samples / 12.0, res.valid_fraction);
+        check(strstr(got, "NAVTEX TEST DE UHSDR") != NULL,
+              "navtex: and the text comes back as sent");
+        // the message starts after twenty phasing characters, so the first block's direct copies are
+        // the 350 ms from 1400 ms; the repeats are 350 ms later and are untouched
+        for (size_t k = 1400 * 12; k < 1680 * 12 && k < n; k++) x[k] = 0.0f;
+        navtex_result_t burst;
+        const int ok = Bench_NavtexDecode(x, n, got, sizeof(got), &burst);
+        printf("     (with one block's direct copy erased: ok %d, %u repaired, %u lost, %.3f 4-of-7, "
+               "start %d) [%s]\n", ok, burst.repaired, burst.both_bad, burst.valid_fraction,
+               burst.phasing_run, got);
+        check(ok && strstr(got, "NAVTEX TEST DE UHSDR") != NULL && burst.repaired > 0,
+              "navtex: the repeat copy carries a block whose direct copy was erased");
+        free(x);
+    }
     printf("%s\n", failures ? "SELF CHECKS FAILED" : "all self checks passed");
     return failures ? 1 : 0;
 }
@@ -1823,8 +2012,11 @@ int main(int argc, char** argv)
     // every mode that feeds the modem goes through the receiver's AGC, so it is set up once, before
     // any case. rtty-wav is left out on purpose: it decodes a recording that already went through a
     // receiver's AGC, and running it through a second one would not be the radio's path.
-    if (strcmp(what, "rtty-wav") && strcmp(what, "rtty-align") && strcmp(what, "wefax")
-        && strcmp(what, "capture-check")) radio_agc_setup();
+    if (strcmp(what, "rtty-wav") && strcmp(what, "rtty-align") && strcmp(what, "align-check")
+        && strcmp(what, "rtty-trace") && strcmp(what, "tx-check") && strcmp(what, "wefax")
+        && strcmp(what, "navtex") && strcmp(what, "hell") && strcmp(what, "mfsk16")
+        && strcmp(what, "olivia") && strcmp(what, "capture-check"))
+        radio_agc_setup();
     if (!strcmp(what, "test")) return selftest();
     if (!strcmp(what, "rtty")) { return rtty_table(RTTY_TABLE_MSG, false); }
     if (!strcmp(what, "rtty-long"))
@@ -1844,6 +2036,7 @@ int main(int argc, char** argv)
     if (!strcmp(what, "rtty-shift")) { return rtty_shift(); }
     if (!strcmp(what, "rtty-tune")) { return rtty_tune(); }
     if (!strcmp(what, "wefax")) return wefax_table();
+    if (!strcmp(what, "navtex")) return navtex_table();
     // the gate a take has to clear before it is worth decoding, let alone pinning: it measures the
     // file and never touches the modem, so it cannot be fooled by the modem agreeing with itself
     if (!strcmp(what, "capture-check") && argc > 2)

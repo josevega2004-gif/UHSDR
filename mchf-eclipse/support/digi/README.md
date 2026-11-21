@@ -7,6 +7,7 @@ make -C support/digi test     # self checks, non zero exit on regression   (also
 make -C support/digi rtty     # RTTY character error rate, modem looped back on itself
 make -C support/digi rtty-long  # the same matrix, eight copies of the message (one character 0.26 %)
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
+make -C support/digi navtex   # NAVTEX / SITOR-B through a reference modem: alphabet and repeat copy
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi capture-check  # is a recording fit to be pinned: pair, bit clock, continuity
 make -C support/digi fixture-check  # do fixtures/MANIFEST.md's numbers still describe the wav
@@ -602,6 +603,67 @@ The comparison this case lacks is a propagation problem, not a bench one: retry 
 is open to Europe, and prove any new receiver by copying DDK2 through it to a few percent before
 trusting a 10100.8 kHz take. A receiver's S-meter is not evidence; the tone pair plus a clean decode
 is.
+
+## NAVTEX / SITOR-B, `make -C support/digi navtex`
+
+The first mode in this bench that is not the radio's. `navtex.c` is a reference modulator and
+demodulator that exist only here, the way `wefax.c` does, and they are graded the same way: a
+synthesised transmission, a channel, and the text that comes back. What that establishes is the mode
+and its failure modes. What it does not establish is that a real station was copied - no NAVTEX take
+has been made here, and the receiver fits its bit clock over a +-2 % window (118..122 samples a bit),
+which is enough for the rate this bench generates and not for an arbitrary recording.
+
+The mode is 100 Bd FSK with a 170 Hz shift, carrying the CCIR 476 seven bit alphabet. Two properties
+do all the work:
+
+* **every valid character has exactly four marks and three spaces.** That is detection for free - a
+  single wrong bit leaves a word that is not in the alphabet - and it is also the synchroniser, since
+  seven bits taken across a character boundary land on a constant ratio word by accident about a
+  fifth of the time and seven bits taken inside one always do. The receiver searches the bit phase,
+  the bit length and the group boundary together and keeps the alignment that maximises the share of
+  words in the alphabet: 1.000 on a clean take, 0.967 with one block's direct copy erased, 0.402 once
+  the tuning error inverts the polarity.
+* **there is no return path, so the correction is time diversity.** Each character is sent twice, the
+  direct (DX) copy and a repeat (RX) copy five character slots - 350 ms - later, in blocks of five. A
+  copy that is not a constant ratio word has already been detected as broken and is dropped, and the
+  other copy is taken; only when neither copy is a word does the receiver correct against the pair.
+  That order matters and the self check is what found it: a copy erased to silence reads as `0x00`,
+  which is four bits from every word, so scoring the pair together rejected characters whose repeat
+  was sitting there intact. A character with no surviving copy is lost and counted.
+
+The bit order is the one thing a loopback cannot catch on its own: CCIR 476 is written most
+significant bit first and SITOR sends each character least significant bit first, but a reversed
+4-of-7 word is still 4-of-7. The receiver therefore decides the order from the phasing signal it is
+about to look for: that is SIA `0x0F` / SIB `0x33` in the table's order and `0x78` / `0x66` in the
+reverse one, so an alternation of CR and RPT is the tell. The mechanism is measured here against a
+take generated in the table's order; it has not been shown on a reversed one, because no such take
+exists yet.
+
+Measured on a 46 character message at 12 kHz; each row's own SNR and channel are in its name:
+
+| case | CER % | err/len | repaired | lost | words 4-of-7 |
+|---|---|---|---|---|---|
+| clean | 0.0 | 0/46 | 0 | 0 | 1.000 |
+| 20 dB | 0.0 | 0/46 | 0 | 0 | 1.000 |
+| 10 dB | 0.0 | 0/46 | 0 | 0 | 1.000 |
+| 10 dB + 0.5 Hz / 6 dB QSB | 0.0 | 0/46 | 0 | 0 | 1.000 |
+| burst over one block's direct copy (280 ms) | 0.0 | 0/46 | **4** | 0 | 0.967 |
+| burst over both copies (700 ms) | **10.9** | 5/46 | 0 | 5 | 0.918 |
+| tuning error +50 Hz | 0.0 | 0/46 | 0 | 0 | 1.000 |
+| tuning error +100 Hz | **87.0** | 40/46 | 45 | 3 | **0.402** |
+
+The first four rows are what the alphabet and the correction buy. The burst row is the mode working:
+four characters of a block lose their direct copy and all four come back from the repeat, with the
+character error rate still at zero. Erasing both copies instead loses exactly that block - five
+characters of forty six - and is pinned from below, so a receiver that started inventing text where
+there was none would fail here rather than read as an improvement.
+
+The tuning rows are the two-bin geometry, not a filter skirt: the demodulator decides each bit by
+comparing the energy at 1615 and 1785 Hz, so a tone that has moved stays on its own side of the
+midpoint until the error passes half the shift. +50 Hz is inside that and decodes clean; +100 Hz puts
+the space tone nearer the mark bin, every word inverts, and the constant ratio share falls to 0.402.
+There is no AFC here either, so this is the same cliff the RTTY section describes, at the one place
+it can be computed: half the shift, 85 Hz.
 
 ## Receiving a DWD teletype station on the radio
 

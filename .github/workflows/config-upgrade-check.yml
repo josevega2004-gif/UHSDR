@@ -115,3 +115,13 @@ jobs:
       - name: Decode the recorded DWD on air fixture
         working-directory: mchf-eclipse
         run: make -C support/digi rtty-ddk2
+
+      # NAVTEX is the first mode here that is not the radio's: a reference SITOR-B modem, graded on
+      # the two mechanisms the mode is built from. The table has rows that have to fail as well as
+      # rows that have to pass - a burst over both copies of a block loses it, and a tuning error past
+      # half the shift inverts every word - so a receiver that stopped detecting and started inventing
+      # text would not read as an improvement.
+      - name: Run the NAVTEX / SITOR-B reference modem
+        working-directory: mchf-eclipse
+        run: make -C support/digi navtex
+
