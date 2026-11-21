@@ -84,6 +84,11 @@ mfsk16: digi_bench
 olivia: digi_bench
 	@./digi_bench olivia
 
+# the MFSK16 and Olivia floors over a 2.5 kHz channel, measured with noise shaped to that band: the
+# 6.8 dB between a 12 kHz and a 2.5 kHz SNR is arithmetic, and this is the audio that checks it
+floors-2k5: digi_bench
+	@./digi_bench floors-2k5
+
 # the recording paths for the four non RTTY modes: the modems' own takes with a long lead, written
 # through the WAV reader a real capture goes through
 record-check: digi_bench

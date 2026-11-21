@@ -11,6 +11,7 @@ make -C support/digi navtex   # NAVTEX / SITOR-B through a reference modem: alph
 make -C support/digi hell     # Hellschreiber: on/off keyed raster, scored as a picture
 make -C support/digi mfsk16   # MFSK16: 16 tones, Varicode, rate 1/2 code, interleaver over 8 symbols
 make -C support/digi olivia   # Olivia: 32 tones, 64 symbol Walsh blocks, five characters a block
+make -C support/digi floors-2k5 # the MFSK16 and Olivia floors over a shaped 2.5 kHz channel
 make -C support/digi record-check # the four non RTTY modes reading a WAV with a long lead
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi fixture-align  # per character: what the take sent, what the modem read, and the audio
@@ -893,28 +894,34 @@ only means something if that is said plainly:
   cannot say where the last code ended - `5` followed by padding reads as `<`. A character that is
   always sent, plus the one start bit that lets it be framed, does say so.
 
-Measured on a 26 character message at 12 kHz, SNR quoted over the whole 12 kHz band:
+Measured on a 26 character message at 12 kHz, SNR quoted over the whole 12 kHz band. Every noise
+row is the mean of five seeds, with the seed range in parentheses:
 
 | case | CER % | err/len | symbols heard |
 |---|---|---|---|
 | clean / 20 dB / 10 dB / 10 dB + QSB / 3 dB / -6 dB | 0.0 | 0/26 | 100.0 |
-| -12 dB | 0.0 | 0/26 | 95.2 |
-| -16 dB | 0.0 | 0/26 | 30.1 |
-| -18 dB | 0.0 | 0/26 | 6.8 |
-| **-20 dB** | **61.5** | 16/26 | 1.9 |
-| **-22 dB** | **100.0** | 26/26 | 0.0 |
-| burst over 2 symbols (128 ms) | 0.0 | 0/26 | 98.1 |
-| burst over 8 symbols (512 ms) | **42.3** | 11/26 | 92.2 |
-| tuning error +8 Hz (half a tone spacing) | **92.3** | 24/26 | 26.2 |
-| tuning error +16 Hz (a whole spacing) | **119.2** | 31/26 | 92.3 |
-| noise only, nothing transmitted | **100.0** | 26/26 | 0.0 |
+| -12 dB | 0.0 (0.0-0.0) | 0/26 | 93.0 |
+| -16 dB | 0.0 (0.0-0.0) | 0/26 | 23.9 |
+| -18 dB | 36.9 (0.0-103.8) | 9.6/26 | 6.8 |
+| **-20 dB** | **86.9** (61.5-100.0) | 22.6/26 | 1.4 |
+| **-22 dB** | **98.5** (92.3-100.0) | 25.6/26 | 0.2 |
+| burst over 2 symbols (128 ms) | 0.0 (0.0-0.0) | 0/26 | 98.1 |
+| burst over 8 symbols (512 ms) | **26.9** (11.5-53.8) | 7.0/26 | 92.3 |
+| tuning error +8 Hz (half a tone spacing) | **93.1** (88.5-100.0) | 24.2/26 | 17.9 |
+| tuning error +16 Hz (a whole spacing) | **111.5** (100.0-119.2) | 29.0/26 | 93.4 |
+| noise only, nothing transmitted | **100.0** (100.0-100.0) | 26/26 | 0.0 |
 
 The matched filter is why the ladder goes this deep. A symbol is 64 ms of one tone, so the correlation
 is only about 15.6 Hz wide against noise spread over 12 kHz: roughly 29 dB of processing gain, before
-the rate 1/2 code adds its own. **The floor is -20 dB over the 12 kHz band**, which is **-13.2 dB over
-a 2.5 kHz channel**: at -18 dB every character still comes back even though only 6.8 % of symbols
-have a winning tone that holds half the energy, and at -20 dB 61.5 % of the message is wrong. At
--22 dB (-15.2 dB in 2.5 kHz) there is no message left, only characters out of the noise.
+the rate 1/2 code adds its own. **The floor is -18 dB over the 12 kHz band**: 36.9 % mean over five
+seeds, range 0.0-103.8, so the 0.0 % this row used to show was one lucky draw. The 2.5 kHz
+equivalent is not 12 kHz + 6.8 dB: with noise shaped to 500-3000 Hz (`make -C support/digi
+floors-2k5`), the same take is exact through -12.0 dB, first loses characters at -12.5 dB (7.7 %
+mean over five seeds, 0.0-38.5), and only reaches the 12 kHz -18 dB row's severity near -13.5 dB (33.8 %, range
+0.0-100.0). At -13.2 dB, where the arithmetic maps the 12 kHz -20 dB row, the shaped channel is
+12.3 % (0.0-42.3), not 86.9 %. The arithmetic gives the onset, not the curve - the 12 kHz figure
+includes out-of-band noise the receiver does not fully reject, so confining the noise to the channel
+is worth about 2 dB at the same severity.
 
 Every noise row in this file was re-measured after a bench bug was found and fixed: `rng_next()` never
 wrote its new state back, so each take received one Gaussian sample repeated - a DC offset, which the
@@ -923,18 +930,18 @@ numbers moved when it was repaired too.
 
 The burst rows are the interleaver: two symbols erased is eight bits spread over
 eight symbols, which the rate 1/2 code repairs completely, and eight symbols erased is thirty two bits
-over eight symbols, four in each of them, which it does not. Eleven characters are lost (42.3 %):
-with Varicode a character is about ten bits rather than six, so the same thirty two damaged bits reach
-about half the message instead of an eighth of it. The row is pinned from below so that a receiver
-which started hiding the damage would fail here.
+over eight symbols, four in each of them, which it does not. The mean is 26.9 % (7.0 characters of
+26, range 11.5-53.8 over five seeds): with Varicode a character is about ten bits rather than six,
+so the same thirty two damaged bits reach about a third of the message instead of an eighth of it.
+The row is pinned from below so that a receiver which started hiding the damage would fail here.
 
 The tuning rows are the tone spacing. The tones are exactly one cycle apart per symbol, so a 16 Hz
-error puts the signal on the neighbouring tone: every symbol is heard strongly (92.3 %) and 119.2 % of
-the message is wrong - more than 100 % because the receiver also prints extra characters out of the
-noise. Half a spacing is worse in a different way - the energy splits between two tones, the winning
-tone no longer holds half of it (26.2 % heard), and the decisions scatter. There is no tuning search in
-the receiver; this is the same cliff the RTTY and NAVTEX sections measure, at the width this mode's
-tones give it.
+error puts the signal on the neighbouring tone: every symbol is heard strongly (93.4 % mean) and
+111.5 % of the message is wrong (range 100.0-119.2) - more than 100 % because the receiver also
+prints extra characters out of the noise. Half a spacing is worse in a different way - the energy
+splits between two tones, the winning tone no longer holds half of it (17.9 % heard), and the
+decisions scatter (93.1 %, range 88.5-100.0). There is no tuning search in the receiver; this is the
+same cliff the RTTY and NAVTEX sections measure, at the width this mode's tones give it.
 
 The noise-only row is the one that must never read as text. With nothing transmitted the receiver
 still frames characters out of the noise, and the row pins that text at a character error rate of
@@ -966,37 +973,41 @@ Which parts are the bench's:
 * **the mode's**: the tone grid, the rate, one tone a symbol, the Walsh/Hadamard codewords, the
   scrambler, the diagonal spread, the Gray code, and five characters in a block.
 
-Measured on the same 26 character message, same channel, same scoring as MFSK16:
+Measured on the same 26 character message, same channel, same scoring as MFSK16. Every noise row
+is the mean of five seeds, with the seed range in parentheses:
 
 | case | CER % | err/len | symbols heard |
 |---|---|---|---|
 | clean / 20 dB / 10 dB / 10 dB + QSB / 0 dB | 0.0 | 0/26 | 100.0 |
-| -6 dB | 0.0 | 0/26 | 93.0 |
-| -12 dB | 0.0 | 0/26 | 1.6 |
-| -14 dB | 0.0 | 0/26 | 0.5 |
-| -16 dB | 0.0 | 0/26 | 0.0 |
-| **-18 dB** | **34.6** | 9/26 | 0.0 |
-| **-20 dB** | **80.8** | 21/26 | 0.0 |
-| burst over 2 symbols (64 ms) | 0.0 | 0/26 | 99.7 |
-| burst over 8 symbols (256 ms) | 0.0 | 0/26 | 98.2 |
-| tuning error +15 Hz (half a tone spacing) | 0.0 | 0/26 | 6.5 |
-| noise only, nothing transmitted | **100.0** | 26/26 | 0.0 |
+| -6 dB | 0.0 | 0/26 | 94.9 |
+| -12 dB | 0.0 (0.0-0.0) | 0/26 | 1.1 |
+| -14 dB | 0.0 (0.0-0.0) | 0/26 | 0.2 |
+| -16 dB | 0.0 (0.0-0.0) | 0/26 | 0.0 |
+| **-18 dB** | **20.8** (11.5-34.6) | 5.4/26 | 0.0 |
+| **-20 dB** | **73.1** (50.0-96.2) | 19.0/26 | 0.0 |
+| burst over 2 symbols (64 ms) | 0.0 (0.0-0.0) | 0/26 | 99.6 |
+| burst over 8 symbols (256 ms) | 0.0 (0.0-0.0) | 0/26 | 98.0 |
+| tuning error +15 Hz (half a tone spacing) | 0.0 (0.0-0.0) | 0/26 | 6.8 |
+| noise only, nothing transmitted | **100.0** (100.0-100.0) | 26/26 | 0.0 |
 
-**The floor is -18 dB over the 12 kHz band**, which is **-11.2 dB over a 2.5 kHz channel**: the
-message comes back without a single error at -16 dB (-9.2 dB in 2.5 kHz), 34.6 % of the characters go
-at -18 dB, and 80.8 % at -20 dB. The Walsh layer is why it goes that deep. A symbol error is one bit
-in each of five codewords of sixty-four bits, and the rows of the matrix are 32 apart, so the
+**The floor is -18 dB over the 12 kHz band**: 20.8 % mean over five seeds, range 11.5-34.6. The
+arithmetic 2.5 kHz equivalent, -11.2 dB, is about 1.8 dB too high: with noise shaped to 500-3000 Hz
+(`make -C support/digi floors-2k5`) the take is exact through -12.5 dB, then first fails at -13.0 dB
+(26.9 % mean over five seeds, 0.0-88.5) and is still only 29.2 % at -13.2 dB (0.0-92.3), where the arithmetic maps
+the 12 kHz -20 dB row. At -11.2 dB, where it maps the 12 kHz -18 dB row, the shaped channel has no
+errors rather than 20.8 %. The Walsh layer is why it goes that deep. A symbol error is one bit in each of five codewords of sixty-four bits, and the rows of the
+matrix are 32 apart, so the
 transform reads the right one through a great deal of damage, and the soft decisions keep working long
 after no symbol has a winning tone: at -16 dB the heard column is 0.0 % and the text is still exact.
 
-Above the floor the soft bits carry it. At -12 dB only 1.6 % of symbols look heard and not one
+Above the floor the soft bits carry it. At -12 dB only 1.1 % of symbols look heard and not one
 character is wrong. That is the opposite of the old pair based stand-in, where 68.8 % of symbols
 looked heard and sixteen characters of twenty-six came back wrong.
 
 The burst rows still cost nothing, which is the measurement rather than a missing case: two erased
 symbols is ten bit errors over ten codewords and eight erased symbols is forty, both well inside what
 a 64 bit code with distance 32 repairs. The tuning row is the more interesting one: at half a tone
-spacing only 6.5 % of symbols have a winning tone that holds half the energy, the energy is split
+spacing only 6.8 % of symbols have a winning tone that holds half the energy, the energy is split
 between two neighbours, and every character still comes back.
 
 The noise-only row is the one that must never read as text: 100 % of the message wrong, no symbol

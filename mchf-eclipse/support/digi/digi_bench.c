@@ -1170,6 +1170,9 @@ static int exact_char_errors(const char* want, const char* got, int ok)
 /* ------------------------------------------------------------------ *
  *  MFSK16
  * ------------------------------------------------------------------ */
+// Five draws for every noise row. One 26 character take is 3.8 % per character, so a single seed
+// cannot say where a floor is; the mean is what the limits pin, and the range is printed beside it.
+#define TABLE_SEEDS 5
 // Sixteen tones at 15.625 baud is four bits a symbol and 64 ms of signal per symbol, which is a lot
 // of energy per decision; what this table is really measuring is the coding. A symbol the receiver
 // loses costs four bits, and the interleaver is what turns that into one bit in eight symbols, which
@@ -1200,9 +1203,10 @@ static int mfsk16_table(void)
         { .name = "snr -6", .snr_db = -6.0f, .max_cer = 0.0f },
         { .name = "snr -12", .snr_db = -12.0f, .max_cer = 0.0f },
         { .name = "snr -16", .snr_db = -16.0f, .max_cer = 0.0f },
-        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 0.0f },
-        // the floor: the first row where characters start to go, and the next one where they all do
-        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 70.0f, .min_cer = 45.0f },
+        // the floor, measured over five seeds: 36.9 % mean (0.0-103.8), so the old 0.0 % was one
+        // lucky draw. It has to keep costing text (min 10) but not be pinned to a single take.
+        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 70.0f, .min_cer = 10.0f },
+        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 100.0f, .min_cer = 60.0f },
         { .name = "snr -22", .snr_db = -22.0f, .max_cer = 110.0f, .min_cer = 85.0f },
         // a burst that takes two whole symbols: eight bits gone, spread over eight symbols by the
         // interleaver, which is what the code is there to repair
@@ -1225,22 +1229,22 @@ static int mfsk16_table(void)
     printf("The alphabet is the mode's own IZ8BLY Varicode, framed by its 00 separators, so these\n"
            "rows measure the real alphabet and the coding; the eight symbol interleaver is the\n"
            "bench's, and the README says so.\n\n");
-    printf("%-16s %6s %8s %8s %8s %6s %s\n", "case", "CER %", "err/len", "symbols", "heard",
-           "bits", "decoded text");
+    printf("%-16s %6s %11s %8s %8s %8s %6s %s\n", "case", "CER %", "min-max", "err/len",
+           "symbols", "heard", "bits", "decoded text");
     for (size_t i = 0; i < n_cases; i++)
     {
         const mfsk16_case_t* c = &cases[i];
         const size_t cap = 400000;
         float32_t* x = malloc(cap * sizeof(float32_t));
+        float32_t* work = malloc(cap * sizeof(float32_t));
         char got[512];
-        mfsk16_result_t res;
-        if (!x) { printf("out of memory\n"); return 1; }
+        if (!x || !work) { free(x); free(work); printf("out of memory\n"); return 1; }
         size_t n = Bench_Mfsk16Generate(x, cap, msg, c->tune_hz);
         if (c->no_signal)
         {
             memset(x, 0, n * sizeof(float32_t));      // the same length of silence, then noise
         }
-        else if (!n) { free(x); printf("FAIL  %-16s nothing generated\n", c->name); failures++; continue; }
+        else if (!n) { free(x); free(work); printf("FAIL  %-16s nothing generated\n", c->name); failures++; continue; }
         if (c->burst_symbols)
         {
             // the middle of the take, which is inside the text for this message
@@ -1248,38 +1252,66 @@ static int mfsk16_table(void)
             const size_t wide = (size_t)c->burst_symbols * 768;
             for (size_t k = mid; k < mid + wide && k < n; k++) x[k] = 0.0f;
         }
-        if (c->snr_db < 90.0f)
-        {
-            Bench_RngSeed(0x4D46534Bu);
-            Bench_AddNoise(x, n, c->snr_db, 0.0f);
-        }
-        Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
 
-        const int ok = Bench_Mfsk16Decode(x, n, got, sizeof(got), &res);
-        const int err = exact_char_errors(msg, got, ok);
-        const double cer = 100.0 * (double)err / (double)len;
-        printf("%-16s %6.1f %4d/%-3zu %8u %5.2f%% %6u %s\n", c->name, cer, err, len,
-               res.symbols, res.symbols ? 100.0 * (double)res.tones_ok / (double)res.symbols : 0.0,
-               res.viterbi_bits, ok ? got : "(no decode)");
-        if (!ok)
+        // every noise row is a distribution of takes, not one draw: the same signal, five seeds
+        const int nseeds = c->snr_db < 90.0f ? TABLE_SEEDS : 1;
+        double sum = 0.0, worst = 0.0, best = 100.0;
+        int ok_all = 1;
+        unsigned sym_total = 0, heard = 0, vbits = 0;
+        char text[512] = "";
+        for (int k = 0; k < nseeds; k++)
         {
-            printf("FAIL  %-16s the receiver did not get through the stream\n", c->name);
+            memcpy(work, x, n * sizeof(float32_t));
+            if (c->snr_db < 90.0f)
+            {
+                Bench_RngSeed(0x4D46534Bu + (uint32_t) k);
+                Bench_AddNoise(work, n, c->snr_db, 0.0f);
+            }
+            Bench_AddQsb(work, n, c->qsb_rate, c->qsb_depth);
+
+            mfsk16_result_t res;
+            const int ok = Bench_Mfsk16Decode(work, n, got, sizeof(got), &res);
+            const int err = exact_char_errors(msg, got, ok);
+            const double cer = 100.0 * (double)err / (double)len;
+            if (k == 0)
+            {
+                snprintf(text, sizeof(text), "%s", ok ? got : "(no decode)");
+                vbits = res.viterbi_bits;
+            }
+            heard += res.tones_ok;
+            sym_total += res.symbols;
+            sum += cer;
+            if (cer < best) best = cer;
+            if (cer > worst) worst = cer;
+            if (!ok) ok_all = 0;
+        }
+        const double mean = sum / (double)nseeds;
+        const double mean_err = mean * (double)len / 100.0;
+        printf("%-16s %6.1f %5.1f-%5.1f %4.1f/%-3zu %8.0f %5.2f%% %6u %s\n", c->name, mean, best,
+               worst, mean_err, len, (double)sym_total / (double)nseeds,
+               sym_total ? 100.0 * (double)heard / (double)sym_total : 0.0, vbits, text);
+        if (!ok_all)
+        {
+            printf("FAIL  %-16s the receiver did not get through the stream on one of %d seeds\n",
+                   c->name, nseeds);
             failures++;
         }
-        else if (cer > (double)c->max_cer + 1e-9)
+        else if (mean > (double)c->max_cer + 1e-9)
         {
-            printf("FAIL  %-16s %.1f %% of characters wrong, this case allows %.1f %%\n", c->name,
-                   cer, (double)c->max_cer);
+            printf("FAIL  %-16s mean %.1f %% of characters wrong over %d seeds (range %.1f-%.1f), "
+                   "this case allows %.1f %%\n", c->name, mean, nseeds, best, worst,
+                   (double)c->max_cer);
             failures++;
         }
-        else if (cer < (double)c->min_cer - 1e-9)
+        else if (mean < (double)c->min_cer - 1e-9)
         {
-            printf("FAIL  %-16s %.1f %% of characters wrong, and this case has to stay above "
-                   "%.1f %%:\n      a channel that stopped costing characters is a different "
-                   "receiver\n", c->name, cer, (double)c->min_cer);
+            printf("FAIL  %-16s mean %.1f %% wrong over %d seeds (range %.1f-%.1f), and this case "
+                   "has to stay above %.1f %%:\n      a channel that stopped costing characters is "
+                   "a different receiver\n", c->name, mean, nseeds, best, worst,
+                   (double)c->min_cer);
             failures++;
         }
-        free(x);
+        free(x); free(work);
     }
     printf("\n'heard' is the share of symbols whose winning tone held more than half the energy: a\n"
            "symbol that is heard is not necessarily right, but a symbol that is not heard was lost to\n"
@@ -1328,7 +1360,8 @@ static int olivia_table(void)
         { .name = "snr -14", .snr_db = -14.0f, .max_cer = 0.0f },
         { .name = "snr -16", .snr_db = -16.0f, .max_cer = 0.0f },
         // the floor: the first row where characters start to go, and the next one well past it
-        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 45.0f, .min_cer = 20.0f },
+        // measured over five seeds: 20.8 % mean (11.5-34.6), and 73.1 % (50.0-96.2) below it
+        { .name = "snr -18", .snr_db = -18.0f, .max_cer = 45.0f, .min_cer = 10.0f },
         { .name = "snr -20", .snr_db = -20.0f, .max_cer = 90.0f, .min_cer = 60.0f },
         { .name = "burst 2 symbols", .snr_db = 20.0f, .burst_symbols = 2, .max_cer = 0.0f },
         { .name = "burst 8 symbols", .snr_db = 20.0f, .burst_symbols = 8, .max_cer = 0.0f },
@@ -1343,59 +1376,85 @@ static int olivia_table(void)
            len);
     printf("The Walsh rows, the scrambler and the diagonal spread are the mode's own; the length in\n"
            "the first two characters is the bench's, because Olivia has no framing.\n\n");
-    printf("%-16s %6s %8s %8s %8s %s\n", "case", "CER %", "err/len", "symbols", "heard",
-           "decoded text");
+    printf("%-16s %6s %11s %8s %8s %8s %s\n", "case", "CER %", "min-max", "err/len",
+           "symbols", "heard", "decoded text");
     for (size_t i = 0; i < n_cases; i++)
     {
         const olivia_case_t* c = &cases[i];
         const size_t cap = 200000;
         float32_t* x = malloc(cap * sizeof(float32_t));
+        float32_t* work = malloc(cap * sizeof(float32_t));
         char got[512];
-        olivia_result_t res;
-        if (!x) { printf("out of memory\n"); return 1; }
+        if (!x || !work) { free(x); free(work); printf("out of memory\n"); return 1; }
         const size_t n = Bench_OliviaGenerate(x, cap, msg, c->tune_hz);
         if (c->no_signal)
         {
             memset(x, 0, n * sizeof(float32_t));
         }
-        else if (!n) { free(x); printf("FAIL  %-16s nothing generated\n", c->name); failures++; continue; }
+        else if (!n) { free(x); free(work); printf("FAIL  %-16s nothing generated\n", c->name); failures++; continue; }
         if (c->burst_symbols)
         {
             const size_t mid = (n / 2) & ~(size_t)63;
             const size_t wide = (size_t)c->burst_symbols * 384;
             for (size_t k = mid; k < mid + wide && k < n; k++) x[k] = 0.0f;
         }
-        if (c->snr_db < 90.0f)
-        {
-            Bench_RngSeed(0x4F4C4956u);
-            Bench_AddNoise(x, n, c->snr_db, 0.0f);
-        }
-        Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
 
-        const int ok = Bench_OliviaDecode(x, n, got, sizeof(got), &res);
-        const int err = exact_char_errors(msg, got, ok);
-        const double cer = 100.0 * (double)err / (double)len;
-        printf("%-16s %6.1f %4d/%-3zu %8u %5.2f%% %s\n", c->name, cer, err, len, res.symbols,
-               res.symbols ? 100.0 * (double)res.tones_ok / (double)res.symbols : 0.0,
-               ok ? got : "(no decode)");
-        if (!ok)
+        const int nseeds = c->snr_db < 90.0f ? TABLE_SEEDS : 1;
+        double sum = 0.0, worst = 0.0, best = 100.0;
+        int ok_all = 1;
+        unsigned sym_total = 0, heard = 0;
+        char text[512] = "";
+        for (int k = 0; k < nseeds; k++)
         {
-            printf("FAIL  %-16s the receiver did not get through the stream\n", c->name);
+            memcpy(work, x, n * sizeof(float32_t));
+            if (c->snr_db < 90.0f)
+            {
+                Bench_RngSeed(0x4F4C4956u + (uint32_t) k);
+                Bench_AddNoise(work, n, c->snr_db, 0.0f);
+            }
+            Bench_AddQsb(work, n, c->qsb_rate, c->qsb_depth);
+
+            olivia_result_t res;
+            const int ok = Bench_OliviaDecode(work, n, got, sizeof(got), &res);
+            const int err = exact_char_errors(msg, got, ok);
+            const double cer = 100.0 * (double)err / (double)len;
+            if (k == 0)
+            {
+                snprintf(text, sizeof(text), "%s", ok ? got : "(no decode)");
+            }
+            heard += res.tones_ok;
+            sym_total += res.symbols;
+            sum += cer;
+            if (cer < best) best = cer;
+            if (cer > worst) worst = cer;
+            if (!ok) ok_all = 0;
+        }
+        const double mean = sum / (double)nseeds;
+        const double mean_err = mean * (double)len / 100.0;
+        printf("%-16s %6.1f %5.1f-%5.1f %4.1f/%-3zu %8.0f %5.2f%% %s\n", c->name, mean, best, worst,
+               mean_err, len, (double)sym_total / (double)nseeds,
+               sym_total ? 100.0 * (double)heard / (double)sym_total : 0.0, text);
+        if (!ok_all)
+        {
+            printf("FAIL  %-16s the receiver did not get through the stream on one of %d seeds\n",
+                   c->name, nseeds);
             failures++;
         }
-        else if (cer > (double)c->max_cer + 1e-9)
+        else if (mean > (double)c->max_cer + 1e-9)
         {
-            printf("FAIL  %-16s %.1f %% of characters wrong, this case allows %.1f %%\n", c->name,
-                   cer, (double)c->max_cer);
+            printf("FAIL  %-16s mean %.1f %% of characters wrong over %d seeds (range %.1f-%.1f), "
+                   "this case allows %.1f %%\n", c->name, mean, nseeds, best, worst,
+                   (double)c->max_cer);
             failures++;
         }
-        else if (cer < (double)c->min_cer - 1e-9)
+        else if (mean < (double)c->min_cer - 1e-9)
         {
-            printf("FAIL  %-16s %.1f %% of characters wrong, and this case has to stay above "
-                   "%.1f %%\n", c->name, cer, (double)c->min_cer);
+            printf("FAIL  %-16s mean %.1f %% wrong over %d seeds (range %.1f-%.1f), and this case "
+                   "has to stay above %.1f %%\n", c->name, mean, nseeds, best, worst,
+                   (double)c->min_cer);
             failures++;
         }
-        free(x);
+        free(x); free(work);
     }
     printf("\n'heard' is the share of symbols whose winning tone held more than half the energy\n"
            "over the thirty-two: a symbol that is not heard was lost to the channel. The noise only\n"
@@ -1406,6 +1465,88 @@ static int olivia_table(void)
         printf("\nall %zu cases inside their character error limits\n", n_cases);
     }
     return failures ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ *  the 2.5 kHz channel, measured rather than converted
+ * ------------------------------------------------------------------ */
+// The MFSK16 and Olivia sections quote a 2.5 kHz floor as the 12 kHz floor plus
+// 10*log10(12000/2500) = 6.8 dB. That is arithmetic: it assumes the receiver rejects every hertz
+// outside the channel, and no row measures it. This reruns the same takes, seeds and scoring with
+// noise shaped to a 2.5 kHz band (500..3000 Hz, where both tone grids sit) at the channel SNR the
+// arithmetic claims, so the README's number comes from audio rather than from a ratio.
+static void floors_2k5_row(const char* mode, float snr_db)
+{
+    static const char* mmsg = "MFSK16 TEST DE UHSDR 12345";
+    static const char* omsg = "OLIVIA TEST DE UHSDR 12345";
+    const int mfsk = mode[0] == 'M';
+    const char* msg = mfsk ? mmsg : omsg;
+    const size_t len = strlen(msg);
+    const size_t cap = 400000;
+    float32_t* x = malloc(cap * sizeof(float32_t));
+    float32_t* work = malloc(cap * sizeof(float32_t));
+    char got[512];
+    if (!x || !work) { free(x); free(work); printf("%-8s out of memory\n", mode); return; }
+    const size_t n = mfsk ? Bench_Mfsk16Generate(x, cap, msg, 0.0f)
+                          : Bench_OliviaGenerate(x, cap, msg, 0.0f);
+    double sum = 0.0, best = 100.0, worst = 0.0;
+    char text[512] = "";
+    for (int k = 0; k < TABLE_SEEDS; k++)
+    {
+        memcpy(work, x, n * sizeof(float32_t));
+        Bench_RngSeed((mfsk ? 0x4D46534Bu : 0x4F4C4956u) + (uint32_t) k);
+        Bench_AddNoiseBand(work, n, snr_db, 0.0f, 500.0f, 3000.0f);
+        int ok, err;
+        if (mfsk)
+        {
+            mfsk16_result_t r;
+            ok = Bench_Mfsk16Decode(work, n, got, sizeof(got), &r);
+        }
+        else
+        {
+            olivia_result_t r;
+            ok = Bench_OliviaDecode(work, n, got, sizeof(got), &r);
+        }
+        err = exact_char_errors(msg, got, ok);
+        const double cer = 100.0 * (double) err / (double) len;
+        if (k == 0) snprintf(text, sizeof(text), "%s", ok ? got : "(no decode)");
+        sum += cer;
+        if (cer < best) best = cer;
+        if (cer > worst) worst = cer;
+    }
+    const double mean = sum / (double) TABLE_SEEDS;
+    printf("%-8s %9.1f %9.1f %6.1f %5.1f-%5.1f %4.1f/%-3zu %s\n", mode, snr_db, snr_db - 6.8,
+           mean, best, worst, mean * (double) len / 100.0, len, text);
+    free(x);
+    free(work);
+}
+
+static int floors_2k5(void)
+{
+    printf("The floors over a 2.5 kHz channel, measured with noise shaped to 500..3000 Hz.\n");
+    printf("The 12k dB column is the 12 kHz SNR the arithmetic maps each channel SNR onto; the CER\n"
+           "is what that SNR actually does to the same take through the same receiver.\n\n");
+    printf("%-8s %9s %9s %6s %11s %8s %s\n", "mode", "2.5k dB", "12k dB", "CER %", "min-max",
+           "err/len", "decoded text");
+    static const struct { const char* mode; float snr; } mapped[] =
+    {
+        { "MFSK16", -11.2f }, { "MFSK16", -13.2f }, { "MFSK16", -15.2f },
+        { "Olivia",  -9.2f }, { "Olivia", -11.2f }, { "Olivia", -13.2f },
+    };
+    for (size_t i = 0; i < sizeof(mapped) / sizeof(mapped[0]); i++)
+    {
+        floors_2k5_row(mapped[i].mode, mapped[i].snr);
+    }
+    printf("\nthe same two channels in 0.5 dB steps, to see where the floor actually is:\n\n");
+    printf("%-8s %9s %9s %6s %11s %8s %s\n", "mode", "2.5k dB", "12k dB", "CER %", "min-max",
+           "err/len", "decoded text");
+    for (float s = -10.0f; s >= -16.0f - 1e-6f; s -= 0.5f) floors_2k5_row("MFSK16", s);
+    printf("\n");
+    for (float s = -8.0f; s >= -14.0f - 1e-6f; s -= 0.5f) floors_2k5_row("Olivia", s);
+    printf("\nThe 12 kHz rows in the tables are white noise over the whole band; these are the same\n"
+           "channel power confined to 2.5 kHz. A receiver that rejected all out-of-band noise would\n"
+           "read the same CER at the mapped pair; a difference is the receiver's real skirt.\n");
+    return 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -3581,6 +3722,7 @@ int main(int argc, char** argv)
     if (!strcmp(what, "hell")) return hell_table();
     if (!strcmp(what, "mfsk16")) return mfsk16_table();
     if (!strcmp(what, "olivia")) return olivia_table();
+    if (!strcmp(what, "floors-2k5")) return floors_2k5();
     // the gate a take has to clear before it is worth decoding, let alone pinning: it measures the
     // file and never touches the modem, so it cannot be fooled by the modem agreeing with itself
     if (!strcmp(what, "capture-check") && argc > 2)
