@@ -12,17 +12,20 @@ typedef struct
 {
     double   period_samples;   // the symbol the receiver fitted, in samples at 12 kHz
     unsigned symbols;          // symbols read
-    unsigned pairs_ok;         // symbols whose two tones held more than half the energy
+    unsigned tones_ok;         // symbols whose winning tone held more than half the energy
+    unsigned blocks;           // 64 symbol Walsh blocks decoded
     int      phase;            // the symbol phase the receiver locked to
     int      header;           // the length the stream declared, -1 when it ran out first
 } olivia_result_t;
 
-// Text to audio at 12 kHz: 32 tones 31.25 Hz apart from 935 Hz up, 31.25 Bd, two tones per symbol.
-// `tune_hz` moves the tone grid, which is where a tuning error enters this mode.
+// Text to audio at 12 kHz: 32 tones 31.25 Hz apart from 935 Hz up, 31.25 Bd, one tone per symbol,
+// five characters in a Walsh block of sixty four symbols. `tune_hz` moves the tone grid, which is
+// where a tuning error enters this mode.
 size_t Bench_OliviaGenerate(float32_t* out, size_t cap, const char* text, float tune_hz);
 
-// The receiver fits the symbol phase, takes the two strongest tones of each symbol, maps the pair
-// back to its seven bits, undoes the interleaver and reads the length header.
+// The receiver fits the symbol phase, decides each symbol by its strongest tone, undoes the Gray
+// code, the scrambler and the diagonal spreading against the Walsh table, and reads the length
+// header the stream starts with.
 int Bench_OliviaDecode(const float32_t* x, size_t n, char* out, size_t out_sz, olivia_result_t* res);
 
 #endif

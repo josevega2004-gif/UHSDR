@@ -1184,8 +1184,9 @@ static int mfsk16_table(void)
 
     printf("MFSK16 through the reference modem: 16 tones 15.625 Hz apart at 15.625 Bd, 4 bits a symbol,\n"
            "rate 1/2 K=7 code, interleaver over 8 symbols. Text is %zu characters.\n", len);
-    printf("The alphabet is this bench's 6 bit table and the stream carries its own length, so the\n"
-           "first row is the modem and the coding, not a real station's Varicode.\n\n");
+    printf("The alphabet is the mode's own IZ8BLY Varicode, framed by its 00 separators, so these\n"
+           "rows measure the real alphabet and the coding; the eight symbol interleaver is the\n"
+           "bench's, and the README says so.\n\n");
     printf("%-16s %6s %8s %8s %8s %6s %s\n", "case", "CER %", "err/len", "symbols", "heard",
            "bits", "decoded text");
     for (size_t i = 0; i < n_cases; i++)
@@ -1266,12 +1267,11 @@ static int mfsk16_table(void)
 /* ------------------------------------------------------------------ *
  *  Olivia
  * ------------------------------------------------------------------ */
-// Thirty-two tones at 31.25 baud is 1000 Hz of signal, and each symbol sends two of them, so one
-// symbol carries a seven bit character with nearly four times the room it needs. The spare room is
-// the point: the pair for a character sits a long way from the pair for any other, so a symbol read
-// slightly wrong is still the right character, and the interleaver spreads a burst over a block of
-// characters. The rows below are the same ladder as MFSK16's, so the two tables can be compared: the
-// same channel, the same text, the same scoring.
+// Thirty-two tones at 31.25 baud is 1000 Hz of signal, one tone a symbol, five bits a symbol. A
+// character is a Walsh function of sixty four bits, so it is spread over a block of sixty four
+// symbols - five characters a block - and one symbol lost to a burst is one bit in each of five
+// codewords rather than five bits in one. The rows below are the same ladder as MFSK16's, so the
+// two tables can be compared: the same channel, the same text, the same scoring.
 typedef struct
 {
     const char* name;
@@ -1297,23 +1297,20 @@ static int olivia_table(void)
         { .name = "snr -6", .snr_db = -6.0f, .max_cer = 100.0f },
         { .name = "snr -12", .snr_db = -12.0f, .max_cer = 0.0f },
         { .name = "snr -20", .snr_db = -20.0f, .max_cer = 0.0f },
-        { .name = "burst 2 symbols", .snr_db = 20.0f, .burst_symbols = 2, .max_cer = 5.0f },
-        { .name = "burst 8 symbols", .snr_db = 20.0f, .burst_symbols = 8, .max_cer = 100.0f,
-          .min_cer = 10.0f },
-        { .name = "tone +15 Hz", .snr_db = 20.0f, .tune_hz = 15.0f, .max_cer = 100.0f,
-          .min_cer = 30.0f },
+        { .name = "burst 2 symbols", .snr_db = 20.0f, .burst_symbols = 2, .max_cer = 0.0f },
+        { .name = "burst 8 symbols", .snr_db = 20.0f, .burst_symbols = 8, .max_cer = 0.0f },
+        { .name = "tone +15 Hz", .snr_db = 20.0f, .tune_hz = 15.0f, .max_cer = 0.0f },
         { .name = "noise only", .snr_db = 0.0f, .no_signal = 1, .max_cer = 100.0f, .min_cer = 50.0f },
     };
     const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
     int failures = 0;
 
-    printf("Olivia through the reference modem: 32 tones 31.25 Hz apart at 31.25 Bd, two tones a\n"
-           "symbol, seven bits a symbol, interleaved over 8 characters. Text is %zu characters.\n",
+    printf("Olivia through the reference modem: 32 tones 31.25 Hz apart at 31.25 Bd, one tone a\n"
+           "symbol, 64 symbol Walsh blocks of five characters, Gray coded. Text is %zu characters.\n",
            len);
-    printf("The pair table is this bench's (pair 3c+1 of the 496) and the stream carries its own\n"
-           "length, so the table measures the tone geometry and the redundancy, not the mode's own\n"
-           "tables.\n\n");
-    printf("%-16s %6s %8s %8s %8s %s\n", "case", "CER %", "err/len", "symbols", "pairs",
+    printf("The Walsh rows, the scrambler and the diagonal spread are the mode's own; the length in\n"
+           "the first two characters is the bench's, because Olivia has no framing.\n\n");
+    printf("%-16s %6s %8s %8s %8s %s\n", "case", "CER %", "err/len", "symbols", "heard",
            "decoded text");
     for (size_t i = 0; i < n_cases; i++)
     {
@@ -1354,7 +1351,7 @@ static int olivia_table(void)
         }
         const double cer = 100.0 * (double)err / (double)len;
         printf("%-16s %6.1f %4d/%-3zu %8u %5.2f%% %s\n", c->name, cer, err, len, res.symbols,
-               res.symbols ? 100.0 * (double)res.pairs_ok / (double)res.symbols : 0.0,
+               res.symbols ? 100.0 * (double)res.tones_ok / (double)res.symbols : 0.0,
                ok ? got : "(no decode)");
         if (!ok)
         {
@@ -1375,10 +1372,10 @@ static int olivia_table(void)
         }
         free(x);
     }
-    printf("\n'pairs' is the share of symbols whose two strongest tones held more than half the energy\n"
-           "between them: a full symbol is a pair that was found. The noise only row is the one that\n"
-           "must never read as text, and the rows above it are the reason the mode is used where the\n"
-           "channel is bad rather than where it is good.\n");
+    printf("\n'heard' is the share of symbols whose winning tone held more than half the energy\n"
+           "over the thirty-two: a symbol that is not heard was lost to the channel. The noise only\n"
+           "row is the one that must never read as text, and the rows above it are the reason the\n"
+           "mode is used where the channel is bad rather than where it is good.\n");
     if (!failures)
     {
         printf("\nall %zu cases inside their character error limits\n", n_cases);
@@ -2981,9 +2978,9 @@ static int selftest(void)
         const size_t n = Bench_Mfsk16Generate(x, cap, msg, 0.0f);
         check(n > 0 && Bench_Mfsk16Decode(x, n, got, sizeof(got), &r),
               "mfsk16: a clean transmission decodes");
-        printf("     (%u symbols, %u coded bits, header %d, %.1f %% of symbols heard, text [%s])\n",
-               r.symbols, r.bits, r.header, r.symbols ? 100.0 * (double)r.tones_ok / r.symbols : 0.0,
-               got);
+        printf("     (%u symbols, %u coded bits, %u characters, %.1f %% of symbols heard, text [%s])\n",
+               r.symbols, r.bits, r.characters,
+               r.symbols ? 100.0 * (double)r.tones_ok / r.symbols : 0.0, got);
         check(strcmp(got, msg) == 0, "mfsk16: and the text comes back as sent");
         memset(x + 30 * 768, 0, 768 * sizeof(float32_t));
         const int ok1 = Bench_Mfsk16Decode(x, n, got, sizeof(got), &r);
@@ -2994,8 +2991,9 @@ static int selftest(void)
         free(x);
     }
     {
-        // Olivia: a character is a pair of tones, so the self check is that the pair comes back and
-        // that one symbol lost inside an interleaved block does not cost a character.
+        // Olivia: a character is a Walsh function spread over a block of sixty four symbols, so the
+        // self check is that the text comes back and that one symbol lost inside a block does not
+        // cost a character.
         static const char* msg = "OLIVIA TEST";
         const size_t cap = 100000;
         float32_t* x = malloc(cap * sizeof(float32_t));
@@ -3004,8 +3002,9 @@ static int selftest(void)
         const size_t n = Bench_OliviaGenerate(x, cap, msg, 0.0f);
         check(n > 0 && Bench_OliviaDecode(x, n, got, sizeof(got), &r),
               "olivia: a clean transmission decodes");
-        printf("     (%u symbols, header %d, %.1f %% of symbols with both tones up, text [%s])\n",
-               r.symbols, r.header, r.symbols ? 100.0 * (double)r.pairs_ok / r.symbols : 0.0, got);
+        printf("     (%u symbols in %u blocks, header %d, %.1f %% of symbols heard, text [%s])\n",
+               r.symbols, r.blocks, r.header, r.symbols ? 100.0 * (double)r.tones_ok / r.symbols : 0.0,
+               got);
         check(strcmp(got, msg) == 0, "olivia: and the text comes back as sent");
         memset(x + 8 * 384, 0, 384 * sizeof(float32_t));
         const int ok1 = Bench_OliviaDecode(x, n, got, sizeof(got), &r);

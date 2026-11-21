@@ -7,11 +7,19 @@
 // over its neighbours. The bench keeps that structure: a rate 1/2 constraint length 7 convolutional
 // code, a block interleaver over eight symbols, and hard decisions from the tone energies.
 //
-// Two things here are this bench's and not the mode's, and the README says so at length: the
-// alphabet is a 6 bit table (space, A-Z, digits, a few marks) rather than Varicode, and the stream
-// starts with an eight bit character count so that a receiver can tell where the text stops. Varicode
-// would give the framing for free; a fixed length code needs a header, and a header is the honest way
-// to bench everything under it.
+// The alphabet is the mode's own: the IZ8BLY MFSK Varicode, as published by Murray Greenman ZL1BPU
+// ("The IZ8BLY MFSK Varicode", 10 July 2000, cut from Nino IZ8BLY's source). Every character is a
+// run of bits starting with 1 and terminated by "00", so the stream frames itself and needs no
+// header: the decoder finds each character at the 1 that follows a run of at least two zeros.
+// Varicode is not the PSK31 code - this one may contain runs of more than two zeros inside a code -
+// which is why the decoder separates characters on a 1 after a zero run rather than on the first
+// "00" it sees.
+//
+// Two things here are still the bench's and the README says so: the interleaver is a block of eight
+// symbols rather than the mode's ten concatenated 4x4 diagonal interleavers, and the take ends with
+// a NUL, the idle character fldigi sends when it has nothing to transmit, followed by one start bit.
+// A NUL is needed because codes may end in zeros (every digit does): zero padding after the text is
+// indistinguishable from the tail of the last code, and no amount of it can mark the end.
 
 #include "mfsk16.h"
 
@@ -31,15 +39,70 @@
 #define MF_G2       0x5Bu               // octal 133
 #define MF_BLOCK    8                   // symbols per interleaver block, 32 coded bits
 
-// space, A-Z, 0-9 and a few marks: 6 bits, 41 of the 64 codes used
-static const char mf_alpha[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,?-";
-#define MF_ALPHA_LEN ((int)(sizeof(mf_alpha) - 1))
-
-static int mf_code(char c)
+// The IZ8BLY MFSK Varicode, indexed by 7 bit ASCII, with the framing "00" stripped: the table on
+// ZL1BPU's page lists each code with its terminator, so "100" there is the space and is "1" here.
+// Codes 30, 31 and 127 end in a zero in the published table, which the framing cannot represent;
+// they are control codes the bench never sends, and the encoder falls back to '?' for anything
+// without an entry.
+static const char* mf_varicode[128] =
 {
-    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-    const char* p = strchr(mf_alpha, c);
-    return p ? (int)(p - mf_alpha) : 0;
+    [0] = "111010111",      [1] = "1110110000",     [2] = "1110110100",
+    [3] = "111011011",      [4] = "1110111000",     [5] = "111011101",
+    [6] = "1110111100",     [7] = "111011111",      [8] = "101010",
+    [9] = "1111000000",     [10] = "1111010000",    [11] = "1111010100",
+    [12] = "111101011",     [13] = "101011",        [14] = "1111011000",
+    [15] = "111101101",     [16] = "1111011100",    [17] = "111101111",
+    [18] = "1111100000",    [19] = "1111101000",    [20] = "111110101",
+    [21] = "1111101100",    [22] = "111110111",     [23] = "1111110000",
+    [24] = "1111110100",    [25] = "111111011",     [26] = "1111111000",
+    [27] = "111111101",     [28] = "1111111100",    [29] = "111111111",
+    [30] = "1000000000",    [31] = "1010000000",
+    [32] = "1",             [33] = "1110000",       [34] = "1111111",
+    [35] = "101101100",     [36] = "101010100",     [37] = "101010000",
+    [38] = "10000000",      [39] = "1101111",       [40] = "1111101",
+    [41] = "1111100",       [42] = "10101101",      [43] = "1111000",
+    [44] = "101000",        [45] = "1110110",       [46] = "1110101",
+    [47] = "1111010",       [48] = "111000",        [49] = "111100",
+    [50] = "1010000",       [51] = "1010101",       [52] = "1011101",
+    [53] = "1011000",       [54] = "1011011",       [55] = "1101000",
+    [56] = "1100000",       [57] = "1101011",       [58] = "1111011",
+    [59] = "1111110",       [60] = "101100000",     [61] = "1110111",
+    [62] = "10101111",      [63] = "1110100",       [64] = "101000000",
+    [65] = "101111",        [66] = "1000000",       [67] = "110101",
+    [68] = "110111",        [69] = "101110",        [70] = "111110",
+    [71] = "1010100",       [72] = "1010110",       [73] = "110000",
+    [74] = "1101101",       [75] = "1011111",       [76] = "111101",
+    [77] = "111010",        [78] = "111111",        [79] = "110100",
+    [80] = "111011",        [81] = "1101100",       [82] = "110110",
+    [83] = "101101",        [84] = "101100",        [85] = "1010111",
+    [86] = "1101010",       [87] = "1011010",       [88] = "1011100",
+    [89] = "1011110",       [90] = "1101110",       [91] = "101110100",
+    [92] = "101101000",     [93] = "10111011",      [94] = "10110101",
+    [95] = "101011000",     [96] = "10101011",      [97] = "101",
+    [98] = "11000",         [99] = "1110",          [100] = "1101",
+    [101] = "10",           [102] = "10100",        [103] = "10110",
+    [104] = "1100",         [105] = "110",          [106] = "100000",
+    [107] = "11100",        [108] = "1011",         [109] = "10000",
+    [110] = "111",          [111] = "100",          [112] = "10101",
+    [113] = "11110",        [114] = "1000",         [115] = "1010",
+    [116] = "11",           [117] = "1111",         [118] = "11011",
+    [119] = "11010",        [120] = "11101",        [121] = "10111",
+    [122] = "11111",        [123] = "10110111",     [124] = "101011100",
+    [125] = "101110000",    [126] = "101111000",    [127] = "1010100000",
+};
+
+// the character a code stands for, -1 when the bits are not in the table (0 is the NUL, the idle)
+static int mf_varicode_char(unsigned code, int len)
+{
+    for (int c = 0; c < 128; c++)
+    {
+        const char* p = mf_varicode[c];
+        if (!p || (int)strlen(p) != len) continue;
+        unsigned v = 0;
+        for (; *p; p++) v = (v << 1) | (unsigned)(*p - '0');
+        if (v == code) return c;
+    }
+    return -1;
 }
 
 static int mf_parity(unsigned v)
@@ -94,16 +157,26 @@ size_t Bench_Mfsk16Generate(float32_t* out, size_t cap, const char* text, float 
 {
     static uint8_t bits[8192], coded[8192], tx[8192];
     const size_t len = strlen(text);
-    const int nchars = len > 255 ? 255 : (int)len;
+    const int nchars = len > 300 ? 300 : (int)len;
     size_t nb = 0;
 
-    for (int k = 0; k < 8; k++) bits[nb++] = (uint8_t)((nchars >> k) & 1);
+    // Varicode: the character's bits and then "00". Four bits to a symbol, so the padding the
+    // interleaver needs is extra zeros, which decode as idle and print nothing.
     for (int i = 0; i < nchars; i++)
     {
-        const int v = mf_code(text[i]);
-        for (int k = 0; k < 6; k++) bits[nb++] = (uint8_t)((v >> k) & 1);
+        int c = (unsigned char)text[i];
+        const char* p = c < 128 ? mf_varicode[c] : NULL;
+        if (!p) p = mf_varicode['?'];
+        for (; *p; p++) bits[nb++] = (uint8_t)(*p - '0');
+        bits[nb++] = 0;
+        bits[nb++] = 0;
     }
-    // the interleaver works on whole 16 bit groups; the padding is part of the stream
+    // the idle NUL, then one start bit for the character after it: without a following 1 the NUL is
+    // not framed, and without the NUL the padding zeros cannot say where the text ended
+    for (const char* p = mf_varicode[0]; *p; p++) bits[nb++] = (uint8_t)(*p - '0');
+    bits[nb++] = 0;
+    bits[nb++] = 0;
+    bits[nb++] = 1;
     while (nb % 16) bits[nb++] = 0;
     const size_t nblocks = nb / 16;
     mf_conv(bits, nb, coded);
@@ -221,7 +294,6 @@ int Bench_Mfsk16Decode(const float32_t* x, size_t n, char* out, size_t out_sz, m
 {
     memset(res, 0, sizeof(*res));
     res->period_samples = MF_SYMBOL;
-    res->header = -1;
     if (n < (size_t)(2 * MF_SYMBOL)) return 0;
 
     // The symbol phase: the alignment that puts the most energy in one tone per symbol. A phase half
@@ -279,24 +351,39 @@ int Bench_Mfsk16Decode(const float32_t* x, size_t n, char* out, size_t out_sz, m
     mf_deinterleave(rx, coded, nblocks);
     const size_t nb = mf_viterbi(coded, res->bits, info);
     res->viterbi_bits = (unsigned)nb;
-    if (nb < 8) return 0;
+    if (nb < 4) return 0;
 
-    int hdr = 0;
-    for (int k = 0; k < 8; k++) hdr |= (int)info[k] << k;
-    res->header = hdr;
-
+    // Varicode framing. A character starts at a 1 and ends two bits before the next 1 that follows a
+    // run of at least two zeros; the zeros before that 1 are the delimiter, and a code that itself
+    // ends in zeros keeps them, because only the last two are removed. The NUL closes the message.
     size_t at = 0;
-    // the stream says how long the text is: without that the padding the interleaver needs would
-    // come out as trailing spaces, and a reader cannot tell them from text
-    int nchars = hdr;
-    if (nchars > (int)((nb - 8) / 6)) nchars = (int)((nb - 8) / 6);
-    for (int i = 0; i < nchars && at + 1 < out_sz; i++)
+    unsigned acc = 0;
+    int len = 0;
+    for (size_t i = 0; i < nb; i++)
     {
-        int v = 0;
-        for (int k = 0; k < 6; k++) v |= (int)info[8 + 6 * (size_t)i + (size_t)k] << k;
-        if (v == 0) out[at++] = ' ';
-        else if (v <= MF_ALPHA_LEN) out[at++] = mf_alpha[v];
-        else out[at++] = '?';
+        const int bit = info[i];
+        if (len == 0)
+        {
+            if (!bit) continue;
+            acc = 1;
+            len = 1;
+            continue;
+        }
+        acc = (acc << 1) | (unsigned)bit;
+        len++;
+        if (bit == 1 && len >= 4 && (acc & 6u) == 0u)
+        {
+            const int c = mf_varicode_char(acc >> 3, len - 3);
+            acc = 1;
+            len = 1;
+            res->characters++;
+            if (c == 0) break;                  // the idle NUL: the message ended
+            if (c > 0 && at + 1 < out_sz) out[at++] = (char)c;
+            continue;
+        }
+        // the longest code is twelve bits, plus the two of the delimiter and up to fifteen of the
+        // padding the interleaver needs: anything longer is not a character, so resync on it
+        if (len > 30) { acc = 0; len = 0; }
     }
     out[at] = 0;
     return 1;

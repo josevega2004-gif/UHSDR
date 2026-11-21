@@ -16,7 +16,7 @@ typedef struct
     unsigned tones_ok;        // symbols whose winning tone held more than half the energy
     unsigned bits;            // coded bits read
     unsigned viterbi_bits;    // decoded information bits
-    int     header;           // the length the stream declared, -1 when the take ended first
+    unsigned characters;      // Varicode characters framed out of them
     int     phase;            // the symbol phase the receiver locked to
 } mfsk16_result_t;
 
@@ -25,7 +25,7 @@ typedef struct
 size_t Bench_Mfsk16Generate(float32_t* out, size_t cap, const char* text, float tune_hz);
 
 // The receiver fits the symbol phase, decides each symbol by which tone holds the energy, undoes the
-// interleaver, runs the Viterbi decoder and reads the length header the stream starts with.
+// interleaver, runs the Viterbi decoder and frames the result with the Varicode table.
 int Bench_Mfsk16Decode(const float32_t* x, size_t n, char* out, size_t out_sz, mfsk16_result_t* res);
 
 #endif

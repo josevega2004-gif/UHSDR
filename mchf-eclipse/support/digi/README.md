@@ -9,8 +9,8 @@ make -C support/digi rtty-long  # the same matrix, eight copies of the message (
 make -C support/digi wefax    # synthetic HF weather fax through the reference demodulator
 make -C support/digi navtex   # NAVTEX / SITOR-B through a reference modem: alphabet and repeat copy
 make -C support/digi hell     # Hellschreiber: on/off keyed raster, scored as a picture
-make -C support/digi mfsk16   # MFSK16: 16 tones, rate 1/2 code, interleaver over 8 symbols
-make -C support/digi olivia   # Olivia: 32 tones, two a symbol, interleaved over 8 characters
+make -C support/digi mfsk16   # MFSK16: 16 tones, Varicode, rate 1/2 code, interleaver over 8 symbols
+make -C support/digi olivia   # Olivia: 32 tones, 64 symbol Walsh blocks, five characters a block
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi capture-check  # is a recording fit to be pinned: pair, bit clock, continuity
 make -C support/digi fixture-check  # do fixtures/MANIFEST.md's numbers still describe the wav
@@ -724,15 +724,17 @@ signal per decision, 234 Hz wide. A symbol that the receiver reads correctly is 
 symbol lost to the channel is worth nothing, which is why the mode is built around a code and an
 interleaver rather than around the tones.
 
-Two parts of this reference modem are the bench's and two are the mode's, and the table only means
-something if that is said plainly:
+Which parts of this reference modem are the mode's and which are the bench's matters, and the table
+only means something if that is said plainly:
 
-* **the mode's**: the tone grid, the rate, four bits per symbol, the rate 1/2 constraint length 7
-  convolutional code, and the fact that coded bits are spread over a block of symbols.
-* **the bench's**: the alphabet is a six bit table (space, A-Z, digits, a few marks) rather than
-  Varicode, the interleaver is eight symbols rather than the mode's longer block, and the stream
-  starts with an eight bit character count. Varicode frames characters for free; a fixed length code
-  cannot, and a length header is the honest way to bench everything under it.
+* **the mode's**: the tone grid, the rate, four bits per symbol, the IZ8BLY Varicode alphabet with
+  its `00` separators, the rate 1/2 constraint length 7 convolutional code, and the fact that coded
+  bits are spread over a block of symbols.
+* **the bench's**: the interleaver is eight symbols rather than the mode's ten concatenated 4x4
+  diagonal interleavers, and the take ends with the idle NUL and one start bit. The NUL is not
+  decoration: a Varicode code may end in zeros (every digit does), so zero padding after the text
+  cannot say where the last code ended - `5` followed by padding reads as `<`. A character that is
+  always sent, plus the one start bit that lets it be framed, does say so.
 
 Measured on a 26 character message at 12 kHz, SNR quoted over the whole 12 kHz band:
 
@@ -743,54 +745,61 @@ Measured on a 26 character message at 12 kHz, SNR quoted over the whole 12 kHz b
 | 10 dB | 0.0 | 0/26 | 100.0 |
 | 10 dB + 0.5 Hz / 3 dB QSB | 0.0 | 0/26 | 100.0 |
 | 3 dB | 0.0 | 0/26 | 100.0 |
-| burst over 2 symbols (128 ms) | 0.0 | 0/26 | 97.7 |
-| burst over 8 symbols (512 ms) | **11.5** | 3/26 | 90.9 |
-| tuning error +8 Hz (half a tone spacing) | **100.0** | 26/26 | 11.3 |
-| tuning error +16 Hz (a whole spacing) | **100.0** | 26/26 | 100.0 |
+| burst over 2 symbols (128 ms) | 0.0 | 0/26 | 98.1 |
+| burst over 8 symbols (512 ms) | **50.0** | 13/26 | 92.3 |
+| tuning error +8 Hz (half a tone spacing) | **92.3** | 24/26 | 9.4 |
+| tuning error +16 Hz (a whole spacing) | **96.2** | 25/26 | 100.0 |
 | noise only, nothing transmitted | **100.0** | 26/26 | 0.0 |
 
 The first five rows are the matched filter doing its work: a symbol is 64 ms of one tone, so the
 correlation is worth about 23 dB against noise in the 12 kHz band, and 3 dB of band SNR is still a
 comfortable decision. The burst rows are the interleaver: two symbols erased is eight bits spread over
 eight symbols, which the rate 1/2 code repairs completely, and eight symbols erased is thirty two bits
-over eight symbols, which it does not - three characters are lost and the row is pinned from below so
-that a receiver which started hiding the damage would fail here.
+over eight symbols, four in each of them, which it does not. Thirteen characters are lost, not three:
+with Varicode a character is about ten bits rather than six, so the same thirty two damaged bits reach
+about half the message instead of an eighth of it. The row is pinned from below so that a receiver
+which started hiding the damage would fail here.
 
 The tuning rows are the tone spacing. The tones are exactly one cycle apart per symbol, so a 16 Hz
 error puts the signal on the neighbouring tone: every symbol is heard strongly (100.0 %) and every one
 of them is the wrong tone. Half a spacing is worse in a different way - the energy splits between two
-tones, the winning tone no longer holds half of it (11.3 % heard), and the decisions scatter. There is
+tones, the winning tone no longer holds half of it (9.4 % heard), and the decisions scatter. There is
 no tuning search in the receiver; this is the same cliff the RTTY and NAVTEX sections measure, at the
 width this mode's tones give it.
 
 The noise-only row is the one that must never read as text. With nothing transmitted the receiver
-still reports a length and fills it in, and the row pins that text at a character error rate of 100 %,
-so a receiver that began inventing spaces where the signal was silent would show up as a regression.
+still frames characters out of the noise, and the row pins that text at a character error rate of
+100 %, so a receiver that began inventing spaces where the signal was silent would show up as a
+regression.
 
 ## Olivia, `make -C support/digi olivia`
 
 Thirty-two tones 31.25 Hz apart - 1000 Hz of signal, which is what the `32/1000` in the mode's name
-counts - at 31.25 baud. The property that makes Olivia Olivia is that each symbol sends *two* of the
-thirty-two tones at once. A pair is one of 496 combinations and a character needs 128 of them, so the
-symbol carries seven bits with nearly four times the room it needs, and the spare room is spent on
-being heard wrong rather than on speed.
+counts - at 31.25 baud, one tone per symbol. A tone is five bits and sixty-four tones are a block, so
+a block carries five seven bit characters: the mode's two layers are the MFSK across the frequency
+axis and a Walsh function along the time axis.
 
-As with MFSK16, which parts are the mode's:
+This modem uses Olivia's own mapping, and there is no tone pair table in Olivia to use. Each character
+is one of 128 Walsh sequences - sixty-four rows of the 64 x 64 Hadamard matrix and their complements,
+so the character's seven bits are six for the row and one for the sign - scrambled with
+`0xE257E6D0291574EC` rotated thirteen bits per character, and spread diagonally over the block:
+character `b` puts its bit `t` into symbol `t`, bit position `(b + t) mod 5`. The five bit symbols go
+to tones through the mode's Gray code. That is the ARRL draft specification and fldigi's MFSK codec,
+and it is what this section measures.
 
-* **the mode's**: 32 tones at 31.25 Bd, two tones per symbol, seven bit characters, an interleaver
-  over a block of characters, and a receiver that decides a symbol by its two strongest tones.
-* **the bench's**: the mapping from a character to a tone pair is pair `3c+1` of the 496 rather than
-  the mode's own table, the interleaver block is eight characters rather than Olivia's much longer
-  one, and the stream again carries an eight bit length in its first two symbols.
+Which parts are the bench's:
 
-What the pair spacing buys is measured by the burst rows rather than by the noise rows. A character's
-pair is three pairs away from its neighbours', so a symbol read one pair out is still the right
-character; that is why the mode's noise rows stay clean far below where a single-tone mode would have
-stopped.
+* **the bench's**: the stream starts with the length in its first two characters, because Olivia is a
+  continuous stream with no framing of its own; the receiver decides each symbol from one whole 32 ms
+  window rather than fldigi's overlapped FFT and separate symbol clock; and the phase is continuous
+  rather than shifted at random by +-90 degrees per symbol, which the specification does only so that
+  a repeated tone is not a pure tone.
+* **the mode's**: the tone grid, the rate, one tone a symbol, the Walsh/Hadamard codewords, the
+  scrambler, the diagonal spread, the Gray code, and five characters in a block.
 
 Measured on the same 26 character message, same channel, same scoring as MFSK16:
 
-| case | CER % | err/len | symbols with both tones |
+| case | CER % | err/len | symbols heard |
 |---|---|---|---|
 | clean | 0.0 | 0/26 | 100.0 |
 | 20 dB | 0.0 | 0/26 | 100.0 |
@@ -800,26 +809,29 @@ Measured on the same 26 character message, same channel, same scoring as MFSK16:
 | -6 dB | 0.0 | 0/26 | 100.0 |
 | **-12 dB** | 0.0 | 0/26 | 100.0 |
 | **-20 dB** | 0.0 | 0/26 | 100.0 |
-| burst over 2 symbols (64 ms) | **3.8** | 1/26 | 96.9 |
-| burst over 8 symbols (256 ms) | **23.1** | 6/26 | 78.1 |
-| tuning error +15 Hz (half a tone spacing) | **61.5** | 16/26 | 68.8 |
+| burst over 2 symbols (64 ms) | 0.0 | 0/26 | 99.7 |
+| burst over 8 symbols (256 ms) | 0.0 | 0/26 | 98.2 |
+| tuning error +15 Hz (half a tone spacing) | 0.0 | 0/26 | 6.5 |
 | noise only, nothing transmitted | **100.0** | 26/26 | 0.0 |
 
 The noise ladder has not found this receiver's floor: it decodes the message without a single error
 20 dB below the signal in the 12 kHz band, which is about 13 dB below it in a 2.5 kHz channel - the
-usual way to quote a mode's SNR. That is the pair geometry and the 31.25 Hz matched filter together,
-and it is reported as measured rather than as a claim: the rows say where this receiver has been
-tested, not where the mode stops.
+usual way to quote a mode's SNR. The Walsh layer is why. A symbol error is one bit in each of five
+codewords of sixty-four bits, and the rows of the matrix are 32 apart, so the transform reads the
+right one through a great deal of damage. It is reported as measured rather than as a claim: the rows
+say where this receiver has been tested, not where the mode stops.
 
-The burst rows are the interleaver's limit at eight characters: two symbols erased costs one
-character, eight symbols costs six, and the eight-symbol row is pinned from below. The tuning row is
-again the tone spacing, and it is worse than the pair count alone suggests: at half a spacing the
-pair splits across neighbours, 68.8 % of symbols still have both tones up, and yet 16 characters of
-26 come back wrong. The reason is the symbol phase: the fit is made on the first six symbols by the
-same pair metric the data is decided with, so a take whose pairs are already ambiguous can lock a
-fraction of a symbol out, and every symbol after it is decided across a boundary. That is why the row
-is pinned at 30 %: it is the receiver failing at something other than noise, and it has to keep
-failing there.
+The burst rows no longer cost anything, which is the measurement rather than a missing case: two
+erased symbols is ten bit errors over ten codewords and eight erased symbols is forty, both well
+inside what a 64 bit code with distance 32 repairs. The tuning row is the more interesting one. At
+half a tone spacing only 6.5 % of symbols have a winning tone that holds half the energy - the energy
+is split between two neighbours - and every character still comes back, because the soft decisions
+keep the sign of each bit's difference and the Walsh layer repairs the rest. That is the opposite of
+the old pair based stand-in, where 68.8 % of symbols looked heard and sixteen characters of twenty-six
+came back wrong.
+
+The noise-only row is the one that must never read as text: 100 % of the message wrong, no symbol
+heard.
 
 ## Receiving a DWD teletype station on the radio
 
