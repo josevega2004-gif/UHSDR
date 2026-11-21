@@ -9,6 +9,8 @@
 #   make rtty-tune  how many Hz of tuning error the demodulator survives, and what that is in ppm
 #   make rtty-ddk2  the one on air case: a DWD transmission recorded off the NA5B WebSDR, graded
 #                against the text the station sends. Uses the committed fixture in fixtures/
+#   make fixture-align  the two characters that take gets wrong, by name, with the audio under them
+#   make rtty-trace  which bit of which character the demodulator read wrong, from its own decisions
 #
 # drivers/audio/rtty.c and drivers/audio/audio_agc.c are compiled from the real sources: the
 # modem and the AGC the radio puts in front of it. The shim/ directory replaces only the headers
@@ -90,8 +92,22 @@ rtty-tune: digi_bench
 # through the WebSDR client's own recorder (see README.md): real propagation, not a synthetic channel.
 # 3 % is just above the 2.7 % this copy measured when it was pinned, so a modem change that alters
 # the decode of real audio fails here even when every synthetic row still reads 0.0 %.
+DDK2_TEXT := CQ CQ CQ DE DDK2 DDH7 DDK9 FREQUENCIES   4583 KHZ   7646 KHZ   10100.8 KHZ
+
 rtty-ddk2: digi_bench
-	@./digi_bench rtty-wav fixtures/ddk2-4583.wav 450 "CQ CQ CQ DE DDK2 DDH7 DDK9 FREQUENCIES   4583 KHZ   7646 KHZ   10100.8 KHZ" 50 3
+	@./digi_bench rtty-wav fixtures/ddk2-4583.wav 450 "$(DDK2_TEXT)" 50 3
+
+# what that 2.7 % is made of: the two characters the take gets wrong, named, with the mark and space
+# level of each one's own window against the take's median. It fails if they stop being the ones the
+# record names, or if either window loses the keying that makes a fade the wrong explanation.
+fixture-align: digi_bench
+	@./digi_bench align-check fixtures/ddk2-4583.wav 450 "$(DDK2_TEXT)" 50
+
+# the decoder's own bit decisions, which is the only way to say which data bit of a wrong character
+# was read wrong: a letter is five bits and the report carries only the letter. Diagnostic, so it
+# prints rather than asserting
+rtty-trace: digi_bench
+	@./digi_bench rtty-trace fixtures/ddk2-4583.wav 450 "$(DDK2_TEXT)" 50
 
 # the gate a candidate take has to clear before it is pinned: the pair, the bit clock and the
 # continuity, measured from the audio. Run it on any new recording first; the fixture below is the

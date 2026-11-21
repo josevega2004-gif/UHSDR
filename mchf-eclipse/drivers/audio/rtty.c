@@ -594,6 +594,36 @@ void Rtty_BenchTxBitScale(float scale)
 {
 	rtty_tx_bit_scale = scale;
 }
+
+rtty_bench_bit_t Rtty_BenchTraceBits[RTTY_BENCH_TRACE_BITS];
+int Rtty_BenchTraceCount;
+static bool rtty_bench_tracing;
+static uint32_t rtty_bench_samples;
+
+/**
+ * Start recording the demodulator's bit decisions, counted from sample zero.
+ *
+ * Rtty_Demodulator_ProcessSample() is called once per sample of the 12 kHz stream, so a decision at
+ * n is the sample n/12000 s into the take. That is what ties a bit to the audio it was read from.
+ */
+void Rtty_BenchTraceStart(void)
+{
+	rtty_bench_samples = 0;
+	Rtty_BenchTraceCount = 0;
+	rtty_bench_tracing = true;
+}
+
+/**
+ * The code the transmitter's own table holds for a character, mode bit stripped.
+ *
+ * The five data bits of a character are what a bit trace has to compare, and the expected ones come
+ * from the firmware's Ascii2Baudot rather than from a copy of the tables in the bench: a table that
+ * moved on one side only would otherwise make the trace agree with itself.
+ */
+uint8_t Rtty_BenchTxCodeForAscii(char c)
+{
+	return (uint8_t)(Ascii2Baudot[(uint8_t)c & 0x7f] & 0x1f);
+}
 #endif
 
 float32_t decayavg(float32_t average, float32_t input, int weight)
@@ -782,6 +812,12 @@ static bool RttyDecoder_waitForStartBit(float32_t sample) {
 
 void Rtty_Demodulator_ProcessSample(float32_t sample)
 {
+#ifdef HOST_BENCH
+	if (rtty_bench_tracing)
+	{
+		rtty_bench_samples++;
+	}
+#endif
 
 	switch(rttyDecoderData.state)
 	{
@@ -800,6 +836,17 @@ void Rtty_Demodulator_ProcessSample(float32_t sample)
 			bool bitResult = false;
 			if (RttyDecoder_getBitDPLL(sample, &bitResult))
 			{
+#ifdef HOST_BENCH
+				if (rtty_bench_tracing && Rtty_BenchTraceCount < RTTY_BENCH_TRACE_BITS)
+				{
+					rtty_bench_bit_t* b = &Rtty_BenchTraceBits[Rtty_BenchTraceCount++];
+					// taken before the slot counter moves on, so this is the bit the value below
+					// is stored as: slot 1..5 is data, 6 and 7 the two stop bits
+					b->at = rtty_bench_samples;
+					b->bit = bitResult ? 1 : 0;
+					b->slot = (uint8_t) rttyDecoderData.byteResultp;
+				}
+#endif
 				switch (rttyDecoderData.byteResultp)
 				{
 				case 6: // stop bit 1

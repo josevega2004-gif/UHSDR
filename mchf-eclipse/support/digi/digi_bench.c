@@ -1376,7 +1376,9 @@ static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); 
 // pinned at, and gain trimmed from the file peak so a quiet recording still reaches the modems
 // threshold. This is the hook for real audio (a WebSDR capture, another receivers file export,
 // or an on-air recording), which is the whole reason the bench exists.
-static float decode_wav(const char* path, const char* expected, char* got, size_t got_sz, uint16_t shift, uint16_t baud)
+// trace starts the decoder's bit trace before the first sample, so a mode can print which bit of
+// which character was read wrong instead of inferring it from the letters that came out
+static float decode_wav(const char* path, const char* expected, char* got, size_t got_sz, uint16_t shift, uint16_t baud, bool trace, char* raw, size_t raw_sz)
 {
     FILE* f = fopen(path, "rb");
     if (!f) { printf("cannot open %s\n", path); return -1.0f; }
@@ -1454,6 +1456,7 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
     Rtty_BenchResetDecoder();
     Rtty_Modem_Init(12000);
     Bench_TextReset();
+    if (trace) Rtty_BenchTraceStart();
 
     size_t out_n = (size_t)((double)frames * 12000.0 / (double)rate);
     for (size_t k = 0; k < out_n; k++)
@@ -1470,6 +1473,10 @@ static float decode_wav(const char* path, const char* expected, char* got, size_
     }
     free(buf);
 
+    // raw keeps every character the decoder printed, in the order it printed them: the trace has to
+    // line its rows up with the text by position, and the normalised copy has already dropped the
+    // punctuation that a station's frequency list is full of.
+    if (raw && raw_sz) snprintf(raw, raw_sz, "%s", Bench_TextGet());
     snprintf(got, got_sz, "%s", norm_baudot(Bench_TextGet(), 1));
     printf("file      : %s\n", path);
     printf("format    : %u Hz, %u channel(s), %.1f s, gain %.1f dB\n",
@@ -1970,38 +1977,14 @@ static int capture_check(const char* path, uint16_t shift, uint16_t baud)
 // whose window is empty or half level is the signal's.
 typedef struct { double start_s, end_s; } align_win_t;
 
-static int align_wav(const char* path, const char* expected, uint16_t shift, uint16_t baud)
+// Levenshtein with the edit script kept: match[i] is the index in dec that expected character i was
+// read as, or -1 where the modem inserted or dropped one. The alignment table and the bit trace
+// both need it, so it lives on its own rather than twice.
+static int align_chars(const char* exp, const char* dec, int* match)
 {
-    if (!expected || !*expected)
-    {
-        printf("an alignment needs the text the take carries\n");
-        return 2;
-    }
-    char got[8192];
-    Bench_CharCount = 0;
-    if (decode_wav(path, expected, got, sizeof(got), shift, baud) < 0.0f) return 1;
-
-    const char* exp = norm_baudot(expected, 0);
-    const char* dec = got + lead_in_junk;          // the score skips the junk before the lock
-    const size_t ne = strlen(exp), nd = strlen(dec);
-    const double bit_s = 1.0 / (double)baud;
-    const double char_s = 7.5 * bit_s;
-
-    cap_t c;
-    if (!cap_load(path, &c)) return 1;
-    double clo = 0.0, chi = 0.0;
-    if (!gate_coarse_pair(&c, &clo, &chi)) { free(c.x); return 1; }
-    gate_pair_t pair;
-    gate_pair_stats(&c, clo, chi, &pair);
-    double* t = NULL;
-    const size_t nt = gate_crossings(&c, pair.lo_hz, pair.hi_hz, &t);
-
-    // Levenshtein with the edit script kept: each expected character is tied to the one the modem
-    // produced for it, or to none where the modem inserted or dropped one.
-    const size_t W = nd + 1;
+    const size_t ne = strlen(exp), nd = strlen(dec), W = nd + 1;
     int* d = malloc((ne + 1) * W * sizeof(int));
-    int* match = malloc((ne + 1) * sizeof(int));
-    if (!d || !match) { free(d); free(match); free(t); free(c.x); return 1; }
+    if (!d) return -1;
     for (size_t i = 0; i <= ne; i++) d[i * W] = (int)i;
     for (size_t j = 0; j <= nd; j++) d[j] = (int)j;
     for (size_t i = 1; i <= ne; i++)
@@ -2021,6 +2004,57 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
         { match[i - 1] = (int)(j - 1); i--; j--; }
         else if (i > 0 && d[i * W + j] == d[(i - 1) * W + j] + 1) i--;
         else j--;
+    }
+    free(d);
+    return 0;
+}
+
+// One row per expected character, kept so a pinned take can be checked on the characters it got
+// wrong and the audio under them rather than on the character error rate alone.
+typedef struct
+{
+    char   exp, got;
+    int    trans, ok;
+    double mark_db, space_db, jitter_ms;
+} align_row_t;
+
+#define ALIGN_MAX 512
+static align_row_t align_row[ALIGN_MAX];
+static size_t align_rows;
+
+static int align_wav(const char* path, const char* expected, uint16_t shift, uint16_t baud)
+{
+    if (!expected || !*expected)
+    {
+        printf("an alignment needs the text the take carries\n");
+        return 2;
+    }
+    align_rows = 0;
+    char got[8192];
+    Bench_CharCount = 0;
+    if (decode_wav(path, expected, got, sizeof(got), shift, baud, false, NULL, 0) < 0.0f) return 1;
+
+    const char* exp = norm_baudot(expected, 0);
+    const char* dec = got + lead_in_junk;          // the score skips the junk before the lock
+    const size_t ne = strlen(exp), nd = strlen(dec);
+    const double bit_s = 1.0 / (double)baud;
+    const double char_s = 7.5 * bit_s;
+
+    cap_t c;
+    if (!cap_load(path, &c)) return 1;
+    double clo = 0.0, chi = 0.0;
+    if (!gate_coarse_pair(&c, &clo, &chi)) { free(c.x); return 1; }
+    gate_pair_t pair;
+    gate_pair_stats(&c, clo, chi, &pair);
+    double* t = NULL;
+    const size_t nt = gate_crossings(&c, pair.lo_hz, pair.hi_hz, &t);
+
+    int* match = malloc((ne + 1) * sizeof(int));
+    if (!match || align_chars(exp, dec, match) != 0)
+    {
+        free(match); free(t); free(c.x);
+        printf("out of memory aligning the decode\n");
+        return 1;
     }
 
     printf("\n%3s %3s %3s %9s %9s %5s %7s\n", "#", "exp", "got", "mark dB", "space dB",
@@ -2084,6 +2118,12 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
         const int ok = j >= 0 && have_c == exp[i];
         printf("%3zu %3c %3c %9.1f %9.1f %5d %7.2f %s\n", i + 1, exp[i], have_c,
                mark_db, space_db, trans, rms_ms, ok ? "" : "*");
+        if (align_rows < ALIGN_MAX)
+        {
+            align_row_t* r = &align_row[align_rows++];
+            r->exp = exp[i]; r->got = have_c; r->trans = trans; r->ok = ok;
+            r->mark_db = mark_db; r->space_db = space_db; r->jitter_ms = rms_ms;
+        }
         if (!ok) wrong++;
         else if (trans) { good++; sum_mark += mark_db; sum_space += space_db; sum_rms += rms_ms; }
     }
@@ -2097,10 +2137,212 @@ static int align_wav(const char* path, const char* expected, uint16_t shift, uin
     printf("%s\n", nt ? "* marks a character the modem did not reproduce as sent"
                       : "no transitions: nothing to place the windows against");
 
-    free(d); free(match); free(t); free(c.x);
+    free(match); free(t); free(c.x);
     return 0;
 }
 
+/* ------------------------------------------------------------------ *
+ *  the pinned junction: which characters, not only how many
+ * ------------------------------------------------------------------ */
+// The two characters this take gets wrong, checked by name, with the audio under them. "The
+// remaining 2.7 % is signal quality" was an assumption here until the alignment table showed these
+// rows carrying the same keying as the characters on either side of them. If that stops being true -
+// a row loses its tones, or the take starts getting a different pair wrong - the record has to be
+// rewritten rather than quietly left standing.
+static int align_check(const char* path, const char* expected, uint16_t shift, uint16_t baud)
+{
+    align_rows = 0;
+    const int rc = align_wav(path, expected, shift, baud);
+    if (rc) return rc;
+    if (align_rows < 27)
+    {
+        printf("FAIL  the alignment reported %zu characters, too few for the pinned junction\n",
+               align_rows);
+        return 1;
+    }
+    double mk[ALIGN_MAX], sp[ALIGN_MAX];
+    size_t nm = 0;
+    int wrong = 0;
+    for (size_t i = 0; i < align_rows; i++)
+    {
+        if (align_row[i].ok)
+        {
+            mk[nm] = align_row[i].mark_db;
+            sp[nm] = align_row[i].space_db;
+            nm++;
+        }
+        else wrong++;
+    }
+    qsort(mk, nm, sizeof(double), cmp_double);
+    qsort(sp, nm, sizeof(double), cmp_double);
+    const double med_mark = nm ? mk[nm / 2] : 0.0;
+    const double med_space = nm ? sp[nm / 2] : 0.0;
+    const double fade_db = 12.0;      // this far under the take's own levels is a fade, not a misread
+
+    int bad = 0;
+    printf("\npinned junction: the two characters this take gets wrong, and the audio under them\n");
+    printf("%3s %3s %3s %9s %9s %10s %5s  %s\n", "#", "exp", "got", "mark dB", "space dB",
+           "vs median", "trans", "verdict");
+    for (int i = 25; i <= 26; i++)
+    {
+        const align_row_t* r = &align_row[i];
+        const double worst = fmin(r->mark_db - med_mark, r->space_db - med_space);
+        const int keyed = r->trans >= 1 && worst > -fade_db;
+        printf("%3d %3c %3c %9.1f %9.1f %+10.1f %5d  %s\n", i + 1, r->exp, r->got, r->mark_db,
+               r->space_db, worst, r->trans,
+               r->ok ? "decoded as sent" : keyed ? "misread, keying present" : "FADED OUT");
+        if (r->ok || !keyed)
+        {
+            printf("FAIL  character %d is%s; it has to be the misread the record names, with its\n"
+                   "      keying within %.0f dB of the take's own %.1f / %.1f dB\n", i + 1,
+                   r->ok ? " decoded correctly now" : " faded out", fade_db, med_mark, med_space);
+            bad = 1;
+        }
+    }
+    if (align_row[25].exp != '9' || align_row[25].got != '5'
+        || align_row[26].exp != ' ' || align_row[26].got != '9')
+    {
+        printf("FAIL  the junction now reads %c/%c and %c/%c, not the 9/5 and space/9 the record "
+               "names\n", align_row[25].exp, align_row[25].got, align_row[26].exp, align_row[26].got);
+        bad = 1;
+    }
+    if (wrong != 2)
+    {
+        printf("FAIL  the take gets %d characters wrong; the pinned record is 2 of %zu (2.7 %%)\n",
+               wrong, align_rows);
+        bad = 1;
+    }
+    if (!bad)
+    {
+        printf("\n2 of %zu characters wrong (%.1f %%), and both wrong windows carry their own keying:\n"
+               "the residual is the demodulator reading a code where a space belonged, not a fade\n"
+               "under the character. The levels around it are the take's own, so a row that does\n"
+               "fade out fails here instead of being quoted as signal quality.\n",
+               align_rows, 100.0 * 2.0 / (double)align_rows);
+    }
+    return bad ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ *  the decoder's own bit decisions
+ * ------------------------------------------------------------------ */
+// A character is five data bits and a report only carries the letter they add up to, so a wrong
+// letter never says which bit was wrong, and a character dropped at its stop bit never appears at
+// all. These are the decisions the demodulator took, recorded inside its loop by rtty.c: the bit, the
+// slot it was stored in, and the sample it was read on. The sent code comes from the firmware's own
+// Ascii2Baudot, so the comparison is against what the transmitter keys and not against a copy.
+static int rtty_trace(const char* path, const char* expected, uint16_t shift, uint16_t baud)
+{
+    if (!expected || !*expected)
+    {
+        printf("a bit trace needs the text the take carries\n");
+        return 2;
+    }
+    char got[8192], raw[8192];
+    Bench_CharCount = 0;
+    if (decode_wav(path, expected, got, sizeof(got), shift, baud, true, raw, sizeof(raw)) < 0.0f)
+        return 1;
+    if (!raw[0])
+    {
+        printf("the decoder printed nothing to trace\n");
+        return 1;
+    }
+
+    // Raw on both sides, so a punctuation mark keeps its place. The rows below are the characters the
+    // decoder printed, in order; indexing the expected text through the normalised copy would compare
+    // every row after the first stripped stop against the wrong character, which is exactly what this
+    // column did before the trace was pointed at this take.
+    const char* exp = expected;
+    const char* dec = raw;
+    const size_t ne = strlen(exp), nd = strlen(dec);
+    const double bit_ms = 1000.0 / (double)baud;
+
+    int* match = malloc((ne + 1) * sizeof(int));
+    int* from = malloc((nd + 1) * sizeof(int));
+    if (!match || !from || align_chars(exp, dec, match) != 0)
+    {
+        free(match); free(from);
+        printf("out of memory aligning the decode\n");
+        return 1;
+    }
+    for (size_t j = 0; j <= nd; j++) from[j] = -1;
+    for (size_t i = 0; i < ne; i++) if (match[i] >= 0) from[match[i]] = (int)i;
+
+    // The decisions group themselves: every character starts a run at slot 1 and ends it at slot 7,
+    // so a run that stops early is a character the receiver abandoned at a stop bit. Each complete
+    // run is one character the decoder printed, which is what ties a row to its text.
+    printf("\n%-4s %-9s %-10s %-8s %-5s %8s %7s\n", "#", "at ms", "sent->read", "data bits",
+           "stop", "spacing", "dev ms");
+    // The transmitter opens every transmission with a letters shift, which the decoder consumes as a
+    // control and does not print. The groups that produced a printed character are therefore not the
+    // groups that were read, and the rows would all be shifted by one without this counter.
+    int groups = 0, printed = 0, abandoned = 0, diff_chars = 0, off_clock = 0;
+    for (int k = 0; k < Rtty_BenchTraceCount; )
+    {
+        if (Rtty_BenchTraceBits[k].slot != 1) { k++; continue; }
+        // A character is not always the same number of decisions. With the 1.5 stop bit setting the
+        // receiver jumps its slot counter from the first stop bit straight to the last, so it takes
+        // six decisions (five data and one stop) and never reads a seventh; with two stop bits it
+        // takes seven. The run of increasing slot numbers is what the decoder itself did, so that is
+        // what the group is.
+        int len = 1;
+        while (len < 8 && k + len < Rtty_BenchTraceCount
+               && Rtty_BenchTraceBits[k + len].slot == (uint8_t)(len + 1)) len++;
+        if (len < 6) { abandoned++; k++; continue; }
+        const rtty_bench_bit_t* g = &Rtty_BenchTraceBits[k];
+        unsigned code = 0;
+        int diff = 0;
+        char bits[8];
+        for (int s = 0; s < 5; s++) code |= (unsigned)(g[s].bit & 1) << s;
+        if (code == 27u || code == 31u)
+        {
+            // a shift is a character slot but not a character: the decoder consumes it and prints
+            // nothing, so it gets no row and does not consume an expected one
+            groups++;
+            k += len;
+            continue;
+        }
+        const int ci = printed;
+        const int ei = (size_t)ci < nd ? from[ci] : -1;
+        const unsigned sent = ei >= 0 ? Rtty_BenchTxCodeForAscii(exp[ei]) : 0;
+        if (ei >= 0)
+            for (int s = 0; s < 5; s++) if (((sent >> s) & 1) != (g[s].bit & 1)) diff |= 1 << s;
+        for (int s = 0; s < 5; s++)
+            bits[s] = (diff >> s) & 1 ? '*' : ((g[s].bit & 1) ? '1' : '0');
+        bits[5] = 0;
+        // The spacing of the decisions: one bit apart is a DPLL in step, and anything else is a
+        // relock at a start bit, which is what a phase slip looks like from outside the decoder.
+        double sp_mean = 0.0, dev_max = 0.0;
+        for (int s = 1; s < len; s++)
+        {
+            const double d = (double)(g[s].at - g[s - 1].at) / 12.0;
+            sp_mean += d / (double)(len - 1);
+            if (fabs(d - bit_ms) > dev_max) dev_max = fabs(d - bit_ms);
+        }
+        if (dev_max > 0.5) off_clock++;
+        if (diff) diff_chars++;
+        char sent_read[24];
+        if (ei >= 0) snprintf(sent_read, sizeof(sent_read), "%u->%u", sent, code);
+        else snprintf(sent_read, sizeof(sent_read), "?->%u", code);
+        printf("%-4d %-9.1f %-10s %-8s %c%c    %8.3f %7.3f%s\n", groups + 1,
+               (double)g[0].at / 12.0, sent_read, bits, (g[5].bit & 1) ? '1' : '0',
+               len > 6 ? ((g[6].bit & 1) ? '1' : ' ') : ' ', sp_mean, dev_max, diff ? "  *" : "");
+        printed++;
+        groups++;
+        k += len;
+    }
+    printf("\n%d character slots read, %d of them shift codes, %d abandoned at a stop bit, %d with a "
+           "data bit\nthat differs from what was sent\n", groups, groups - printed, abandoned,
+           diff_chars);
+    if (off_clock)
+        printf("%d of them had a decision spacing more than 0.5 ms off the bit: the DPLL relocked "
+               "inside\nthe character, so its clock and the audio's disagreed there\n", off_clock);
+    else
+        printf("every character was read with its decisions one bit apart (within 0.5 ms), so the\n"
+               "decoder's clock was in step: a * in the data bits is the slicer, not the clock\n");
+    free(match); free(from);
+    return 0;
+}
 /* ------------------------------------------------------------------ *
  *  self checks
  * ------------------------------------------------------------------ */
@@ -2182,9 +2424,25 @@ static int selftest(void)
         rtty_case_t c = { .label = "probe", .shift = 170, .snr_db = 100.0f, .max_cer = 5.0f };
         int eot = 0;
         char got[8192];
+        Rtty_BenchTraceStart();
         float cer = rtty_run(&c, "DE UHSDR BENCH TEST ONE", false, got, sizeof(got), &eot);
         check(cer == 0.0f, "clean RTTY loopback decodes with zero character errors");
         printf("     (lead-in junk before lock: %d characters)\n", lead_in_junk);
+        // the trace is what says which bit of a wrong character was wrong, so it has to see every
+        // decision the decoder takes: seven per character, the five data slots and two stops
+        int traced_groups = 0;
+        for (int k = 0; k + 5 < Rtty_BenchTraceCount; k++)
+        {
+            if (Rtty_BenchTraceBits[k].slot != 1) continue;
+            int len = 1;
+            while (len < 8 && k + len < Rtty_BenchTraceCount
+                   && Rtty_BenchTraceBits[k + len].slot == (uint8_t)(len + 1)) len++;
+            if (len >= 6) traced_groups++;
+        }
+        printf("     (bit trace: %d decisions, %d complete character groups)\n",
+               Rtty_BenchTraceCount, traced_groups);
+        check(traced_groups > 5,
+              "the bit trace records the decisions of every character the decoder assembles");
         check(strstr(got, "UHSDR") != NULL, "the call sign survives the loopback");
         check(eot == 1, "an EOT in the tx buffer asks the radio manager to leave TX");
     }
@@ -2260,7 +2518,7 @@ static int selftest(void)
             rec[k] = acc * 0.25f;
         }
         check(Bench_WavWrite("rtty_roundtrip.wav", rec, n, 12000), "the bench can write a 12 kHz RTTY recording");
-        float cer_file = decode_wav("rtty_roundtrip.wav", msg, got, sizeof(got), 170, 45);
+        float cer_file = decode_wav("rtty_roundtrip.wav", msg, got, sizeof(got), 170, 45, false, NULL, 0);
         check(cer_file == 0.0f, "a recorded WAV comes back through the file input with zero errors");
     }
     {
@@ -2556,7 +2814,7 @@ int main(int argc, char** argv)
         const char* expect = argc > 4 ? argv[4] : "";
         uint16_t baud = argc > 5 ? (uint16_t)atoi(argv[5]) : 45;
         printf("decoding with %u Hz shift, %u baud\n", (unsigned)shift, (unsigned)baud);
-        float cer = decode_wav(argv[2], expect, got, sizeof(got), shift, baud);
+        float cer = decode_wav(argv[2], expect, got, sizeof(got), shift, baud, false, NULL, 0);
         if (cer < 0.0f) return 0;
         printf("CER       : %.1f%% (after aligning the lead in)\n", cer);
         // the optional limit turns a recording into a graded case: a fixture whose text is pinned has
@@ -2576,9 +2834,28 @@ int main(int argc, char** argv)
         const uint16_t baud = argc > 5 ? (uint16_t)atoi(argv[5]) : 50;
         return align_wav(argv[2], argv[4], shift, baud);
     }
-    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax"
+    // the two characters this take gets wrong, with the audio under them: the record the README
+    // makes, kept by name so it cannot quietly change into a different pair
+    if (!strcmp(what, "align-check") && argc > 4)
+    {
+        const uint16_t shift = argc > 3 ? (uint16_t)atoi(argv[3]) : 450;
+        const uint16_t baud = argc > 5 ? (uint16_t)atoi(argv[5]) : 50;
+        return align_check(argv[2], argv[4], shift, baud);
+    }
+    // the demodulator's own bit decisions, one row per character: which bit differed from what was
+    // sent, and whether its clock was in step while it read it
+    if (!strcmp(what, "rtty-trace") && argc > 4)
+    {
+        const uint16_t shift = argc > 3 ? (uint16_t)atoi(argv[3]) : 450;
+        const uint16_t baud = argc > 5 ? (uint16_t)atoi(argv[5]) : 50;
+        return rtty_trace(argv[2], argv[4], shift, baud);
+    }
+    fprintf(stderr, "usage: digi_bench [test|rtty|rtty-long|rtty-shift|rtty-tune|wefax|navtex"
+                    "|rtty-multipath|tx-check|hell|mfsk16|olivia"
                     "|capture-check <file.wav> [shift] [45|50 baud]"
                     "|rtty-wav <file.wav> [shift] [expected text] [45|50 baud] [max CER %%]"
-                    "|rtty-align <file.wav> <shift> \"expected text\" [45|50 baud]]\n");
+                    "|rtty-align <file.wav> <shift> \"expected text\" [45|50 baud]"
+                    "|align-check <file.wav> <shift> \"expected text\" [45|50 baud]"
+                    "|rtty-trace <file.wav> <shift> \"expected text\" [45|50 baud]]\n");
     return 2;
 }
