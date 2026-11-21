@@ -25,13 +25,15 @@
 // WAV writer below are all checked into this tree.
 //
 // usage: node decode_oracle.js <stream-file> <out.wav> [--client <websdr-sound.js>]
-//        node decode_oracle.js --self-test   (a built conformant stream must walk clean, and 169
-//                                             frames of random bytes must be refused)
+//        node decode_oracle.js --self-test   (a built conformant stream must walk clean, and four
+//                                             streams built to break one rule each must be refused)
 //
-// --self-test needs no client, on purpose: both cases are decided by the framing walk, before the
-// decoder is loaded, so CI can grade it without the client file or a network.  The conformant case
-// is the one that catches a walk which has stopped accepting valid traffic - a refusal test alone
-// cannot tell a strict walk from one that rejects everything.
+// --self-test needs no client, on purpose: every case is decided by the framing walk and the checks
+// in front of the decoder, so CI can grade them without the client file or a network.  The
+// conformant case is the one that catches a walk which has stopped accepting valid traffic - a
+// refusal test alone cannot tell a strict walk from one that rejects everything - and the four
+// refusals pin the rules a later simplification could quietly loosen: random bytes, a silence run
+// over 2 s, a rate that changes mid-stream, and audio in a message before the rate element.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -283,7 +285,7 @@ function decodeStream(streamPath, outPath, clientPath) {
       ' ms) shared the rate message and are not in the file\n' : ''));
 }
 
-// ---- self-test: a conformant stream must pass, random bytes must be refused -------------------
+// ---- self-test: a conformant stream must walk, and four rules must still refuse ---------------
 
 // A packed block is not arbitrary bytes: it is 128 samples at width G = 4, each with a zero run
 // length and a zero mantissa, so the client spends one bit on the run and four on the mantissa per
@@ -308,19 +310,70 @@ function streamMessage(...parts) {
   return Buffer.concat([head, body]);
 }
 
+const rateElement = (rate) => [129, (rate >> 8) & 0xFF, rate & 0xFF];
+
+function block8() {
+  const b = Buffer.alloc(129);
+  b[0] = 128;
+  return b;
+}
+
 // A small stream the format accepts, written element by element: 7119 Hz, one 8-bit block, one
 // packed block from a 144..223 header, one from a sub-0x80 byte, and one silence marker - 512
 // samples, 3 messages.  The rate comes first and carries no audio, as the recorder needs.
 function conformantStream() {
-  const rate = 7119;
-  const block8 = Buffer.alloc(129);
-  block8[0] = 128;
   return Buffer.concat([
-    streamMessage([129, rate >> 8, rate & 0xFF], [130, 0, 0], [131, 1],
+    streamMessage(rateElement(7119), [130, 0, 0], [131, 1],
                   [133, 0, 0, 0, 0, 0, 0], [134], [135, 0, 0, 0, 0, 0, 0], [0xF0, 0x40]),
-    streamMessage(block8, packedBlock(4, 0xA8), packedBlock(1, 0x40)),
+    streamMessage(block8(), packedBlock(4, 0xA8), packedBlock(1, 0x40)),
     streamMessage([132]),
   ]);
+}
+
+// One stream per refusal, each built to trip exactly one rule and to be right everywhere else.  They
+// are run through the whole script rather than through readStream alone, which also pins that each
+// rule is decided before the WebSDR client is loaded: one that moved behind loadDecoder() would
+// refuse these for a missing client, and the reason each case demands below would not match.
+function silenceStream() {
+  // a marker is 128 zeros, so this is the first whole number of markers over the 2 s rule
+  const n = Math.floor(2 * 7119 / 128) + 1;
+  return Buffer.concat([streamMessage(rateElement(7119)), streamMessage(Array(n).fill(132))]);
+}
+
+function rateChangeStream() {
+  return Buffer.concat([
+    streamMessage(rateElement(7119)),
+    streamMessage(block8()),
+    streamMessage(rateElement(8000)),
+  ]);
+}
+
+function earlierAudioStream() {
+  return Buffer.concat([
+    streamMessage(block8(), block8(), block8()),    // 384 samples before any rate is known
+    streamMessage(rateElement(7119)),
+    streamMessage(block8()),
+  ]);
+}
+
+// Write one stream, run the script on it the way a capture is run, and require no WAV, a nonzero
+// exit, the oracle's own complaint and the reason that stream was built to hit.  A crash also exits
+// nonzero, so the exit status alone would not carry the weight.  No --client is passed: the point is
+// that these are refused before a client is looked for.
+function expectRefusal(dir, name, buf, why) {
+  const slug = name.replace(/[^a-z0-9]+/gi, '-');
+  const stream = path.join(dir, slug + '.stream');
+  const out = path.join(dir, slug + '.wav');
+  fs.writeFileSync(stream, buf);
+  const r = spawnSync(process.execPath, [__filename, stream, out], { encoding: 'utf8' });
+  if (fs.existsSync(out)) fail(name + ' left a WAV behind');
+  if (r.status === 0) fail(name + ' was accepted (exit 0)');
+  const said = (r.stderr || '').trim().split('\n')[0];
+  if (!/^oracle: FAIL /.test(said)) {
+    fail(name + ' was refused by something other than a format check: ' + said);
+  }
+  if (!why.test(said)) fail(name + ' was refused for the wrong reason: ' + said);
+  process.stdout.write('oracle:   ' + name + ' is refused: ' + said + '\n');
 }
 
 function selfTest() {
@@ -342,9 +395,12 @@ function selfTest() {
   if (walk.frames.length !== 3) {
     fail('the conformant self-test stream walked as ' + walk.frames.length + ' messages, not 3');
   }
+  process.stdout.write(
+    'oracle:   built stream walked: ' + walk.frames.length + ' messages, ' + walk.st.rate + ' Hz, ' +
+    walk.st.samples + ' samples (' + walk.st.blocks8 + ' 8-bit, ' + walk.st.blocks14 + ' packed, ' +
+    walk.st.silence + ' silence)\n');
 
-  const stream = path.join(dir, 'random.stream');
-  const out = path.join(dir, 'random.wav');
+  // the refusal the self-test has always made, on bytes that are not a message at all
   const buf = Buffer.alloc(169 * (4 + 905));
   let off = 0;
   for (let i = 0; i < 169; i++) {
@@ -352,25 +408,18 @@ function selfTest() {
     off += 4;
     for (let k = 0; k < 905; k++) buf[off++] = Math.floor(Math.random() * 256);
   }
-  fs.writeFileSync(stream, buf);
+  expectRefusal(dir, 'random bytes', buf, /^oracle: FAIL /);
 
-  const r = spawnSync(process.execPath, [__filename, stream, out], { encoding: 'utf8' });
-    const wrote = fs.existsSync(out);
+  // and one per rule that would otherwise only be checked by hand
+  expectRefusal(dir, 'the 2 s silence run', silenceStream(),
+                /goes silent for 2\.0\d s \(limit 2 s at 7119 Hz\)/);
+  expectRefusal(dir, 'the rate change', rateChangeStream(),
+                /sample rate changed mid-stream: 7119 -> 8000/);
+  expectRefusal(dir, 'the early audio', earlierAudioStream(),
+                /s of audio arrives in messages before the rate element/);
 
-
-
-  if (r.status === 0) fail('the self-test stream of random bytes was accepted (exit 0)');
-  if (wrote) fail('the self-test stream of random bytes produced a WAV');
-  // a crash also exits nonzero, so the refusal has to be the oracle's own, not a stack trace
-  const why = (r.stderr || '').trim().split('\n')[0];
-  if (!/^oracle: FAIL /.test(why)) {
-    fail('the random stream was refused by something other than a format check: ' + why);
-  }
-  process.stdout.write(
-    'oracle: self-test ok - conformant stream walked: ' + walk.frames.length + ' messages, ' +
-    walk.st.rate + ' Hz, ' + walk.st.samples + ' samples (' + walk.st.blocks8 + ' 8-bit, ' +
-    walk.st.blocks14 + ' packed, ' + walk.st.silence + ' silence)\n' +
-    '                    169 frames of random bytes refused: ' + why + '\n');
+  process.stdout.write('oracle: self-test ok - the built stream walks, and 4 streams were refused' +
+                       ' for the reason each was built to hit\n');
 }
 
 // ---- main ------------------------------------------------------------------------------------

@@ -17,7 +17,7 @@ make -C support/digi floors-2k5 # the MFSK16 and Olivia floors over a shaped 2.5
 make -C support/digi floors-2k5-check # the points this file quotes, measured again and checked
                           # (CI, about 15 s)
 make -C support/digi record-check # the four non RTTY modes reading a WAV with a long lead
-make -C support/digi oracle-check # the capture decoder: a built stream has to walk, random bytes be refused
+make -C support/digi oracle-check # the capture decoder: a built stream has to walk, four bad streams be refused
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi fixture-align  # per character: what the take sent, what the modem read, and the audio
 make -C support/digi rtty-trace    # the demodulator's own bit decisions, for the same take
@@ -575,16 +575,19 @@ rights reserved, and the permission it carries covers serving it unmodified from
 clients, not redistributing it, so the copy stays local and is ignored by git. Save the script your
 receiver's page loads, unmodified, and pass `--client`.
 
-The self test is two cases, and it takes both: a stream built in the file element by element -
-7119 Hz, one 8-bit block, one packed block from a `144..223` header, one from a sub-`0x80` byte,
+The self test is five cases, and it takes all of them: a stream built in the file element by element
+- 7119 Hz, one 8-bit block, one packed block from a `144..223` header, one from a sub-`0x80` byte,
 one silence marker, 512 samples in 3 messages - has to pass the framing walk with exactly those
-counts, and 169 frames of the size a real take arrives in, filled with random bytes, have to be
-rejected with a nonzero exit and no WAV. The refusal alone would pass a walk that rejected every
-stream, and the conformant one alone would pass a walk that accepted anything; the packed blocks are
-built to the format's own arithmetic (128 samples of width 4, one run bit and four mantissa bits
-each, 640 bits in all), so the walk has to land on the byte the builder wrote, not merely accept it.
-Neither case needs a client or a network, because both are decided before the decoder is loaded -
-which is why they are what CI runs.
+counts, and four streams, each built to break one rule and be right everywhere else, have to be
+refused with a nonzero exit, no WAV and the reason they were built to hit: 169 frames of the size a
+real take arrives in filled with random bytes, 112 silence markers (2.01 s, the first whole count
+over the 2 s rule at 7119 Hz), that same rate repeated as 8000 in a later message, and three audio
+blocks in a message before any rate element. The built stream alone would pass a walk that accepted
+anything; the refusals alone would pass a walk that rejected every stream, which is why the packed
+blocks are built to the format's own arithmetic (128 samples of width 4, one run bit and four
+mantissa bits each, 640 bits in all) so the walk has to land on the byte the builder wrote, not
+merely accept it. None of the five needs a client or a network, because all are decided before the
+decoder is loaded - which is why they are what CI runs.
 
 The DDH 8 capture quoted below was taken from NA5B. The station list, baud rates and shifts came
 from the DWD table on the Franks-Weather page,
