@@ -188,15 +188,17 @@ jobs:
         run: make -C support/digi record-check
 
       # The decoder that turns a captured .stream into a WAV is now in the tree, so the piece that
-      # decides whether a take is worth pinning is graded too: 169 frames of the size a real take
-      # arrives in, filled with random bytes, have to be refused with a nonzero exit and no WAV.
-      # The WebSDR client that script loads is not committed (its licence allows it only to be
-      # served by the receiver; see the licence note in support/digi/README.md), so this step
+      # decides whether a take is worth pinning is graded too: a stream built element by element in
+      # the script has to pass the framing walk with the counts it was built from, and 169 frames of
+      # the size a real take arrives in, filled with random bytes, have to be refused with a nonzero
+      # exit and no WAV. The refusal alone would pass a walk that rejected every stream, so both
+      # cases run. The WebSDR client that script loads is not committed (its licence allows it only
+      # to be served by the receiver; see the licence note in support/digi/README.md), so this step
       # grades the framing walk and the refusal, not the decode.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Check the capture decoder refuses random bytes
+      - name: Check the capture decoder walks a conformant stream and refuses random bytes
         working-directory: mchf-eclipse
         run: make -C support/digi oracle-check
