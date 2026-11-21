@@ -19,6 +19,7 @@
 #include "hellschreiber.h"
 #include "mfsk16.h"
 #include "navtex.h"
+#include "olivia.h"
 #include "rtty.h"
 #include "softdds.h"
 #include "audio_agc.h"
@@ -1261,6 +1262,110 @@ typedef struct
     float min_cer;
 } olivia_case_t;
 
+static int olivia_table(void)
+{
+    static const char* msg = "OLIVIA TEST DE UHSDR 12345";
+    const size_t len = strlen(msg);
+    static const olivia_case_t cases[] =
+    {
+        { .name = "clean", .snr_db = 100.0f, .max_cer = 0.0f },
+        { .name = "snr 20", .snr_db = 20.0f, .max_cer = 0.0f },
+        { .name = "snr 10", .snr_db = 10.0f, .max_cer = 0.0f },
+        { .name = "snr 10 qsb", .snr_db = 10.0f, .qsb_rate = 0.5f, .qsb_depth = 3.0f,
+          .max_cer = 100.0f },
+        { .name = "snr 0", .snr_db = 0.0f, .max_cer = 0.0f },
+        { .name = "snr -6", .snr_db = -6.0f, .max_cer = 100.0f },
+        { .name = "snr -12", .snr_db = -12.0f, .max_cer = 0.0f },
+        { .name = "snr -20", .snr_db = -20.0f, .max_cer = 0.0f },
+        { .name = "burst 2 symbols", .snr_db = 20.0f, .burst_symbols = 2, .max_cer = 5.0f },
+        { .name = "burst 8 symbols", .snr_db = 20.0f, .burst_symbols = 8, .max_cer = 100.0f,
+          .min_cer = 10.0f },
+        { .name = "tone +15 Hz", .snr_db = 20.0f, .tune_hz = 15.0f, .max_cer = 100.0f,
+          .min_cer = 30.0f },
+        { .name = "noise only", .snr_db = 0.0f, .no_signal = 1, .max_cer = 100.0f, .min_cer = 50.0f },
+    };
+    const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
+    int failures = 0;
+
+    printf("Olivia through the reference modem: 32 tones 31.25 Hz apart at 31.25 Bd, two tones a\n"
+           "symbol, seven bits a symbol, interleaved over 8 characters. Text is %zu characters.\n",
+           len);
+    printf("The pair table is this bench's (pair 3c+1 of the 496) and the stream carries its own\n"
+           "length, so the table measures the tone geometry and the redundancy, not the mode's own\n"
+           "tables.\n\n");
+    printf("%-16s %6s %8s %8s %8s %s\n", "case", "CER %", "err/len", "symbols", "pairs",
+           "decoded text");
+    for (size_t i = 0; i < n_cases; i++)
+    {
+        const olivia_case_t* c = &cases[i];
+        const size_t cap = 200000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        char got[512];
+        olivia_result_t res;
+        if (!x) { printf("out of memory\n"); return 1; }
+        const size_t n = Bench_OliviaGenerate(x, cap, msg, c->tune_hz);
+        if (c->no_signal)
+        {
+            memset(x, 0, n * sizeof(float32_t));
+        }
+        else if (!n) { free(x); printf("FAIL  %-16s nothing generated\n", c->name); failures++; continue; }
+        if (c->burst_symbols)
+        {
+            const size_t mid = (n / 2) & ~(size_t)63;
+            const size_t wide = (size_t)c->burst_symbols * 384;
+            for (size_t k = mid; k < mid + wide && k < n; k++) x[k] = 0.0f;
+        }
+        if (c->snr_db < 90.0f)
+        {
+            Bench_RngSeed(0x4F4C4956u);
+            Bench_AddNoise(x, n, c->snr_db, 0.0f);
+        }
+        Bench_AddQsb(x, n, c->qsb_rate, c->qsb_depth);
+
+        memset(&res, 0, sizeof(res));
+        const int ok = Bench_OliviaDecode(x, n, got, sizeof(got), &res);
+        int err = 0;
+        if (!ok) err = (int)len;
+        else
+        {
+            const size_t glen = strlen(got);
+            for (size_t k = 0; k < len; k++) if (k >= glen || got[k] != msg[k]) err++;
+            for (size_t k = len; k < glen; k++) err++;
+        }
+        const double cer = 100.0 * (double)err / (double)len;
+        printf("%-16s %6.1f %4d/%-3zu %8u %5.2f%% %s\n", c->name, cer, err, len, res.symbols,
+               res.symbols ? 100.0 * (double)res.pairs_ok / (double)res.symbols : 0.0,
+               ok ? got : "(no decode)");
+        if (!ok)
+        {
+            printf("FAIL  %-16s the receiver did not get through the stream\n", c->name);
+            failures++;
+        }
+        else if (cer > (double)c->max_cer + 1e-9)
+        {
+            printf("FAIL  %-16s %.1f %% of characters wrong, this case allows %.1f %%\n", c->name,
+                   cer, (double)c->max_cer);
+            failures++;
+        }
+        else if (cer < (double)c->min_cer - 1e-9)
+        {
+            printf("FAIL  %-16s %.1f %% of characters wrong, and this case has to stay above "
+                   "%.1f %%\n", c->name, cer, (double)c->min_cer);
+            failures++;
+        }
+        free(x);
+    }
+    printf("\n'pairs' is the share of symbols whose two strongest tones held more than half the energy\n"
+           "between them: a full symbol is a pair that was found. The noise only row is the one that\n"
+           "must never read as text, and the rows above it are the reason the mode is used where the\n"
+           "channel is bad rather than where it is good.\n");
+    if (!failures)
+    {
+        printf("\nall %zu cases inside their character error limits\n", n_cases);
+    }
+    return failures ? 1 : 0;
+}
+
 /* ------------------------------------------------------------------ *
  *  decoding a recorded file: the input path any real feed will use
  * ------------------------------------------------------------------ */
@@ -2350,6 +2455,28 @@ static int selftest(void)
               "mfsk16: one erased symbol - four bits, spread over eight - costs nothing");
         free(x);
     }
+    {
+        // Olivia: a character is a pair of tones, so the self check is that the pair comes back and
+        // that one symbol lost inside an interleaved block does not cost a character.
+        static const char* msg = "OLIVIA TEST";
+        const size_t cap = 100000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        char got[256];
+        olivia_result_t r;
+        const size_t n = Bench_OliviaGenerate(x, cap, msg, 0.0f);
+        check(n > 0 && Bench_OliviaDecode(x, n, got, sizeof(got), &r),
+              "olivia: a clean transmission decodes");
+        printf("     (%u symbols, header %d, %.1f %% of symbols with both tones up, text [%s])\n",
+               r.symbols, r.header, r.symbols ? 100.0 * (double)r.pairs_ok / r.symbols : 0.0, got);
+        check(strcmp(got, msg) == 0, "olivia: and the text comes back as sent");
+        memset(x + 8 * 384, 0, 384 * sizeof(float32_t));
+        const int ok1 = Bench_OliviaDecode(x, n, got, sizeof(got), &r);
+        printf("     (with symbol 8 erased: ok %d, header %d, %u symbols, text [%s])\n", ok1,
+               r.header, r.symbols, got);
+        check(ok1 && strcmp(got, msg) == 0,
+              "olivia: one symbol lost inside an interleaved block costs no character");
+        free(x);
+    }
     printf("%s\n", failures ? "SELF CHECKS FAILED" : "all self checks passed");
     return failures ? 1 : 0;
 }
@@ -2387,6 +2514,7 @@ int main(int argc, char** argv)
     if (!strcmp(what, "navtex")) return navtex_table();
     if (!strcmp(what, "hell")) return hell_table();
     if (!strcmp(what, "mfsk16")) return mfsk16_table();
+    if (!strcmp(what, "olivia")) return olivia_table();
     // the gate a take has to clear before it is worth decoding, let alone pinning: it measures the
     // file and never touches the modem, so it cannot be fooled by the modem agreeing with itself
     if (!strcmp(what, "capture-check") && argc > 2)

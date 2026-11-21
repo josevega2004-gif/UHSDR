@@ -10,6 +10,7 @@ make -C support/digi wefax    # synthetic HF weather fax through the reference d
 make -C support/digi navtex   # NAVTEX / SITOR-B through a reference modem: alphabet and repeat copy
 make -C support/digi hell     # Hellschreiber: on/off keyed raster, scored as a picture
 make -C support/digi mfsk16   # MFSK16: 16 tones, rate 1/2 code, interleaver over 8 symbols
+make -C support/digi olivia   # Olivia: 32 tones, two a symbol, interleaved over 8 characters
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi capture-check  # is a recording fit to be pinned: pair, bit clock, continuity
 make -C support/digi fixture-check  # do fixtures/MANIFEST.md's numbers still describe the wav
@@ -766,6 +767,60 @@ The noise-only row is the one that must never read as text. With nothing transmi
 still reports a length and fills it in, and the row pins that text at a character error rate of 100 %,
 so a receiver that began inventing spaces where the signal was silent would show up as a regression.
 
+## Olivia, `make -C support/digi olivia`
+
+Thirty-two tones 31.25 Hz apart - 1000 Hz of signal, which is what the `32/1000` in the mode's name
+counts - at 31.25 baud. The property that makes Olivia Olivia is that each symbol sends *two* of the
+thirty-two tones at once. A pair is one of 496 combinations and a character needs 128 of them, so the
+symbol carries seven bits with nearly four times the room it needs, and the spare room is spent on
+being heard wrong rather than on speed.
+
+As with MFSK16, which parts are the mode's:
+
+* **the mode's**: 32 tones at 31.25 Bd, two tones per symbol, seven bit characters, an interleaver
+  over a block of characters, and a receiver that decides a symbol by its two strongest tones.
+* **the bench's**: the mapping from a character to a tone pair is pair `3c+1` of the 496 rather than
+  the mode's own table, the interleaver block is eight characters rather than Olivia's much longer
+  one, and the stream again carries an eight bit length in its first two symbols.
+
+What the pair spacing buys is measured by the burst rows rather than by the noise rows. A character's
+pair is three pairs away from its neighbours', so a symbol read one pair out is still the right
+character; that is why the mode's noise rows stay clean far below where a single-tone mode would have
+stopped.
+
+Measured on the same 26 character message, same channel, same scoring as MFSK16:
+
+| case | CER % | err/len | symbols with both tones |
+|---|---|---|---|
+| clean | 0.0 | 0/26 | 100.0 |
+| 20 dB | 0.0 | 0/26 | 100.0 |
+| 10 dB | 0.0 | 0/26 | 100.0 |
+| 10 dB + 0.5 Hz / 3 dB QSB | 0.0 | 0/26 | 100.0 |
+| 0 dB | 0.0 | 0/26 | 100.0 |
+| -6 dB | 0.0 | 0/26 | 100.0 |
+| **-12 dB** | 0.0 | 0/26 | 100.0 |
+| **-20 dB** | 0.0 | 0/26 | 100.0 |
+| burst over 2 symbols (64 ms) | **3.8** | 1/26 | 96.9 |
+| burst over 8 symbols (256 ms) | **23.1** | 6/26 | 78.1 |
+| tuning error +15 Hz (half a tone spacing) | **61.5** | 16/26 | 68.8 |
+| noise only, nothing transmitted | **100.0** | 26/26 | 0.0 |
+
+The noise ladder has not found this receiver's floor: it decodes the message without a single error
+20 dB below the signal in the 12 kHz band, which is about 13 dB below it in a 2.5 kHz channel - the
+usual way to quote a mode's SNR. That is the pair geometry and the 31.25 Hz matched filter together,
+and it is reported as measured rather than as a claim: the rows say where this receiver has been
+tested, not where the mode stops.
+
+The burst rows are the interleaver's limit at eight characters: two symbols erased costs one
+character, eight symbols costs six, and the eight-symbol row is pinned from below. The tuning row is
+again the tone spacing, and it is worse than the pair count alone suggests: at half a spacing the
+pair splits across neighbours, 68.8 % of symbols still have both tones up, and yet 16 characters of
+26 come back wrong. The reason is the symbol phase: the fit is made on the first six symbols by the
+same pair metric the data is decided with, so a take whose pairs are already ambiguous can lock a
+fraction of a symbol out, and every symbol after it is decided across a boundary. That is why the row
+is pinned at 30 %: it is the receiver failing at something other than noise, and it has to keep
+failing there.
+
 ## Receiving a DWD teletype station on the radio
 
 Nothing needs adding to the firmware; the path exists and was traced end to end, because it is not
@@ -802,10 +857,10 @@ off, which is exactly the distortion the bench should be shown rather than hidin
 3. RTTY: chase the fast-fading failure with the numbers in front of us.
 4. Only then decide about FT8 RX, where the RAM question is per board rather than per mode.
 
-CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs seven steps - the
+CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs eleven steps - the
 filter design check (`support/digi/design_rtty_filters.py`), `make digi-bench` (the self checks),
 the RTTY shift, SNR and reference error character error rate matrix, that matrix again with the long
-message, the shift setting curve, the tuning error sweep, and the recorded DDK2 fixture
-(`make -C support/digi rtty-ddk2`). `make -C support/digi wefax` is a target of its own and is not
-one of the seven. `make digi-bench` is also available on its own; it is one of the seven, not the
-whole job.
+message, the shift setting curve, the tuning error sweep, the recorded DDK2 fixture
+(`make -C support/digi rtty-ddk2`), and the four reference modems: NAVTEX, Hellschreiber, MFSK16 and
+Olivia. `make -C support/digi wefax` is a target of its own and is not one of the eleven. `make
+digi-bench` is also available on its own; it is one of the eleven, not the whole job.

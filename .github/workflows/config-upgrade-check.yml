@@ -137,3 +137,6 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi mfsk16
 
+      - name: Run the Olivia reference modem
+        working-directory: mchf-eclipse
+        run: make -C support/digi olivia

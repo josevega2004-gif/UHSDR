@@ -19,7 +19,7 @@ AUDIO    = ../../drivers/audio
 LIBDIR   = $(AUDIO)
 SHIM     = shim
 
-BENCH_OBJS = digi_bench.o modem_host.o wefax.o navtex.o hellschreiber.o mfsk16.o \
+BENCH_OBJS = digi_bench.o modem_host.o wefax.o navtex.o hellschreiber.o mfsk16.o olivia.o \
              softdds_host.o
 FW_OBJS    = rtty.o audio_agc.o uhsdr_math.o
 
@@ -75,6 +75,10 @@ hell: digi_bench
 # MFSK16: 16 tones at 15.625 Bd with the rate 1/2 code and the interleaver in the loop
 mfsk16: digi_bench
 	@./digi_bench mfsk16
+
+# Olivia: 32 tones at 31.25 Bd, two tones a symbol, interleaved over 8 characters
+olivia: digi_bench
+	@./digi_bench olivia
 
 rtty-shift: digi_bench
 	@./digi_bench rtty-shift
