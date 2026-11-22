@@ -1467,30 +1467,36 @@ putting one complex tone through each path at the 2.7 kHz / 12 kHz filter path:
 So the answer to "might it be better" is yes on both selectivity and cost per sample, at the price of
 about 2 ms and 62 KiB of RAM.
 
-The geometry is a build choice, and all three settings below were measured with this same harness (the
-latency and the RAM are its numbers, and the separation is at +-1350 Hz):
+The geometry is a build choice, and all three settings below were measured with this same harness:
 
 ```
 make -C support/digi convolution-check EXTRA_DEFS='-DFFT_CONVOLUTION_SIZE=64 -DCONVOLUTION_MAX_NO_OF_COEFFS=512'
 ```
 
-All three were measured with the same harness, on the same signals; the ripple and the skirt come from
-sweeping 216 whole-cycle offsets across the side of zero the filter passes, and the last two columns are
-from the linked image rather than from `sizeof`:
+All three were measured with the same harness, on the same signals. The ripple, the skirt and both
+rejection columns come from sweeping 216 whole-cycle offsets through each path twice, once on each side
+of zero, so the passband curve and the image curve are the same measurement asked of the two halves of
+the spectrum; the last two columns are from the linked image rather than from `sizeof`:
 
-| `-DFFT_CONVOLUTION_SIZE` | block | taps | latency at 12 kHz | in-band ripple | skirt, -6 to -60 dB | sideband sep | ops / sample | `.bss` cost | stack left |
+| `-DFFT_CONVOLUTION_SIZE` | block | taps | latency at 12 kHz | in-band ripple | skirt, -6 to -60 dB | image, worst in band | ops / sample | `.bss` cost | stack left |
 |---|---|---|---|---|---|---|---|---|---|
-| 256 (as committed) | 128 | 1024 | 10.0 ms | **0.06 dB** | **34 Hz** | 144 dB | 372 | 63,416 B | 32,800 B |
-| 128 | 64 | 512 | 4.7 ms | 1.13 dB | 71 Hz | 143 dB | 331 | 35,768 B | 60,448 B |
-| 64 | 32 | 256 | **2.0 ms** | 2.88 dB | 144 Hz | 155 dB | **295** | **21,944 B** | **74,272 B** |
-| none: the Hilbert pair in use | - | 199 x 2 | 8.25 ms | (shaped later, see below) | 127 Hz, at 3.5 kHz | 88 dB | 786 | 0 | 96,408 B |
+| 256 (as committed) | 128 | 1024 | 10.0 ms | **0.06 dB** | **34 Hz** | -129.5 dB | 372 | 63,416 B | 32,800 B |
+| 128 | 64 | 512 | 4.7 ms | 1.13 dB | 71 Hz | -133.1 dB | 331 | 35,768 B | 60,448 B |
+| 64 | 32 | 256 | **2.0 ms** | 2.88 dB | 144 Hz | -121.3 dB | **295** | **21,944 B** | **74,272 B** |
+| none: the Hilbert pair in use | - | 199 x 2 | 8.25 ms | (shaped later, see below) | 127 Hz, at 3.5 kHz | **-75.8 dB** | 786 | 0 | 96,408 B |
 
 This is the trade, and it is a real one rather than a free lunch: fewer taps buys latency and RAM with
 passband quality. 1024 taps holds the audio band to 0.06 dB and gets from -6 dB to -60 dB in 34 Hz; 256
 taps gets the same job done in 144 Hz of skirt and wanders 2.9 dB across the band, which is a colour you
-would hear on a signal with a lot of high-frequency content in it. The sideband rejection column does
-not behave monotonically, and should not be read as a ranking: all three are past -140 dB, which is the
-float32 floor of the measurement itself, while the present path's 88 dB is a genuine figure.
+would hear on a signal with a lot of high-frequency content in it.
+
+The image column is the reason the option exists: a tone on the *rejected* side of the carrier, at any
+offset inside the audio band, comes out some 45 to 57 dB lower than it does from the path in use today.
+That is what a Hilbert pair made of two 199-tap real FIRs costs - its quadrature error is largest at the
+ends of the band, which is exactly where a digimode or a badly centred voice sits. The three convolution
+figures (-121, -129, -133 dB) should not be ranked against each other: all of them are at or past the
+float32 floor of the measurement, which the harness reports as around -140 dB, while -75.8 dB for the
+path in use is a genuine number.
 
 The Hilbert row's corner at 3.5 kHz is not sloppiness on the radio's part - its IQ filter is deliberately
 wider than the audio band and the post-demod filters finish the shape afterwards, so the two rows are not

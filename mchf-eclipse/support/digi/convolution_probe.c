@@ -584,46 +584,92 @@ static void seam_mode_table(void)
 // version's mistake.
 #define SWEEP_MAX 512
 
-static int measure_sweep(double* fo, double* yc, double* yh)
+// Both sides of zero, on the same design: the side it is meant to pass and the side it is meant to
+// throw away.  The second one is the number an operator feels as the station next door, and it is where
+// the two RX paths differ by fifty decibels rather than by a decibel of ripple.
+struct Sweep
 {
-    const double step_hz = (double) RATE / ANALYSIS * 10.0;      // ten cycles a window: exact bins
-    const int steps = (int) (2.0 * BW / step_hz);
+    double hz[SWEEP_MAX];
+    double conv_pass[SWEEP_MAX];
+    double hilb_pass[SWEEP_MAX];
+    double conv_image[SWEEP_MAX];
+    double hilb_image[SWEEP_MAX];
+    int n;
+};
 
-    for (int k = 0; k < steps && k < SWEEP_MAX; k++)
+static double one_tone_conv(double f)
+{
+    double re[STREAM], im[STREAM], y[STREAM];
+    unsigned long ops;
+    for (int n = 0; n < STREAM; n++)
     {
-        const double f = -step_hz * (k + 1);                      // the side of zero this design passes
-        double re[STREAM], im[STREAM], out[STREAM];
-        unsigned long ops;
-        for (int n = 0; n < STREAM; n++)
-        {
-            const double a = 2.0 * M_PI * f * n / RATE;
-            re[n] = cos(a);
-            im[n] = sin(a);
-        }
-        conv_path_reset(RATE, BW / 10.0f, BW);
-        conv_path_run(re, im, STREAM, out, &ops, SLICE_DECIM);
-        fo[k] = fabs(f);
-        yc[k] = tone_amplitude(out + SETTLE, ANALYSIS, fabs(f), RATE);
-        hilbert_path_run(re, im, STREAM, out, 1, &ops);
-        yh[k] = tone_amplitude(out + SETTLE, ANALYSIS, fabs(f), RATE);
+        const double a = 2.0 * M_PI * f * n / RATE;
+        re[n] = cos(a);
+        im[n] = sin(a);
     }
-
-    double mc = 0.0, mh = 0.0;
-    for (int k = 0; k < steps && k < SWEEP_MAX; k++)
-    {
-        if (yc[k] > mc) mc = yc[k];
-        if (yh[k] > mh) mh = yh[k];
-    }
-    for (int k = 0; k < steps && k < SWEEP_MAX; k++)
-    {
-        yc[k] = 20.0 * log10(yc[k] / mc + 1e-300);
-        yh[k] = 20.0 * log10(yh[k] / mh + 1e-300);
-    }
-    return steps < SWEEP_MAX ? steps : SWEEP_MAX;
+    conv_path_run(re, im, STREAM, y, &ops, SLICE_DECIM);
+    return tone_amplitude(y + SETTLE, ANALYSIS, fabs(f), RATE);
 }
 
-// Where a sweep crosses a level, by linear interpolation between the two rows either side of it, and
-// looking only above `from` because below that the passband's own edges are the thing being measured.
+static double one_tone_hilb(double f, int usb)
+{
+    double re[STREAM], im[STREAM], y[STREAM];
+    unsigned long ops;
+    for (int n = 0; n < STREAM; n++)
+    {
+        const double a = 2.0 * M_PI * f * n / RATE;
+        re[n] = cos(a);
+        im[n] = sin(a);
+    }
+    hilbert_path_run(re, im, STREAM, y, usb, &ops);
+    return tone_amplitude(y + SETTLE, ANALYSIS, fabs(f), RATE);
+}
+
+static void measure_sweep(struct Sweep* w)
+{
+    const double step_hz = (double) RATE / ANALYSIS * 10.0;      // ten cycles a window: exact bins
+    int n = (int) (2.0 * BW / step_hz);
+    if (n > SWEEP_MAX)
+    {
+        n = SWEEP_MAX;
+    }
+
+    // tone_amplitude() answers in linear amplitude, and what an operator compares is shape, so every
+    // row is divided by the loudest row of its own path afterwards.  Doing that in one pass would
+    // label linear numbers as decibels, which is not distinguishable by eye in a table and was the
+    // first version's mistake.
+    conv_path_reset(RATE, BW / 10.0f, BW);
+    double mc = 0.0, mh = 0.0;
+    for (int k = 0; k < n; k++)
+    {
+        w->hz[k] = step_hz * (k + 1);
+        w->conv_pass[k] = one_tone_conv(-w->hz[k]);                 // the side this design passes
+        w->hilb_pass[k] = one_tone_hilb(-w->hz[k], 1);
+    }
+    for (int k = 0; k < n; k++)
+    {
+        // the image side, at the same distance from zero: for a filter whose job is sideband selection
+        // this is the same question asked of the other half of the spectrum
+        w->conv_image[k] = one_tone_conv(w->hz[k]);
+        w->hilb_image[k] = one_tone_hilb(w->hz[k], 1);
+    }
+    for (int k = 0; k < n; k++)
+    {
+        if (w->conv_pass[k] > mc) mc = w->conv_pass[k];
+        if (w->hilb_pass[k] > mh) mh = w->hilb_pass[k];
+    }
+    for (int k = 0; k < n; k++)
+    {
+        w->conv_pass[k]  = 20.0 * log10(w->conv_pass[k] / mc + 1e-300);
+        w->hilb_pass[k]  = 20.0 * log10(w->hilb_pass[k] / mh + 1e-300);
+        w->conv_image[k] = 20.0 * log10(w->conv_image[k] / mc + 1e-300);
+        w->hilb_image[k] = 20.0 * log10(w->hilb_image[k] / mh + 1e-300);
+    }
+    w->n = n;
+}
+
+// Where a sweep crosses a level, interpolating between the two rows either side of it, looking only at
+// or above `from` because below that the passband's own edges are the thing being measured.
 static double crossing(const double* fo, const double* yv, int n, double level, int from)
 {
     for (int k = 1; k < n; k++)
@@ -643,8 +689,12 @@ static double crossing(const double* fo, const double* yv, int n, double level, 
 
 static void response_shape(void)
 {
-    static double fo[SWEEP_MAX], yc[SWEEP_MAX], yh[SWEEP_MAX];
-    const int n = measure_sweep(fo, yc, yh);
+    static struct Sweep w;
+    measure_sweep(&w);
+    const int n = w.n;
+    const double* fo = w.hz;
+    const double* yc = w.conv_pass;
+    const double* yh = w.hilb_pass;
 
     double hi = -1e30, lo = 1e30;
     for (int k = 0; k < n; k++)
@@ -680,17 +730,35 @@ static void response_shape(void)
                "      means both a wider skirt and more ripple here, which is the trade the geometry makes)\n");
     }
     check("the passband stays within 3 dB across the audio band", hi - lo < 3.0, "see the ripple above");
+
+    // What the same sweep says about the other side of zero, which is the reason the option exists.
+    double wi = 1e30, hi_img = -1e30, whi = 1e30, hhi = -1e30;
+    for (int k = 0; k < n; k++)
+    {
+        if (fo[k] >= 300.0 && fo[k] <= 2400.0)
+        {
+            if (w.conv_image[k] < wi) wi = w.conv_image[k];
+            if (w.conv_image[k] > hi_img) hi_img = w.conv_image[k];
+            if (w.hilb_image[k] < whi) whi = w.hilb_image[k];
+            if (w.hilb_image[k] > hhi) hhi = w.hilb_image[k];
+        }
+    }
+    printf("     the other side of zero, 300 to 2400 Hz (the sideband an SSB receiver must throw away):\n"
+           "       this filter: worst case %6.1f dB    the path in use today: worst case %6.1f dB\n",
+           hi_img, hhi);
 }
 
 static void response_csv(void)
 {
-    static double fo[SWEEP_MAX], yc[SWEEP_MAX], yh[SWEEP_MAX];
-    const int n = measure_sweep(fo, yc, yh);
-    printf("# offset_hz,convolution_db,hilbert_db  (geometry: block %d samples, %d taps, %.0f Hz; both paths normalised to their own loudest row)\n",
+    static struct Sweep w;
+    measure_sweep(&w);
+    printf("# offset_hz,conv_pass_db,conv_image_db,hilbert_pass_db,hilbert_image_db"
+           "  (geometry: block %d samples, %d taps, %.0f Hz; each path normalised to its own loudest passband row)\n",
            FFT_CONVOLUTION_SIZE / 2, CONVOLUTION_MAX_NO_OF_BLOCKS * (FFT_CONVOLUTION_SIZE / 2), (double) RATE);
-    for (int k = 0; k < n; k++)
+    for (int k = 0; k < w.n; k++)
     {
-        printf("%.1f,%.2f,%.2f\n", fo[k], yc[k], yh[k]);
+        printf("%.1f,%.2f,%.2f,%.2f,%.2f\n", w.hz[k], w.conv_pass[k], w.conv_image[k],
+               w.hilb_pass[k], w.hilb_image[k]);
     }
 }
 
