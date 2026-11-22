@@ -269,7 +269,13 @@ CONV_INC    = -I$(SHIM) -I$(LIBDIR) -I$(LIBDIR)/filters -I../../hardware -I../..
 convolution_probe: convolution_probe.o convolution_fft.o iq_rx_filter.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
-convolution_probe.o: convolution_probe.c $(LIBDIR)/audio_convolution.c $(LIBDIR)/audio_convolution.h $(CONV_STAMP)
+# Everything the probe compiles in as text or includes, spelled out: it evaluates CONVOLUTION_USED_FOR,
+# which lives in audio_driver.h, and the mode values behind it, so a header change that is not listed
+# here leaves the probe checking a stale object.  A mutation of that macro sat unnoticed behind exactly
+# this omission until the dependency was written down.
+convolution_probe.o: convolution_probe.c $(LIBDIR)/audio_convolution.c $(LIBDIR)/audio_convolution.h \
+        $(LIBDIR)/audio_driver.h $(LIBDIR)/filters/filters.h ../../hardware/uhsdr_demod_modes.h \
+        $(SHIM)/uhsdr_board.h $(SHIM)/arm_math.h $(SHIM)/arm_const_structs.h $(CONV_STAMP)
 	$(CC) $(CFLAGS) $(DEFINES) $(CONV_DEFS) $(CONV_INC) -c -o $@ convolution_probe.c
 
 convolution_fft.o: convolution_fft.c $(SHIM)/arm_const_structs.h

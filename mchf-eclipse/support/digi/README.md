@@ -1474,17 +1474,31 @@ latency and the RAM are its numbers, and the separation is at +-1350 Hz):
 make -C support/digi convolution-check EXTRA_DEFS='-DFFT_CONVOLUTION_SIZE=64 -DCONVOLUTION_MAX_NO_OF_COEFFS=512'
 ```
 
-| `-DFFT_CONVOLUTION_SIZE` | block | taps | latency at 12 kHz | separation | ops / sample | module RAM |
-|---|---|---|---|---|---|---|
-| 256 (as committed) | 128 | 1024 | 10.0 ms | 144 dB | 372 | 62.0 KiB |
-| 128 | 64 | 512 | 4.7 ms | 143 dB | 331 | 35.0 KiB |
-| 64 | 32 | 256 | 2.0 ms | 155 dB | 295 | 21.5 KiB |
+All three were measured with the same harness, on the same signals; the ripple and the skirt come from
+sweeping 216 whole-cycle offsets across the side of zero the filter passes, and the last two columns are
+from the linked image rather than from `sizeof`:
 
-The last row is the one to listen to first. A shorter response is not the loss it would be in a
-narrow-band design: the transition width at 256 taps and 12 kHz is about 47 Hz, which is already far
-finer than the 199-tap Hilbert pair's, and everything the table can measure is past what float32 shows.
-`make build-config-check` and the probe both run the committed geometry; the `EXTRA_DEFS` above is what
-the harness was made to accept, and it refuses to reuse an object file compiled with a different one. Read the -140 dB figures with care: the harness computes in float32, so
+| `-DFFT_CONVOLUTION_SIZE` | block | taps | latency at 12 kHz | in-band ripple | skirt, -6 to -60 dB | sideband sep | ops / sample | `.bss` cost | stack left |
+|---|---|---|---|---|---|---|---|---|---|
+| 256 (as committed) | 128 | 1024 | 10.0 ms | **0.06 dB** | **34 Hz** | 144 dB | 372 | 63,416 B | 32,800 B |
+| 128 | 64 | 512 | 4.7 ms | 1.13 dB | 71 Hz | 143 dB | 331 | 35,768 B | 60,448 B |
+| 64 | 32 | 256 | **2.0 ms** | 2.88 dB | 144 Hz | 155 dB | **295** | **21,944 B** | **74,272 B** |
+| none: the Hilbert pair in use | - | 199 x 2 | 8.25 ms | (shaped later, see below) | 127 Hz, at 3.5 kHz | 88 dB | 786 | 0 | 96,408 B |
+
+This is the trade, and it is a real one rather than a free lunch: fewer taps buys latency and RAM with
+passband quality. 1024 taps holds the audio band to 0.06 dB and gets from -6 dB to -60 dB in 34 Hz; 256
+taps gets the same job done in 144 Hz of skirt and wanders 2.9 dB across the band, which is a colour you
+would hear on a signal with a lot of high-frequency content in it. The sideband rejection column does
+not behave monotonically, and should not be read as a ranking: all three are past -140 dB, which is the
+float32 floor of the measurement itself, while the present path's 88 dB is a genuine figure.
+
+The Hilbert row's corner at 3.5 kHz is not sloppiness on the radio's part - its IQ filter is deliberately
+wider than the audio band and the post-demod filters finish the shape afterwards, so the two rows are not
+cut from the same cloth, and the harness prints the comparison instead of scoring it.
+
+`make build-config-check` and the probe both run the committed geometry. The `EXTRA_DEFS` line above is
+what the harness was made to accept, and it keeps a stamp of the flags it was built with so that a
+measurement cannot come from an object compiled against a different one. Read the -140 dB figures with care: the harness computes in float32, so
 past roughly -140 dB you are seeing the arithmetic, not a bench measurement of a filter. The 88 dB
 versus 144 dB gap is real.
 
@@ -1510,8 +1524,18 @@ What would have to happen before this could be switched on:
   filters use. The AGC, the notch, the post-demod filters and the audio output all still run on the
   maintained side and receive samples that much later, which affects sidetone and any changeover.
   That needs a radio, not a harness.
-* digimodes, AM, SAM and FM are deliberately untouched: `CONVOLUTION_USED_FOR()` names SSB and CW
-  only. The mode table this file documents would still have to be run against it on real audio.
+* which modes are replaced has to be, and was, got wrong. `CONVOLUTION_USED_FOR()` is now a positive
+  list - `DEMOD_USB`, `DEMOD_LSB`, `DEMOD_CW` - because written as an exclusion list (not AM, not SAM,
+  not FM, not the two-channel modes) it also matched `DEMOD_DIGI`, the mode that carries RTTY and BPSK,
+  whose demodulators in `rtty.c` and `psk.c` are fed from the audio this filter replaces. The 2018 branch
+  knew: the worker's own last line is "TODO: deal with Digimodes and FM". Section 6 of the probe checks
+  the table mode by mode now, which caught the exclusion-list version as soon as it was put back.
+* what the radio does have for digital modes, since it is easy to think otherwise: RTTY and BPSK
+  (`DEMOD_DIGI`, `USE_RTTY_PROCESSOR` is on in the shipping configuration) and the CW decoder. The FT8
+  library under `drivers/digi/ft8_lib` is not compiled into the image - nothing outside that directory
+  includes it, and the only `ft8` symbols in a linked firmware belong to the FT817 CAT protocol - and
+  NAVTEX, Hellschreiber, MFSK16, Olivia and weather fax exist here only as reference modems that run on
+  a host, which is what this directory is for.
 * `nfor` is clamped to the arrays instead of asserted, so a wider response than 8 partitions x 128
   samples silently gets fewer taps.
 
@@ -1544,6 +1568,7 @@ has to agree with the stream it came from (`oracle-check`, which needs no WebSDR
 run on the pinned take and on the fixture that take is quoted from (`capture-check` and
 `fixture-check`), the shaped 2.5 kHz floors against the readings this file documents
 (`floors-2k5-check`), and the convolution RX filter against the SSB stage in use
-(`convolution-check`). `make -C support/digi wefax` and `floors-2k5` are targets of their own and
+(`convolution-check`, which measures the filter, checks the mode table and sweeps the passband).
+`make -C support/digi wefax` and `floors-2k5` are targets of their own and
 are not among the twenty. `make digi-bench` is also available on its own; it is
 one of the twenty, not the whole job.

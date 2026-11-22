@@ -528,8 +528,180 @@ static void implemented_filter_is_the_designed_one(void)
            "     is listening, and nobody has listened yet.\n");
 }
 
-int main(void)
+// The seam in AudioDriver_RxProcessor() replaces the maintained SSB stage for whatever
+// CONVOLUTION_USED_FOR() names, and the only measurement of what that covers is this: a mode that is
+// on the list without being measured here is a mode whose receive path has been changed on the air by
+// accident.  DEMOD_DIGI is the one that was, until it was not - it is neither AM, SAM nor FM, and it is
+// not one of the two-channel modes, so an exclusion list let it through and its RTTY and BPSK
+// demodulators were being fed from behind the convolution filter.
+static void seam_mode_table(void)
 {
+    printf("\n6. which modes this build hands to the convolution filter\n");
+
+    const uint16_t wanted[]   = { DEMOD_USB, DEMOD_LSB, DEMOD_CW };
+    const uint16_t unwanted[] = { DEMOD_AM, DEMOD_SAM, DEMOD_FM, DEMOD_DIGI,
+#ifdef USE_TWO_CHANNEL_AUDIO
+                                  DEMOD_SSBSTEREO, DEMOD_IQ,
+#endif
+                                  0xFFFF };
+    const char* const wanted_names[]   = { "USB", "LSB", "CW" };
+    const char* const unwanted_names[] = { "AM", "SAM", "FM", "DIGI (RTTY/BPSK)", "SSBSTEREO", "IQ", 0 };
+
+    char detail[200];
+    const char* bad = 0;
+    for (unsigned k = 0; k < sizeof wanted / sizeof wanted[0] && !bad; k++)
+    {
+        if (!CONVOLUTION_USED_FOR(wanted[k]))
+        {
+            snprintf(detail, sizeof(detail), "%s is not being replaced, but everything above measured it as if it were", wanted_names[k]);
+            bad = detail;
+        }
+    }
+    for (unsigned k = 0; unwanted[k] != 0xFFFF && !bad; k++)
+    {
+        if (CONVOLUTION_USED_FOR(unwanted[k]))
+        {
+            snprintf(detail, sizeof(detail), "%s is being replaced, and nothing here has measured that path", unwanted_names[k]);
+            bad = detail;
+        }
+    }
+    check("only the modes measured here are the modes replaced", !bad,
+          bad ? bad : "in: USB, LSB, CW; out: AM, SAM, FM and DIGI, which is where RTTY and BPSK live");
+}
+
+// ---------------------------------------------------------------- the response of each geometry, as numbers
+//
+// Section 3 samples eight spot offsets, which is enough to compare two paths but not enough to see a
+// filter's shape.  `--csv` prints the whole thing - one row per frequency on the side of zero each path
+// actually passes, at the finest spacing the analysis window resolves exactly - so the geometries can be
+// plotted against each other and against the Hilbert pair.  Nothing else changes: it is the same
+// conv_path_run() through the same queues and the same worker.
+// Sweep the passed side of zero, once per path, in whole cycles of the analysis window.  Fills the
+// three arrays (offset in Hz, convolution dB, Hilbert dB, each path normalised to its own loudest row)
+// and returns the number of rows.  tone_amplitude() answers in linear amplitude, so the division by the
+// row maximum has to happen after the sweep: a single pass printing straight through would label
+// linear numbers as decibels, which is not distinguishable by eye in a table and was the first
+// version's mistake.
+#define SWEEP_MAX 512
+
+static int measure_sweep(double* fo, double* yc, double* yh)
+{
+    const double step_hz = (double) RATE / ANALYSIS * 10.0;      // ten cycles a window: exact bins
+    const int steps = (int) (2.0 * BW / step_hz);
+
+    for (int k = 0; k < steps && k < SWEEP_MAX; k++)
+    {
+        const double f = -step_hz * (k + 1);                      // the side of zero this design passes
+        double re[STREAM], im[STREAM], out[STREAM];
+        unsigned long ops;
+        for (int n = 0; n < STREAM; n++)
+        {
+            const double a = 2.0 * M_PI * f * n / RATE;
+            re[n] = cos(a);
+            im[n] = sin(a);
+        }
+        conv_path_reset(RATE, BW / 10.0f, BW);
+        conv_path_run(re, im, STREAM, out, &ops, SLICE_DECIM);
+        fo[k] = fabs(f);
+        yc[k] = tone_amplitude(out + SETTLE, ANALYSIS, fabs(f), RATE);
+        hilbert_path_run(re, im, STREAM, out, 1, &ops);
+        yh[k] = tone_amplitude(out + SETTLE, ANALYSIS, fabs(f), RATE);
+    }
+
+    double mc = 0.0, mh = 0.0;
+    for (int k = 0; k < steps && k < SWEEP_MAX; k++)
+    {
+        if (yc[k] > mc) mc = yc[k];
+        if (yh[k] > mh) mh = yh[k];
+    }
+    for (int k = 0; k < steps && k < SWEEP_MAX; k++)
+    {
+        yc[k] = 20.0 * log10(yc[k] / mc + 1e-300);
+        yh[k] = 20.0 * log10(yh[k] / mh + 1e-300);
+    }
+    return steps < SWEEP_MAX ? steps : SWEEP_MAX;
+}
+
+// Where a sweep crosses a level, by linear interpolation between the two rows either side of it, and
+// looking only above `from` because below that the passband's own edges are the thing being measured.
+static double crossing(const double* fo, const double* yv, int n, double level, int from)
+{
+    for (int k = 1; k < n; k++)
+    {
+        if (fo[k] < from)
+        {
+            continue;
+        }
+        if (yv[k - 1] > level && yv[k] <= level)
+        {
+            const double t = (yv[k - 1] - level) / (yv[k - 1] - yv[k]);
+            return fo[k - 1] + t * (fo[k] - fo[k - 1]);
+        }
+    }
+    return 0.0;
+}
+
+static void response_shape(void)
+{
+    static double fo[SWEEP_MAX], yc[SWEEP_MAX], yh[SWEEP_MAX];
+    const int n = measure_sweep(fo, yc, yh);
+
+    double hi = -1e30, lo = 1e30;
+    for (int k = 0; k < n; k++)
+    {
+        if (fo[k] >= 300.0 && fo[k] <= 2400.0)
+        {
+            if (yc[k] > hi) hi = yc[k];
+            if (yc[k] < lo) lo = yc[k];
+        }
+    }
+
+    // The corner that matters is the one the operator tunes towards: the passband is designed to stop
+    // at the filter width, and how fast it gets to -60 dB past that is what an adjacent signal has to
+    // come through.  The Hilbert column is measured on the same signal and the same window, and its
+    // corner sits higher because the IQ filter is deliberately wider than the audio band and the
+    // post-demod filters finish the shape afterwards - which is a real difference between the two
+    // arrangements, not an artefact, and the reason the comparison is printed rather than scored.
+    const double c6 = crossing(fo, yc, n, -6.0, 1500);
+    const double c60 = crossing(fo, yc, n, -60.0, 1500);
+    const double h6 = crossing(fo, yh, n, -6.0, 1500);
+    const double h60 = crossing(fo, yh, n, -60.0, 1500);
+
+    printf("\n7. the shape of the passband, from %d offsets on the side it passes\n", n);
+    printf("     in band (300 to 2400 Hz): ripple %.2f dB\n", hi - lo);
+    printf("     past the edge:   -6 dB at %6.0f Hz    -60 dB at %6.0f Hz    that is %.0f Hz of skirt\n",
+           c6, c60, c60 - c6);
+    printf("     the path in use: -6 dB at %6.0f Hz    -60 dB at %6.0f Hz    that is %.0f Hz of skirt\n",
+           h6, h60, h60 > 0 ? h60 - h6 : 0.0);
+    if (h60 > 0.0 && c60 > 0.0)
+    {
+        printf("     (the maintained path's corner is above the filter width on purpose: its IQ filter is\n"
+               "      wider than the audio band and the post-demod filters finish the shape.  Fewer taps\n"
+               "      means both a wider skirt and more ripple here, which is the trade the geometry makes)\n");
+    }
+    check("the passband stays within 3 dB across the audio band", hi - lo < 3.0, "see the ripple above");
+}
+
+static void response_csv(void)
+{
+    static double fo[SWEEP_MAX], yc[SWEEP_MAX], yh[SWEEP_MAX];
+    const int n = measure_sweep(fo, yc, yh);
+    printf("# offset_hz,convolution_db,hilbert_db  (geometry: block %d samples, %d taps, %.0f Hz; both paths normalised to their own loudest row)\n",
+           FFT_CONVOLUTION_SIZE / 2, CONVOLUTION_MAX_NO_OF_BLOCKS * (FFT_CONVOLUTION_SIZE / 2), (double) RATE);
+    for (int k = 0; k < n; k++)
+    {
+        printf("%.1f,%.2f,%.2f\n", fo[k], yc[k], yh[k]);
+    }
+}
+
+int main(int argc, char** argv)
+{
+    if (argc > 1 && strcmp(argv[1], "--csv") == 0)
+    {
+        response_csv();
+        return 0;
+    }
+
     printf("convolution: measuring the RX filter USE_CONVOLUTION offers\n");
     // The geometry this build was given, and the response length that follows from it: the code clamps
     // the tap count to the partitions its arrays hold, so the array size is not what gets filtered.
@@ -540,6 +712,9 @@ int main(void)
 
     fft_round_trip();
     implemented_filter_is_the_designed_one();
+
+    seam_mode_table();
+    response_shape();
 
     if (failures == 0)
     {

@@ -42,22 +42,7 @@ struct mchf_waterfall
 #define TRX_MODE_RX				0
 #define TRX_MODE_TX				1
 
-typedef enum {
-    DEMOD_USB       =   0,
-    DEMOD_LSB       =   1,
-    DEMOD_CW        =   2,
-    DEMOD_AM        =   3,
-    DEMOD_SAM       =   4,
-    DEMOD_FM        =   5,
-    DEMOD_DIGI		=   6,
-#ifdef USE_TWO_CHANNEL_AUDIO
-    DEMOD_SSBSTEREO =   7,
-    DEMOD_IQ        =   8,
-#endif
-    DEMOD_NUM_MODE
-} DemodModes_t;
-
-#define DEMOD_MAX_MODE (DEMOD_NUM_MODE-1)
+#include "uhsdr_demod_modes.h"   // DemodModes_t, kept alone so the host bench can name the modes
 
 // codec x demod
 // analog USB LSB CW AM FM SAM

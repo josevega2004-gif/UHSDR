@@ -4,4 +4,9 @@
 #ifndef DIGI_BENCH_UHSDR_BOARD_H
 #define DIGI_BENCH_UHSDR_BOARD_H
 #define HOST_BENCH 1
+
+// The demodulation modes are not a hardware detail and the bench has to check code that switches on
+// them, so it takes the real list from hardware/ rather than keeping a copy that could disagree.
+#include "../../hardware/uhsdr_demod_modes.h"
+
 #endif
