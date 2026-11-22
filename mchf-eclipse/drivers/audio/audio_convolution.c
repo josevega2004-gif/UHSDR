@@ -12,7 +12,24 @@
 
 #include "audio_convolution.h"
 #include "audio_driver.h"        // Sample_Buffer, the block the queues carry
-#include "arm_const_structs.h"    // arm_cfft_sR_f32_len256
+#include "arm_const_structs.h"    // the arm_cfft_sR_f32_lenNN the geometry below names
+
+// The CMSIS transform instance has to be the one whose length matches FFT_CONVOLUTION_SIZE, which is a
+// build-time choice rather than a constant of this file: see the note in audio_convolution.h.  Naming
+// it here rather than at each call is what makes `make CONFIGFLAGS='-DUSE_CONVOLUTION
+// -DFFT_CONVOLUTION_SIZE=64'` a build rather than an edit.  Guarded, because with the option off the
+// symbol is not defined at all and this file is an empty translation unit.
+#ifdef USE_CONVOLUTION
+#if   FFT_CONVOLUTION_SIZE == 64
+#define CONVOLUTION_CFFT_INSTANCE   arm_cfft_sR_f32_len64
+#elif FFT_CONVOLUTION_SIZE == 128
+#define CONVOLUTION_CFFT_INSTANCE   arm_cfft_sR_f32_len128
+#elif FFT_CONVOLUTION_SIZE == 256
+#define CONVOLUTION_CFFT_INSTANCE   arm_cfft_sR_f32_len256
+#else
+#error "FFT_CONVOLUTION_SIZE has to be 64, 128 or 256: those are the float32 CFFT instances this module is given, and a block is half of it.  It is not a sample rate - the IQ rate is IQ_SAMPLE_RATE, 48000, set by the codec clock."
+#endif
+#endif
 
 // convolution needs buffers of its own, the audio interrupt is using the
 // shared buffers at the same time
@@ -459,7 +476,7 @@ void AudioDriver_SetConvolutionFilter (int nc, float32_t f_low, float32_t f_high
     //memcpy (&(a->maskgen[2 * a->size]), &(impulse[2 * a->size * i]), a->size * sizeof(complex));
 
     // do FFT
-    arm_cfft_f32(&arm_cfft_sR_f32_len256, cbs.maskgen, 0, 1);
+    arm_cfft_f32(&CONVOLUTION_CFFT_INSTANCE, cbs.maskgen, 0, 1);
     // take input from maskgen and put output into fmask
     for(int idx = 0; idx < cbs.size * 4; idx++)
     {
@@ -560,7 +577,7 @@ void convolution_handle()
 	                // fftin --> one input buffer
 	                // fftout[nfor] --> changing output buffers !
 	                // FFT performed on fftin inplace
-	                arm_cfft_f32(&arm_cfft_sR_f32_len256, cob.fftin, 0, 1);
+	                arm_cfft_f32(&CONVOLUTION_CFFT_INSTANCE, cob.fftin, 0, 1);
 	                // copy output from fftin into current fftout buffer
 	                for (int idx = 0; idx < fft_conv_size * 2; idx++)
 	                {
@@ -618,7 +635,7 @@ void convolution_handle()
 	                // inverse FFT
 	                // input: accum
 	                // audio is in right half of the output buffer accum
-	                arm_cfft_f32(&arm_cfft_sR_f32_len256, cob.accum, 1, 1);
+	                arm_cfft_f32(&CONVOLUTION_CFFT_INSTANCE, cob.accum, 1, 1);
 	                // fftw_execute (a->crev);
 	                // the input history was already restored from the block above, before the
 	                // inverse transform; taking it from fftin here would take the spectrum instead

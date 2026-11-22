@@ -29,9 +29,23 @@
 
 
 #ifdef USE_CONVOLUTION
+// The geometry of the partitioned filter, all three of them overridable on the command line, because
+// they trade against each other and the right point to trade at is a listening decision rather than a
+// proof: a block is FFT_CONVOLUTION_SIZE / 2 samples, so that number divided by the rate the blocks
+// carry *is* the filter's latency (256 at the decimated 12 kHz: 10.7 ms; 64 there: 2.7 ms), and the
+// response cannot be longer than CONVOLUTION_MAX_NO_OF_BLOCKS blocks, which is what sets how steep it
+// can be (8 blocks of 32 samples is 256 taps: 21 ms of impulse, 47 Hz of transition at 12 kHz).
+// Whatever is chosen, the audio interrupt must keep up with one block per block-time, and the CMSIS
+// transform used has to exist: see CONVOLUTION_CFFT_INSTANCE in audio_convolution.c.
+#ifndef FFT_CONVOLUTION_SIZE
 #define FFT_CONVOLUTION_SIZE 256
+#endif
+#ifndef CONVOLUTION_MAX_NO_OF_BLOCKS
 #define CONVOLUTION_MAX_NO_OF_BLOCKS 8
+#endif
+#ifndef CONVOLUTION_MAX_NO_OF_COEFFS
 #define CONVOLUTION_MAX_NO_OF_COEFFS 2048
+#endif
 #endif
 
 #ifdef USE_CONVOLUTION

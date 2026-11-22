@@ -9,3 +9,5 @@ digi_bench-break-rx
 # to be served unmodified by the receiver, so a local copy must never end up in a commit
 capture/websdr-sound.js
 convolution_probe
+# the geometry the convolution harness was last built with, so a measurement cannot be taken from an object compiled with different -D flags
+.convolution_defs

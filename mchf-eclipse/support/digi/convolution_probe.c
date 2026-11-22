@@ -17,17 +17,24 @@
  *      it and looking at what comes out at the loudspeaker, which is the only comparison that is
  *      apples to apples: the Hilbert pair plus the i+q sum and the convolution plus its real part
  *      are two different ways of getting from I/Q to audio, and both are graded here the same way;
- *   4. the arithmetic each one bills per audio sample, counted as it runs rather than quoted from a
+ *   4. that the design selects the sideband the sum in use today selects, both ways round, because an
+ *      inverted sideband is not a subtle defect on the air;
+ *   5. the arithmetic each one bills per audio sample, counted as it runs rather than quoted from a
  *      formula, and the delay each one adds.
+ *
+ * The geometry is a build choice (see audio_convolution.h), so this file prints nothing that is not
+ * derived from the -D flags it was compiled with: pass them to make as
+ * EXTRA_DEFS='-DFFT_CONVOLUTION_SIZE=64 -DCONVOLUTION_MAX_NO_OF_COEFFS=512' and the tables, the delay
+ * and the RAM below are that variant's.  The Makefile keeps a stamp of the flags for exactly that
+ * reason: a measurement taken from an object built with yesterday's geometry is worse than none.
  *
  * The module is compiled in as text rather than linked, because `cob` is file-static and the geometry
  * it holds (the per-partition masks and the FFT history) is part of what is being measured.
  *
  * Everything here is a *prediction* about a receiver that has never been listened to: no amount of
  * tone testing covers the AGC and the post-demod audio filters that sit downstream in the real chain,
- * the fact that a 128-sample block is 10.7 ms at a 12 kHz sample rate, or the 63 KB of RAM the arrays
- * occupy.  Those three are reported at the end rather than asserted, because they are the reasons the
- * option is still off.
+ * the latency one block costs at the rate the filter path carries, or the RAM the arrays occupy.  Those
+ * are reported at the end rather than asserted, because they are the reasons the option is still off.
  */
 
 #include <stdio.h>
@@ -240,7 +247,10 @@ static void fft_round_trip(void)
 // overlap-save is the wrap-around part rather than the clean one.  The first was caught here at a
 // relative difference of 1197, the second by the sideband separation in section 3 at 12 dB instead of
 // 144 dB.
-static int check_vs_fir(const char* what, float32_t rate, uint16_t slice)
+static double delay_decimated_ms;     // measured, section 2, decimated path
+static double delay_fullrate_ms;      // measured, section 2, path that does not decimate
+
+static int check_vs_fir(const char* what, float32_t rate, uint16_t slice, double* delay_ms_out)
 {
     double in_re[STREAM], in_im[STREAM], out[STREAM], ref[STREAM];
 
@@ -309,6 +319,8 @@ static int check_vs_fir(const char* what, float32_t rate, uint16_t slice)
            "pair\n     that does the same job today costs %.2f ms at this rate\n",
            best_err, best_shift, best_shift * 1000.0 / rate,
            (IQ_RX_NUM_TAPS_HI - 1) / 2.0 * 1000.0 / rate);
+    *delay_ms_out = best_shift * 1000.0 / (double) rate;
+    *delay_ms_out = best_shift * 1000.0 / (double) rate;
     return !(best_err < 2e-3 && best_shift >= 0);
 }
 
@@ -317,8 +329,8 @@ static void implemented_filter_is_the_designed_one(void)
     printf("\n2. the partitioned pipeline against a plain complex FIR over the same taps\n");
     // The two filter paths the receiver actually has: the narrow ones that decimate the IQ by 4 and so
     // hand the queue 8 samples at a time at 12 kHz, and the rest, which hand it 32 samples at 48 kHz.
-    failures += check_vs_fir("decimated path: 8 samples a slice at 12 kHz", RATE, SLICE_DECIM);
-    failures += check_vs_fir("full rate path: 32 samples a slice at 48 kHz", IQ_SAMPLE_RATE_F, SLICE_FULL);
+    failures += check_vs_fir("decimated path: 8 samples a slice at 12 kHz", RATE, SLICE_DECIM, &delay_decimated_ms);
+    failures += check_vs_fir("full rate path: 32 samples a slice at 48 kHz", IQ_SAMPLE_RATE_F, SLICE_FULL, &delay_fullrate_ms);
 
     // The tone measurements below are the decimated path, which is where SSB actually sits.
     conv_path_reset(RATE, BW / 10.0f, BW);
@@ -328,10 +340,15 @@ static void implemented_filter_is_the_designed_one(void)
     printf("     offset   convolution   Hilbert+i+q today     (dB relative to the passband)\n");
 
     const double offsets[] = { 300, 1350, 2500, 2750, 3000, 3500, 4500, 6000, -1350, -3000, -4500 };
-    double mag_c[sizeof offsets / sizeof offsets[0]];
-    double mag_h[sizeof offsets / sizeof offsets[0]];
+    const unsigned NOFF = sizeof offsets / sizeof offsets[0];
+    double mag_c[NOFF];
+    double mag_h[NOFF];
+    // and the same pair turned round: the filter designed on the other side of zero, against the
+    // other of the two sums the receiver uses today.  See the check after the table.
+    double mag_c_lsb[NOFF];
+    double mag_h_lsb[NOFF];
 
-    for (unsigned o = 0; o < sizeof offsets / sizeof offsets[0]; o++)
+    for (unsigned o = 0; o < NOFF; o++)
     {
         double f = offsets[o];
         double tone_re[STREAM], tone_im[STREAM], y_conv[STREAM], y_hilb[STREAM];
@@ -347,9 +364,53 @@ static void implemented_filter_is_the_designed_one(void)
         conv_path_reset(RATE, BW / 10.0f, BW);
         conv_path_run(tone_re, tone_im, STREAM, y_conv, &ops_c, SLICE_DECIM);
         hilbert_path_run(tone_re, tone_im, STREAM, y_hilb, 1, &ops_h);
-
         mag_c[o] = tone_amplitude(y_conv + SETTLE, ANALYSIS, fabs(f), RATE);
+
+        // the mirror: the same design below zero, and the i-q sum the receiver uses for LSB
+        conv_path_reset(RATE, -BW, -BW / 10.0f);
+        conv_path_run(tone_re, tone_im, STREAM, y_conv, &ops_c, SLICE_DECIM);
+        mag_c_lsb[o] = tone_amplitude(y_conv + SETTLE, ANALYSIS, fabs(f), RATE);
+
+        hilbert_path_run(tone_re, tone_im, STREAM, y_hilb, 1, &ops_h);   // i+q, the USB sum
         mag_h[o] = tone_amplitude(y_hilb + SETTLE, ANALYSIS, fabs(f), RATE);
+        hilbert_path_run(tone_re, tone_im, STREAM, y_hilb, 0, &ops_h);   // i-q, the LSB sum
+        mag_h_lsb[o] = tone_amplitude(y_hilb + SETTLE, ANALYSIS, fabs(f), RATE);
+    }
+
+    // Which side of zero each arrangement puts its audio on.  The pairs are the two the seam in
+    // AudioDriver_RxProcessor() builds: USB is a positive-frequency bandpass and no sum at all (the
+    // real part is the audio), and the maintained path for the same sideband is i+q; LSB is the
+    // mirror image and i-q.  If the two columns of a pair disagree about where the passband is, the
+    // new path inverts the sideband, which on the air is not a subtle defect.
+    {
+        // Sum of the (linear) amplitudes on each side of zero, which is what "which sideband does
+        // this arrangement listen to" means when the passband covers more than one row of the table:
+        // several offsets are in band for the maintained path, so picking the single loudest row only
+        // finds whichever of them the arithmetic rounded up.
+        double c_pos = 0, c_neg = 0, h_pos = 0, h_neg = 0;
+        double cl_pos = 0, cl_neg = 0, hl_pos = 0, hl_neg = 0;
+        for (unsigned o = 0; o < NOFF; o++)
+        {
+            double *pup, *pdn, *pupl, *pdnl;
+            if (offsets[o] > 0) { pup = &c_pos; pdn = &h_pos; pupl = &cl_pos; pdnl = &hl_pos; }
+            else                { pup = &c_neg; pdn = &h_neg; pupl = &cl_neg; pdnl = &hl_neg; }
+            *pup  += mag_c[o];
+            *pdn  += mag_h[o];
+            *pupl += mag_c_lsb[o];
+            *pdnl += mag_h_lsb[o];
+        }
+        const int c_side  = c_pos > c_neg ? 1 : -1;         // the positive design, convolution
+        const int h_side  = h_pos > h_neg ? 1 : -1;         // the same sideband, i+q today
+        const int cl_side = cl_pos > cl_neg ? 1 : -1;       // the negative design, convolution
+        const int hl_side = hl_pos > hl_neg ? 1 : -1;       // the other sideband, i-q today
+
+        char which[140];
+        snprintf(which, sizeof(which), "the new path puts its band %s zero, the sum in use today puts it %s zero",
+                 c_side > 0 ? "above" : "below", h_side > 0 ? "above" : "below");
+        check("a positive design selects the sideband i+q selects", c_side == h_side, which);
+        snprintf(which, sizeof(which), "the new path puts its band %s zero, the sum in use today puts it %s zero",
+                 cl_side > 0 ? "above" : "below", hl_side > 0 ? "above" : "below");
+        check("a negative design selects the sideband i-q selects", cl_side == hl_side, which);
     }
 
     // Each path is normalised by its own loudest row, which is its passband gain.  The absolute
@@ -392,7 +453,7 @@ static void implemented_filter_is_the_designed_one(void)
     printf("\n     sideband separation, +-1350 Hz:   convolution %6.1f dB    Hilbert+i+q today %6.1f dB\n",
            sep_c, sep_h);
     printf("     (both paths are computed in float32, so past about -140 dB you are reading the arithmetic,\n"
-           "      not a filter: the result to take away is the passband shape and the 88 dB vs 144 dB gap)\n");
+           "      not a filter: what to take away is the passband shape, and the gap between the two numbers)\n");
     check("the convolution filter separates the sidebands at least as well as the path today",
           sep_c >= sep_h - 3.0, d2);
 
@@ -422,10 +483,10 @@ static void implemented_filter_is_the_designed_one(void)
            ops_c, partition_ops * conv_block_count, conv_block_count, conv_total / STREAM);
     printf("     Hilbert+i+q today: %lu ops over %d samples = %.0f per sample  (%d taps x 2 channels)\n",
            ops_h, STREAM, (double) ops_h / STREAM, IQ_RX_NUM_TAPS_HI);
-    printf("     the same 1024-tap shape as an ordinary FIR: %.0f per sample, which is the number the\n"
-           "     partitioning exists to avoid paying, and the shape the tone table above measures\n",
-           4.0 * CONVOLUTION_MAX_NO_OF_COEFFS);
-
+    // Counted the same way as the Hilbert line above it: a complex tap is two multiplies and two adds.
+    printf("     the same %d-tap shape as an ordinary time-domain FIR: %.0f per sample, which is what\n"
+           "     the partitioning exists to avoid paying, on the shape the tone table above measures\n",
+           cbs.nc, 4.0 * (double) cbs.nc);
     double ratio = ((double) ops_h / STREAM) / (conv_total / STREAM);
     char d3[400];
     snprintf(d3, sizeof d3,
@@ -442,29 +503,40 @@ static void implemented_filter_is_the_designed_one(void)
            sizeof(cob) / 1024.0, sizeof(cbs) / 1024.0, sizeof(conv_blocks) / 1024.0);
     printf("     and the linked radio agrees, measured with:\n"
            "       make CONFIGFLAGS='-DUI_BRD_MCHF -DRF_BRD_MCHF -DUSE_CONVOLUTION' all\n"
-           "     which at the time of writing takes the ELF's bss from 93,860 to 157,276 bytes: the end of\n"
-           "     .bss moves from 0x20008760 to 0x20017fd8, leaving 32,800 bytes under the stack at\n"
-           "     0x2001fff8 where the shipping build leaves 96,408.  So the option links, and then shares\n"
-           "     what is left with the heap - and ui_spectrum.c:2128 mallocs the waterfall bitmap into\n"
-           "     exactly that space, WATERFALL_HEIGHT x SPECTRUM_WIDTH = 70 x up to 480 bytes, in normal\n"
-           "     RAM by that file's own comment.  Whether the remainder is enough is a question for a\n"
-           "     radio, not for this harness.\n");
-    printf("     measured delay through the filter: 10.0 ms on the decimated path, where a 128 sample\n"
-           "     block is 10.7 ms of a 12 kHz stream, and 2.0 ms when the filter path does not decimate\n"
-           "     and the same block is 2.7 ms of a 48 kHz stream.  The Hilbert pair it replaces costs\n"
-           "     8.25 ms and 2.06 ms at those two rates, so the block, not the taps, is what you wait for.\n");
+           "     which at the time of writing, with the geometry printed above, takes the ELF's bss from\n"
+           "     93,860 to 157,276 bytes: the end of .bss moves from 0x20008760 to 0x20017fd8, leaving\n"
+           "     32,800 bytes below the stack top at 0x2001fff8 where the shipping build leaves 96,408.\n"
+           "     That space is shared, and nothing in the linker script bounds it: _sbrk() comes from\n"
+           "     libnosys, bumps a pointer from _end upwards and has no ceiling to compare against, and\n"
+           "     the ASSERT(__StackLimit >= __HeapLimit) in arm-gcc-link_f4_main.ld compares the heap's\n"
+           "     *start* against the top of RAM, so it cannot fire however full the radio is.  What the\n"
+           "     heap is asked for in this configuration is small - the 12 byte canary word in\n"
+           "     uhsdr_canary.c and the USB class handles - so 32,800 bytes is stack headroom in practice,\n"
+           "     down from 96,408.  Whether that is enough on a transmitter that has never had the option\n"
+           "     on is a question for the radio, not for this harness.\n");
+    printf("     measured delay through the filter: %.1f ms on the decimated path, where one block is\n"
+           "     %.1f ms of a %.0f Hz stream, and %.1f ms where the filter path does not decimate and\n"
+           "     the same block is %.1f ms of %.0f kHz.  The Hilbert pair it replaces costs %.2f ms and\n"
+           "     %.2f ms at those rates: the block is what you wait for, not the number of taps.\n",
+           delay_decimated_ms, 1000.0 * cbs.size / RATE, (double) RATE,
+           delay_fullrate_ms, 1000.0 * cbs.size / IQ_SAMPLE_RATE_F, IQ_SAMPLE_RATE_F / 1000.0,
+           (IQ_RX_NUM_TAPS_HI - 1) / 2.0 * 1000.0 / RATE,
+           (IQ_RX_NUM_TAPS_HI - 1) / 2.0 * 1000.0 / IQ_SAMPLE_RATE_F);
     printf("     the AGC, the notch, the post-demod filters and every digimode still run after this, on\n"
            "     samples that arrive that much later, on a radio that has never had the option switched\n"
-           "     on.  The selectivity above is a measurement; whether it is worth 10 ms and 62 KiB of RAM\n"
+           "     on.  The selectivity above is a measurement; whether it is worth this much latency and RAM\n"
            "     is listening, and nobody has listened yet.\n");
 }
 
 int main(void)
 {
     printf("convolution: measuring the RX filter USE_CONVOLUTION offers\n");
-    printf("  (%d complex taps in the response, %d partitions, block %d samples, %.0f Hz)\n",
-           CONVOLUTION_MAX_NO_OF_COEFFS, CONVOLUTION_MAX_NO_OF_BLOCKS,
-           FFT_CONVOLUTION_SIZE / 2, RATE);
+    // The geometry this build was given, and the response length that follows from it: the code clamps
+    // the tap count to the partitions its arrays hold, so the array size is not what gets filtered.
+    printf("  (block %d samples, %d partitions: a response of up to %d taps at %.0f Hz, arrays sized %d)\n",
+           FFT_CONVOLUTION_SIZE / 2, CONVOLUTION_MAX_NO_OF_BLOCKS,
+           CONVOLUTION_MAX_NO_OF_BLOCKS * (FFT_CONVOLUTION_SIZE / 2), RATE,
+           CONVOLUTION_MAX_NO_OF_COEFFS);
 
     fft_round_trip();
     implemented_filter_is_the_designed_one();

@@ -1465,18 +1465,46 @@ putting one complex tone through each path at the 2.7 kHz / 12 kHz filter path:
 | flash | +2,560 bytes | - |
 
 So the answer to "might it be better" is yes on both selectivity and cost per sample, at the price of
-about 2 ms and 62 KiB of RAM. Read the -140 dB figures with care: the harness computes in float32, so
+about 2 ms and 62 KiB of RAM.
+
+The geometry is a build choice, and all three settings below were measured with this same harness (the
+latency and the RAM are its numbers, and the separation is at +-1350 Hz):
+
+```
+make -C support/digi convolution-check EXTRA_DEFS='-DFFT_CONVOLUTION_SIZE=64 -DCONVOLUTION_MAX_NO_OF_COEFFS=512'
+```
+
+| `-DFFT_CONVOLUTION_SIZE` | block | taps | latency at 12 kHz | separation | ops / sample | module RAM |
+|---|---|---|---|---|---|---|
+| 256 (as committed) | 128 | 1024 | 10.0 ms | 144 dB | 372 | 62.0 KiB |
+| 128 | 64 | 512 | 4.7 ms | 143 dB | 331 | 35.0 KiB |
+| 64 | 32 | 256 | 2.0 ms | 155 dB | 295 | 21.5 KiB |
+
+The last row is the one to listen to first. A shorter response is not the loss it would be in a
+narrow-band design: the transition width at 256 taps and 12 kHz is about 47 Hz, which is already far
+finer than the 199-tap Hilbert pair's, and everything the table can measure is past what float32 shows.
+`make build-config-check` and the probe both run the committed geometry; the `EXTRA_DEFS` above is what
+the harness was made to accept, and it refuses to reuse an object file compiled with a different one. Read the -140 dB figures with care: the harness computes in float32, so
 past roughly -140 dB you are seeing the arithmetic, not a bench measurement of a filter. The 88 dB
 versus 144 dB gap is real.
 
-The RAM is the reason the option stays off, and it is not a small reason: linking with it moves the
-ELF's bss from 93,860 to 157,276 bytes, so what is left between the end of `.bss` and the stack
-falls from 96,408 to 32,800 bytes, and `ui_spectrum.c:2128` mallocs the waterfall bitmap into exactly
-that space. What would have to happen before this could be switched on:
+The RAM is the reason the option stays off, and what it really costs is stack headroom. Linking with it
+moves the ELF's bss from 93,860 to 157,276 bytes, so what is left between the end of `.bss` (0x20017fd8)
+and the stack top (0x2001fff8) falls from 96,408 to 32,800 bytes. Nothing bounds that space: `_sbrk()`
+comes from libnosys, bumps a pointer up from `_end` and has no ceiling to compare against, and the
+`ASSERT(__StackLimit >= __HeapLimit)` in `linker/arm-gcc-link_f4_main.ld` compares the heap's *start*
+with the top of RAM, so it cannot fire however full the radio is. (The waterfall bitmap, which sits in
+CCM, is not one of the callers: the `malloc()` at `ui_spectrum.c:2128` is inside a `/* */` block and the
+function around it is never called from anywhere. This file said otherwise until it was checked.) What
+the heap is asked for in this configuration is the 12 byte canary word in `uhsdr_canary.c` and the USB
+class handles, so 32,800 bytes is in practice the main stack's room, down from 96,408.
 
-* the arrays have to come down, or the RAM they compete with has to. `fftout[8][512]` and
-  `fmask[8][512]` are 32 KiB of the 62, and both are sized by `CONVOLUTION_MAX_NO_OF_BLOCKS`, i.e. by
-  the tap count - 512 taps would halve them at some cost in skirt shape, which is measurable here.
+What would have to happen before this could be switched on:
+
+* the arrays have to come down, or the RAM they compete with has to be found. That is now a build
+  choice rather than an edit - see the geometry table below - and it is cheaper than it looks, because
+  the arrays are sized by partitions times block, and a short block with few partitions costs little
+  selectivity when the stop-band is already 120 dB deep.
 * the block latency has to be listened to, and it depends on the filter path: the block is a fixed 128
   samples, so it is 2.7 ms of audio at 48 kHz and 10.7 ms at the decimated 12 kHz the narrow SSB
   filters use. The AGC, the notch, the post-demod filters and the audio output all still run on the
@@ -1486,6 +1514,11 @@ that space. What would have to happen before this could be switched on:
   only. The mode table this file documents would still have to be run against it on real audio.
 * `nfor` is clamped to the arrays instead of asserted, so a wider response than 8 partitions x 128
   samples silently gets fewer taps.
+
+One more thing the harness checks, because getting it wrong is not subtle: a design above zero has to
+select the sideband the `i+q` sum selects, and a design below zero the one `i-q` selects, measured by
+which side of zero each path puts its band energy on. `AudioDriver_RxProcessor()` and
+`AudioDriver_SetProcessingChain()` are written to agree with that pair.
 
 Re-measure with `make -C support/digi convolution-check`. Two of its checks are load bearing and were
 each demonstrated to fail: the partitioned pipeline has to reproduce a plain complex FIR over the same

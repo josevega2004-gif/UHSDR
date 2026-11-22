@@ -98,6 +98,8 @@ static void transform(float* d, int n, int inverse)
     }
 }
 
+const arm_cfft_instance_f32 arm_cfft_sR_f32_len64  = { 64,  NULL, NULL, 0 };
+const arm_cfft_instance_f32 arm_cfft_sR_f32_len128 = { 128, NULL, NULL, 0 };
 const arm_cfft_instance_f32 arm_cfft_sR_f32_len256 = { 256, NULL, NULL, 0 };
 const arm_cfft_instance_f32 arm_cfft_sR_f32_len512 = { 512, NULL, NULL, 0 };
 

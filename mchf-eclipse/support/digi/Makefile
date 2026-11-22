@@ -240,7 +240,7 @@ fixture-check:
 	@python3 fixture_check.py
 
 clean:
-	rm -f digi_bench digi_bench-break-rx convolution_probe *.o *.wav *.pgm
+	rm -f digi_bench digi_bench-break-rx convolution_probe *.o *.wav *.pgm .convolution_defs
 # fixtures/ is untouched on purpose: the on air recording is tracked, not a build product
 
 # The convolution probe compiles drivers/audio/audio_convolution.c as *text*, because the arrays that
@@ -249,18 +249,33 @@ clean:
 # arm_math.h shim plus a host complex transform (convolution_fft.c) - which the probe then proves
 # harmless by comparing the whole pipeline with a plain time-domain FIR that uses no FFT at all.
 CONV_DEFS   = -DUSE_CONVOLUTION -D__IO=volatile
+# The geometry of the filter is a build choice (see audio_convolution.h), so the harness that measures
+# it takes the same choices: EXTRA_DEFS='-DFFT_CONVOLUTION_SIZE=64 -DCONVOLUTION_MAX_NO_OF_COEFFS=256'
+# measures the low latency variant, and the numbers it prints are that variant's, not the default's.
+CONV_DEFS  += $(EXTRA_DEFS)
+
+# ... but those choices are not visible to make's dependency rules, and a measurement taken from an
+# object file that was compiled with yesterday's geometry is worse than no measurement.  So the flags
+# themselves become a prerequisite: writing them to a stamp file makes the objects rebuild whenever the
+# geometry changes, and stay put when it does not.
+CONV_STAMP  = .convolution_defs
+_conv_want := $(strip $(EXTRA_DEFS))
+_conv_have := $(strip $(file < $(CONV_STAMP)))
+ifneq ($(_conv_want),$(_conv_have))
+$(file >$(CONV_STAMP),$(_conv_want))
+endif
 CONV_INC    = -I$(SHIM) -I$(LIBDIR) -I$(LIBDIR)/filters -I../../hardware -I../../misc
 
 convolution_probe: convolution_probe.o convolution_fft.o iq_rx_filter.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
-convolution_probe.o: convolution_probe.c $(LIBDIR)/audio_convolution.c $(LIBDIR)/audio_convolution.h
+convolution_probe.o: convolution_probe.c $(LIBDIR)/audio_convolution.c $(LIBDIR)/audio_convolution.h $(CONV_STAMP)
 	$(CC) $(CFLAGS) $(DEFINES) $(CONV_DEFS) $(CONV_INC) -c -o $@ convolution_probe.c
 
 convolution_fft.o: convolution_fft.c $(SHIM)/arm_const_structs.h
 	$(CC) $(CFLAGS) $(CONV_INC) -c -o $@ convolution_fft.c
 
-iq_rx_filter.o: $(LIBDIR)/filters/iq_rx_filter.c $(LIBDIR)/filters/filters.h
+iq_rx_filter.o: $(LIBDIR)/filters/iq_rx_filter.c $(LIBDIR)/filters/filters.h $(CONV_STAMP)
 	$(CC) $(CFLAGS) $(CONV_DEFS) $(CONV_INC) -c -o $@ $(LIBDIR)/filters/iq_rx_filter.c
 
 # A nonzero exit on its own proves nothing, so the probe says which of its checks it failed on: the
