@@ -1141,16 +1141,63 @@ void AudioDriver_SetProcessingChain(uint8_t dmod_mode, bool reset_dsp_nr)
 #endif
 
 #ifdef USE_CONVOLUTION
-    // Convolution Filter
-    // calculate coeffs
-    // for first trial, use hard-coded USB filter from 250Hz to 2700Hz
-    // hardcoded sample rate and Blackman-Harris 4th term
-    cbs.size = 128; // 128 samples processed at one time, this defines the latency:
-    // latency = cbs.size / sample rate = 128/48000 = 2.7ms
-    cbs.nc = 1024; // use 1024 coefficients
-    cbs.nfor = cbs.nc / cbs.size; // number of blocks used for the uniformly partitioned convolution
-    cbs.buffidx = 0; // needs to be reset to zero each time new coeffs are being calculated
-    AudioDriver_CalcConvolutionFilterCoeffs (cbs.nc, 250.0, 2700.0, IQ_SAMPLE_RATE_F, 0, 1, 1.0);
+    // Partitioned convolution RX filtering, DD4WH 2018_08_18.
+    //
+    // This is the setup the branch never had: AudioDriver_SetConvolutionFilter() - the function that
+    // turns the impulse response into the per-partition frequency masks the worker multiplies by -
+    // existed in the tree but was not called from anywhere, so every mask was zero and the whole
+    // path could only ever output silence.  The design also has to be done against the sample rate
+    // the block actually carries, which is the decimated one whenever the filter path decimates;
+    // the old line used IQ_SAMPLE_RATE_F unconditionally, i.e. it designed a 250-2700 Hz bandpass
+    // and then applied it to samples 4x slower, which puts the passband where no audio is.
+    //
+    // The rate chosen here must be the rate the seam in AudioDriver_RxProcessor() hands blocks at -
+    // it is the same test on the same filter path, and the two are written next to each other's
+    // conditions because getting them out of step shifts the passband instead of failing.
+    if (CONVOLUTION_USED_FOR(dmod_mode))
+    {
+        // 128 samples per block: 128/48000 = 2.7ms, 128/12000 = 10.7ms
+        cbs.size = FFT_CONVOLUTION_SIZE / 2;
+        // The partitions must fit the arrays: nfor = nc / size, and fmask[]/fftout[] have
+        // CONVOLUTION_MAX_NO_OF_BLOCKS of them, so the longest response the block size allows is
+        // MAX_NO_OF_BLOCKS * size taps.  Clamped rather than asserted, because this runs on whatever
+        // filter path the user last used and a rejected build would only hide it.
+        cbs.nc = CONVOLUTION_MAX_NO_OF_COEFFS;
+        if (cbs.nc / cbs.size > CONVOLUTION_MAX_NO_OF_BLOCKS)
+        {
+            cbs.nc = cbs.size * CONVOLUTION_MAX_NO_OF_BLOCKS;
+        }
+        cbs.nfor = cbs.nc / cbs.size;
+        cbs.buffidx = 0;
+
+        const float32_t conv_bw = (float32_t) FilterInfo[ts.filters_p->id].width;
+        // 10% of the passband kept clear at the low end: that is where the carrier and the
+        // heterodyne products of a mistuned signal live, and the 250 Hz floor the 2018 experiment
+        // hard-coded for a 2.7 kHz filter is exactly conv_bw/10 at that width.
+        const float32_t conv_lo = conv_bw / 10.0f;
+        // The sideband is a property of the filter, not of a later sum: USB and CW-U are positive
+        // frequencies, LSB and CW-L negative.  Same predicate the receiver uses further down, so a
+        // CW flip of ts.cw_lsb re-designs the mask the way it swaps the i+q / i-q sum today.
+        const float32_t conv_sign = RadioManagement_LSBActive(dmod_mode) ? -1.0f : 1.0f;
+        // The rate these blocks actually carry.  The RX processor picks it a few hundred lines
+        // below with (FIR_I_coeff_file == i_rx_new_coeffs && mode != FM) || SAM || AM; for the modes
+        // this path takes over, CONVOLUTION_USED_FOR() has already excluded FM, SAM and AM, so the
+        // first clause is all that is left, and it is written the same way on purpose: the filters
+        // that decimate are a property of the filter path, not of the mode name, and designing the
+        // masks against 48 kHz while the blocks arrive at 12 kHz shifts the passband instead of
+        // failing.  Both values are current here - ads.decimated_freq is assigned above in this
+        // same function, from the filter path that is being installed.
+        const float32_t conv_rate = (float32_t) ((ts.filters_p->FIR_I_coeff_file == i_rx_new_coeffs)
+                ? ads.decimated_freq : IQ_SAMPLE_RATE);
+
+        // The windowed sinc comes out of the designer with a passband gain of bandwidth/rate, which
+        // at 2.7 kHz on 12 kHz is -13 dB: the AGC would absorb it, but the S-meter and the squelch
+        // thresholds read the same stream, so the masks are normalised to unity instead and the
+        // audio arrives at about the level the Hilbert path delivers today.
+        AudioDriver_SetConvolutionFilter(cbs.nc, conv_sign * conv_lo, conv_sign * conv_bw, conv_rate,
+                                         0, conv_rate / conv_bw);
+        AudioDriver_ConvolutionReset();
+    }
 #endif
 
     AudioDriver_SetSamPllParameters();
@@ -2616,6 +2663,13 @@ static void AudioDriver_RxProcessor(IqSample_t * const srcCodec, AudioSample_t *
             const uint16_t blockSizeIQ = use_decimatedIQ? blockSizeDecim: blockSize;
             const uint32_t sampleRateIQ = use_decimatedIQ? ads.decimated_freq: IQ_SAMPLE_RATE;
 
+            // Which modes the partitioned convolution filter takes over, and so which sample rate
+            // its masks were designed against: see CONVOLUTION_USED_FOR() in audio_driver.h, which
+            // both this and AudioDriver_SetProcessingChain() read so that the two cannot drift.
+#ifdef USE_CONVOLUTION
+            const bool use_convolution = CONVOLUTION_USED_FOR(dmod_mode);
+#endif
+
             // in some case we decimate the IQ before passing to demodulator, in some don't
             // in any case, we do audio filtering on decimated data
 
@@ -2637,6 +2691,32 @@ static void AudioDriver_RxProcessor(IqSample_t * const srcCodec, AudioSample_t *
                 arm_fir_decimate_f32(&DECIMATE_RX_Q, adb.iq_buf.q_buffer, adb.iq_buf.q_buffer, blockSize);      // LPF built into decimation (Yes, you can decimate-in-place!)
             }
 
+#ifdef USE_CONVOLUTION
+            if (use_convolution)
+            {
+                // Hand this slice to the worker and take back the slice it finished a block ago.
+                // Both carry blockSizeIQ samples, which is what keeps the filtered stream running
+                // at the rate the rest of the chain expects: the only thing that can differ is
+                // whether a block is available yet, and that shows up as a dropout, never as a
+                // signal that jumps to the middle of a different block.
+                uint16_t conv_taken = AudioDriver_ConvolutionInput(adb.iq_buf.i_buffer, adb.iq_buf.q_buffer, blockSizeIQ);
+                uint16_t conv_given = AudioDriver_ConvolutionOutput(adb.iq_buf.i_buffer, adb.iq_buf.q_buffer, blockSizeIQ);
+
+                // Whatever the filter did not hand back is silence, and only that part: the samples it
+                // did hand back are already in place and its play head has moved past them, so filling
+                // the whole slice here would drop those samples and leave this stream permanently out
+                // of step with the input.  With today's numbers a slice never straddles a block (128 is
+                // a multiple of 8 and of 32), but nothing here may depend on that, and the first block
+                // of all is always missing because the filter answers one block late.
+                (void) conv_taken;      // the input side cannot partially fail
+                if (conv_given < blockSizeIQ)
+                {
+                    arm_fill_f32(0.0f, adb.iq_buf.i_buffer + conv_given, blockSizeIQ - conv_given);
+                    arm_fill_f32(0.0f, adb.iq_buf.q_buffer + conv_given, blockSizeIQ - conv_given);
+                }
+            }
+            else
+#endif
             if(dmod_mode != DEMOD_SAM && dmod_mode != DEMOD_AM) // for SAM & AM leave out this processor-intense filter
             {
             	// SECOND: Hilbert transform (for all but AM/SAM)
@@ -2670,6 +2750,16 @@ static void AudioDriver_RxProcessor(IqSample_t * const srcCodec, AudioSample_t *
 #endif
                 }
             }
+#ifdef USE_CONVOLUTION
+            else if (use_convolution)
+            {
+                // The complex bandpass has already selected the sideband, so the demodulation is
+                // the real part of the filtered block - there is nothing to add or subtract.  This
+                // is what the branch was built for, and the reason it replaces the Hilbert pair
+                // above instead of sitting next to it.
+                arm_copy_f32(adb.iq_buf.i_buffer, adb.a_buffer[0], blockSizeIQ);
+            }
+#endif
             else if (RadioManagement_LSBActive(dmod_mode))
             {
                 // all LSB modes are demodulated the same way, we handed the special case DEMOD_SAM / SAM-L earlier
@@ -2879,11 +2969,11 @@ void AudioDriver_I2SCallback(AudioSample_t *audio, IqSample_t *iq, AudioSample_t
             to_rx = false;                          // caused by the content of the buffers from TX - used on return from SSB TX
         }
 
-#ifdef USE_CONVOLUTION
-        AudioDriver_RxProcessorConvolution(iq, audio, blockSize, muted);
-#else
         AudioDriver_RxProcessor(iq, audio, blockSize, muted);
-#endif
+        // With USE_CONVOLUTION the blocks handed to the convolution filter are filtered by
+        // convolution_handle() in the PendSV handler - see UiDriver_TaskHandler_HighPrioTasks(),
+        // which is where it has always been called from, and which is the point of the design:
+        // two 256-point complex FFTs do not belong in the sample interrupt.
         if (ts.audio_dac_muting_buffer_count > 0)
         {
             ts.audio_dac_muting_buffer_count--;

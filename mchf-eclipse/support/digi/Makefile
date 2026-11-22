@@ -16,6 +16,9 @@
 #   make rtty-trace  which bit of which character the demodulator read wrong, from its own decisions
 #   make rtty-multipath  a second path: character error rate against delay spread
 #   make tx-check  the modulator's own keying through the receiver's gate
+#   make convolution-check  measure the RX filter USE_CONVOLUTION offers against the SSB stage the
+#                radio runs today, from the shipped module: selectivity, sideband separation, cost
+#                per sample and delay.  Needs no radio and no ARM toolchain.
 #
 # drivers/audio/rtty.c and drivers/audio/audio_agc.c are compiled from the real sources: the
 # modem and the AGC the radio puts in front of it. The shim/ directory replaces only the headers
@@ -237,5 +240,31 @@ fixture-check:
 	@python3 fixture_check.py
 
 clean:
-	rm -f digi_bench digi_bench-break-rx *.o *.wav *.pgm
+	rm -f digi_bench digi_bench-break-rx convolution_probe *.o *.wav *.pgm
 # fixtures/ is untouched on purpose: the on air recording is tracked, not a build product
+
+# The convolution probe compiles drivers/audio/audio_convolution.c as *text*, because the arrays that
+# hold the partition masks and the FFT history are file static and they are part of what is being
+# measured.  So the probe is rebuilt when either file changes, and it is built against the bench's
+# arm_math.h shim plus a host complex transform (convolution_fft.c) - which the probe then proves
+# harmless by comparing the whole pipeline with a plain time-domain FIR that uses no FFT at all.
+CONV_DEFS   = -DUSE_CONVOLUTION -D__IO=volatile
+CONV_INC    = -I$(SHIM) -I$(LIBDIR) -I$(LIBDIR)/filters -I../../hardware -I../../misc
+
+convolution_probe: convolution_probe.o convolution_fft.o iq_rx_filter.o
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+convolution_probe.o: convolution_probe.c $(LIBDIR)/audio_convolution.c $(LIBDIR)/audio_convolution.h
+	$(CC) $(CFLAGS) $(DEFINES) $(CONV_DEFS) $(CONV_INC) -c -o $@ convolution_probe.c
+
+convolution_fft.o: convolution_fft.c $(SHIM)/arm_const_structs.h
+	$(CC) $(CFLAGS) $(CONV_INC) -c -o $@ convolution_fft.c
+
+iq_rx_filter.o: $(LIBDIR)/filters/iq_rx_filter.c $(LIBDIR)/filters/filters.h
+	$(CC) $(CFLAGS) $(CONV_DEFS) $(CONV_INC) -c -o $@ $(LIBDIR)/filters/iq_rx_filter.c
+
+# A nonzero exit on its own proves nothing, so the probe says which of its checks it failed on: the
+# partitioned pipeline has to reproduce a plain complex FIR over the same taps, and the sideband
+# separation it measures has to be at least the one the 199-tap Hilbert pair gives today.
+convolution-check: convolution_probe
+	@./convolution_probe

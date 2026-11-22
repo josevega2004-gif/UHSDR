@@ -220,3 +220,15 @@ jobs:
       - name: Check the capture gate against the pinned take
         working-directory: mchf-eclipse
         run: make -C support/digi capture-check fixture-check
+
+      # USE_CONVOLUTION is an RX filter that no shipping configuration builds, so nothing but this
+      # step ever asks what its filter is worth.  It compiles the shipped module as text, hands it a
+      # complex signal, and compares it with a plain time-domain complex FIR over the same taps - an
+      # arrangement with no FFT in it, which is how the two bugs it reports were found (the port did
+      # the forward FFT in place and then slid fftin into itself as the overlap history, and it kept
+      # the wrong half of the inverse transform, which cost 132 dB of sideband separation) - and then
+      # measures both this filter and the 199-tap Hilbert pair the receiver runs today with single
+      # tones, counting the arithmetic each bills per sample.  It needs no radio and no toolchain.
+      - name: Measure the convolution RX filter against the SSB stage in use
+        working-directory: mchf-eclipse
+        run: make -C support/digi convolution-check

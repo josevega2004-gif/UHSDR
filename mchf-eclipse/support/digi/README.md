@@ -1414,7 +1414,90 @@ off, which is exactly the distortion the bench should be shown rather than hidin
 3. RTTY: chase the fast-fading failure with the numbers in front of us.
 4. Only then decide about FT8 RX, where the RAM question is per board rather than per mode.
 
-CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs nineteen steps - the
+## The convolution RX filter, `make -C support/digi convolution-check`
+
+`USE_CONVOLUTION` is an alternative SSB/CW receiver filter, committed as 3434f9db (2018-08-22) and
+commented out in every board configuration since. Instead of the two 199-tap Hilbert FIRs and the
+`i+q` / `i-q` sum that make the sideband decision today, it convolves the decimated I/Q with a
+1024-tap windowed-sinc complex bandpass, in the frequency domain, in eight partitions, and takes the
+real part as the audio: the filter and the demodulator become the same operation, and the cost stops
+depending on how steep the shape is. The maths is Warren Pratt's wdsp partitioned convolution.
+
+It had not been buildable since 1c09d16c (2019-02-02), and building it turned out to be the small
+part. Six things were wrong, in the order they were found:
+
+1. `Sample_Buffer` in `audio_driver.h` used `SAMPLE_BUFFER_SIZE` from a header that includes it. That
+   one line is why 95 of the 476 translation units failed, rather than one file.
+2. The FIFOs enqueued `mmb.nr_audio_buff[]` - the noise reducer's storage - as their own blocks, and
+   `Sample_in_buffer_add()` took an `NR_Buffer*` while `Sample_out_buffer_remove()` gave back an
+   `NR_Buffer*` read from a `Sample_Buffer*` array. The two types are only the same shape because
+   `NR_BUFFER_SIZE` and `SAMPLE_BUFFER_SIZE` happen to agree. The queues now own their blocks.
+3. `AudioDriver_SetConvolutionFilter()` - the function that turns the impulse response into the
+   frequency masks the worker multiplies by - was called from nowhere. Every mask was zero, so the
+   path could only have produced silence even if it had run.
+4. The block was filtered at the decimated rate while the filter was designed against
+   `IQ_SAMPLE_RATE_F` (48 kHz), which moves the passband by the decimation factor; and `cbs.DF`, the
+   divisor the interrupt used for the block size, was never assigned anywhere in the tree.
+5. The forward FFT is done **in place**, so by the time the code slid the second half of `fftin` into
+   its first half to form the next block's overlap history, `fftin` held a *spectrum*. wdsp does not
+   have this problem because its plan writes to a separate buffer. Measured against a plain complex
+   FIR over the same taps the values ran to 1e12, and the difference was 1197 times the reference.
+   The history now comes from the input block, which still holds the samples.
+6. The mask generator right-justifies each partition, and the note above it says "take output from
+   left side of output buff, discard right side" - with the author's own "unsure how to interpret
+   that" next to it. The code kept the right half. That is not a delay: the two halves of an
+   overlap-save block are the clean part and the wrap-corrupted part, so the filter in use was not
+   the filter that was designed. Measured, sideband separation went from 12.3 dB to 144 dB.
+
+Today the option compiles in all 95 units that can see it (`make build-config-check` holds it there),
+it links, and `convolution_probe.c` runs the shipped module on a host. What it is worth, measured by
+putting one complex tone through each path at the 2.7 kHz / 12 kHz filter path:
+
+| | convolution, 1024 taps | Hilbert pair + `i+q`, 199 taps |
+|---|---|---|
+| sideband separation at +-1350 Hz | **144 dB** | 88 dB |
+| response at +3000 / +4500 / +6000 Hz | -139 / -137 / -159 dB | -111 / -104 / -94 dB |
+| arithmetic per sample, counted as it runs | **372** | 786 |
+| the same 1024-tap shape as an ordinary FIR | 8192 per sample | - |
+| delay, decimated path | 10.0 ms (a 128-sample block is 10.7 ms of 12 kHz) | 8.25 ms |
+| delay, path that does not decimate | **2.0 ms** (the same block is 2.7 ms of 48 kHz) | 2.06 ms |
+| static RAM the module adds | **62 KiB** | none, the tables live in flash |
+| flash | +2,560 bytes | - |
+
+So the answer to "might it be better" is yes on both selectivity and cost per sample, at the price of
+about 2 ms and 62 KiB of RAM. Read the -140 dB figures with care: the harness computes in float32, so
+past roughly -140 dB you are seeing the arithmetic, not a bench measurement of a filter. The 88 dB
+versus 144 dB gap is real.
+
+The RAM is the reason the option stays off, and it is not a small reason: linking with it moves the
+ELF's bss from 93,860 to 157,276 bytes, so what is left between the end of `.bss` and the stack
+falls from 96,408 to 32,800 bytes, and `ui_spectrum.c:2128` mallocs the waterfall bitmap into exactly
+that space. What would have to happen before this could be switched on:
+
+* the arrays have to come down, or the RAM they compete with has to. `fftout[8][512]` and
+  `fmask[8][512]` are 32 KiB of the 62, and both are sized by `CONVOLUTION_MAX_NO_OF_BLOCKS`, i.e. by
+  the tap count - 512 taps would halve them at some cost in skirt shape, which is measurable here.
+* the block latency has to be listened to, and it depends on the filter path: the block is a fixed 128
+  samples, so it is 2.7 ms of audio at 48 kHz and 10.7 ms at the decimated 12 kHz the narrow SSB
+  filters use. The AGC, the notch, the post-demod filters and the audio output all still run on the
+  maintained side and receive samples that much later, which affects sidetone and any changeover.
+  That needs a radio, not a harness.
+* digimodes, AM, SAM and FM are deliberately untouched: `CONVOLUTION_USED_FOR()` names SSB and CW
+  only. The mode table this file documents would still have to be run against it on real audio.
+* `nfor` is clamped to the arrays instead of asserted, so a wider response than 8 partitions x 128
+  samples silently gets fewer taps.
+
+Re-measure with `make -C support/digi convolution-check`. Two of its checks are load bearing and were
+each demonstrated to fail: the partitioned pipeline has to reproduce a plain complex FIR over the same
+taps, run both ways round the interrupt boundary (8 samples a slice at the decimated rate, 32 at the
+full rate, because `IQ_BLOCK_SIZE` is 48000/1500 and neither is a block), and that catches 5 and 6
+above; and the sideband separation has to be at least what the Hilbert pair gives, where 12.3 dB was
+the failing number. It compiles `audio_convolution.c` as text
+because the mask and history arrays are file static, and it needs no radio and no ARM toolchain.
+The FFT the host build gives it is `convolution_fft.c`, which is not trusted: the FIR comparison in
+check 2 uses no transform at all, so if that transform were wrong the two would disagree.
+
+CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs twenty steps - the
 filter design check (`support/digi/design_rtty_filters.py`), `make digi-bench` (the self checks),
 the RTTY shift, SNR and reference error character error rate matrix, that matrix again with the long
 message, the negative control that tells the receiver the other symbol speed so the table has to
@@ -1426,7 +1509,8 @@ them through a WAV with a lead (`record-check`), the capture decoder's self test
 conformant stream that has to walk, ten streams that have to be refused and a recorder's answer that
 has to agree with the stream it came from (`oracle-check`, which needs no WebSDR client), the gate
 run on the pinned take and on the fixture that take is quoted from (`capture-check` and
-`fixture-check`), and the shaped 2.5 kHz floors against the readings
-this file documents (`floors-2k5-check`). `make -C support/digi wefax` and `floors-2k5` are targets
-of their own and are not among the nineteen. `make digi-bench` is also available on its own; it is
-one of the nineteen, not the whole job.
+`fixture-check`), the shaped 2.5 kHz floors against the readings this file documents
+(`floors-2k5-check`), and the convolution RX filter against the SSB stage in use
+(`convolution-check`). `make -C support/digi wefax` and `floors-2k5` are targets of their own and
+are not among the twenty. `make digi-bench` is also available on its own; it is
+one of the twenty, not the whole job.

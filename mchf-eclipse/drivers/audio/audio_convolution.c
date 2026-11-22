@@ -11,10 +11,8 @@
  ************************************************************************************/
 
 #include "audio_convolution.h"
-#include "audio_driver.h"
-#include "audio_nr.h"
-#include "arm_const_structs.h"
-#include "filters.h"
+#include "audio_driver.h"        // Sample_Buffer, the block the queues carry
+#include "arm_const_structs.h"    // arm_cfft_sR_f32_len256
 
 // convolution needs buffers of its own, the audio interrupt is using the
 // shared buffers at the same time
@@ -28,21 +26,19 @@ __IO int32_t Sample_out_tail = 0;
 Sample_Buffer* Sample_in_buffers[SAMPLE_BUFFER_FIFO_SIZE];
 Sample_Buffer* Sample_out_buffers[SAMPLE_BUFFER_FIFO_SIZE];
 
-// Both queues hold pointers to mmb.nr_audio_buff[] - NR_Buffer objects - while the arrays themselves
-// are typed Sample_Buffer*, and the add and remove functions on either side of them disagree about
-// which of the two they take (Sample_in_buffer_add takes an NR_Buffer*, :59, while
-// Sample_out_buffer_remove hands back an NR_Buffer* read from a Sample_Buffer* array, :109).  Nothing
-// in the tree relates the two types: each is `comp_float_t samples[256]` because SAMPLE_BUFFER_SIZE
-// and NR_BUFFER_SIZE happen to name the same length, so changing one of them leaves the queue giving
-// the audio interrupt a pointer it runs past the end of.  Tied here, where the pun is, so that day is
-// a compile error.  Without USE_ALTERNATE_NR there is no mmb to enqueue at all, hence the guard.
-#ifdef USE_ALTERNATE_NR
-_Static_assert(sizeof(NR_Buffer) == sizeof(Sample_Buffer),
-               "the Sample_in/Sample_out queues enqueue NR_Buffer pointers, so NR_Buffer and "
-               "Sample_Buffer must stay the same type");
-_Static_assert(NR_BUFFER_SIZE == SAMPLE_BUFFER_SIZE,
-               "NR_BUFFER_SIZE and SAMPLE_BUFFER_SIZE have to name the same block length");
-#endif
+// The queues carry blocks of this module's own storage, and they speak one type.
+//
+// They used to carry pointers into mmb.nr_audio_buff[], which is the noise reducer's storage: with
+// USE_CONVOLUTION and USE_ALTERNATE_NR both defined - which is how every configuration that ever
+// named them is built - the convolution path and the NR wrote the same four buffers from two
+// different interrupt levels, and nothing in the tree related the two block types either, because
+// Sample_in_buffer_add() took an NR_Buffer* while Sample_out_buffer_remove() handed back an
+// NR_Buffer* read out of a Sample_Buffer* array.  Each is `comp_float_t samples[256]` only for as
+// long as SAMPLE_BUFFER_SIZE and NR_BUFFER_SIZE happen to name the same length.
+//
+// Owning the blocks settles both at once: the queues cannot be handed to another feature, and
+// SAMPLE_BUFFER_SIZE can change without the audio interrupt being given a pointer that runs past
+// the end of what it points at.
 
 int Sample_in_buffer_peek(Sample_Buffer** c_ptr)
 {
@@ -73,7 +69,7 @@ int Sample_in_buffer_remove(Sample_Buffer** c_ptr)
 }
 
 /* no room left in the buffer returns 0 */
-int Sample_in_buffer_add(NR_Buffer* c)
+int Sample_in_buffer_add(Sample_Buffer* c)
 {
     int ret = 0;
     int32_t next_head = (Sample_in_head + 1) % SAMPLE_BUFFER_FIFO_SIZE;
@@ -123,7 +119,7 @@ int Sample_out_buffer_peek(Sample_Buffer** c_ptr)
 }
 
 
-int Sample_out_buffer_remove(NR_Buffer** c_ptr)
+int Sample_out_buffer_remove(Sample_Buffer** c_ptr)
 {
     int ret = 0;
 
@@ -170,6 +166,172 @@ int32_t Sample_out_has_room()
     // we need to say full 1 element earlier
     return SAMPLE_BUFFER_FIFO_SIZE - 1 - Sample_out_has_data();
 }
+
+// ---------------- the blocks the two queues carry, and who owns them ----------------
+
+static Sample_Buffer conv_blocks[SAMPLE_BUFFER_NUM];
+// The worker writes one whole block into a buffer it is handed back and forth, so the block type has
+// to be at least as long as the FFT's idea of a block.  Before the queues owned their buffers this
+// relationship existed only as an accident: the blocks were the noise reducer's, whose length and
+// the convolution's happened to be the same number.
+_Static_assert(SAMPLE_BUFFER_SIZE >= FFT_CONVOLUTION_SIZE / 2,
+               "a Sample_Buffer has to hold one block of convolution samples");
+// One slot more than there are blocks, so that head == tail means empty and never full: the ring
+// genuinely holds all SAMPLE_BUFFER_NUM blocks at the moment a filter path is switched.
+static Sample_Buffer* conv_free[SAMPLE_BUFFER_NUM + 1];
+static int32_t conv_free_head;
+static int32_t conv_free_tail;
+
+// The slice the audio interrupt is writing into the next block, and the slice it is reading out of
+// the block the worker has finished.  Both are kept between calls because one block is several
+// interrupt periods: cbs.size samples at the rate the block is carried, blockSizeIQ samples per
+// period.  That ratio is the whole of the module's latency, and the two of them have to be filled
+// and emptied at the same rate or the filtered stream develops a hole in it.
+static Sample_Buffer* conv_stage;
+static uint16_t conv_stage_count;
+static Sample_Buffer* conv_play;
+static uint16_t conv_play_count;
+
+void AudioDriver_ConvolutionReset(void)
+{
+    for (int32_t i = 0; i < SAMPLE_BUFFER_NUM; i++)
+    {
+        conv_free[i] = &conv_blocks[i];
+        for (uint16_t s = 0; s < SAMPLE_BUFFER_SIZE; s++)
+        {
+            conv_blocks[i].samples[s].real = 0.0f;
+            conv_blocks[i].samples[s].imag = 0.0f;
+        }
+    }
+    // the extra slot of the free ring is left unused while every block is free
+    conv_free[SAMPLE_BUFFER_NUM] = NULL;
+    conv_free_head = 0;
+    conv_free_tail = SAMPLE_BUFFER_NUM;
+
+    conv_stage = NULL;
+    conv_stage_count = 0;
+    conv_play = NULL;
+    conv_play_count = 0;
+
+    Sample_in_buffer_reset();
+    Sample_out_buffer_reset();
+}
+
+static Sample_Buffer* conv_block_take(void)
+{
+    if (conv_free_head == conv_free_tail)
+    {
+        return NULL;
+    }
+    Sample_Buffer* c = conv_free[conv_free_head];
+    conv_free_head = (conv_free_head + 1) % (SAMPLE_BUFFER_NUM + 1);
+    return c;
+}
+
+static void conv_block_give(Sample_Buffer* c)
+{
+    conv_free[conv_free_tail] = c;
+    conv_free_tail = (conv_free_tail + 1) % (SAMPLE_BUFFER_NUM + 1);
+}
+
+// Hand a slice of I/Q to the filter.  Returns the number of samples taken, which is the whole slice
+// unless the pipeline cannot start a block.  A slice is smaller than a block - the audio interrupt
+// hands over IQ_BLOCK_SIZE = 48000/1500 = 32 samples, or 8 of them once a narrow filter path has
+// decimated by 4, and a block is cbs.size = 128 - so a block is filled across four or sixteen calls
+// and the staging between them is what has to be right.  A block dropped here is a dropout in the
+// audio rather than a desynchronisation, which is what makes refusing better in an interrupt than
+// waiting.
+uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, uint16_t count)
+{
+    uint16_t done = 0;
+
+    if (cbs.size == 0)
+    {   // AudioDriver_SetProcessingChain() has not sized the blocks yet
+        return 0;
+    }
+
+    while (done < count)
+    {
+        if (conv_stage == NULL)
+        {
+            conv_stage = conv_block_take();
+            if (conv_stage == NULL)
+            {
+                break;
+            }
+            conv_stage_count = 0;
+        }
+
+        uint16_t room = cbs.size - conv_stage_count;
+        uint16_t taken = count - done < room ? count - done : room;
+
+        for (uint16_t k = 0; k < taken; k++)
+        {
+            conv_stage->samples[conv_stage_count + k].real = i[done + k];
+            conv_stage->samples[conv_stage_count + k].imag = q[done + k];
+        }
+        conv_stage_count += taken;
+        done += taken;
+
+        if (conv_stage_count == cbs.size)
+        {
+            // full block: pass it to the worker, which runs in the PendSV handler, and let the caller
+            // fill another one in the meantime
+            if (Sample_in_buffer_add(conv_stage) == 0)
+            {
+                conv_block_give(conv_stage);        // the worker is behind; drop this block, cleanly
+            }
+            conv_stage = NULL;
+            conv_stage_count = 0;
+        }
+    }
+    return done;
+}
+
+// Take finished samples back out of the filter.  Returns the number given, which is the whole request
+// as long as blocks have come back: 0 until the worker has produced a first one, and short of the
+// request only if it has run out mid slice.  Either way the caller fills silence for what is missing,
+// and after that the two streams run at the same rate because they carry the same samples.
+uint16_t AudioDriver_ConvolutionOutput(float32_t* i, float32_t* q, uint16_t count)
+{
+    uint16_t done = 0;
+
+    if (cbs.size == 0)
+    {
+        return 0;
+    }
+
+    while (done < count)
+    {
+        if (conv_play == NULL)
+        {
+            if (Sample_out_buffer_remove(&conv_play) == 0)
+            {
+                conv_play = NULL;
+                break;
+            }
+            conv_play_count = 0;
+        }
+
+        uint16_t room = cbs.size - conv_play_count;
+        uint16_t given = count - done < room ? count - done : room;
+
+        for (uint16_t k = 0; k < given; k++)
+        {
+            i[done + k] = conv_play->samples[conv_play_count + k].real;
+            q[done + k] = conv_play->samples[conv_play_count + k].imag;
+        }
+        conv_play_count += given;
+        done += given;
+
+        if (conv_play_count == cbs.size)
+        {
+            conv_block_give(conv_play);             // the block is read out, so it can be filled again
+            conv_play = NULL;
+        }
+    }
+    return done;
+}
 #endif
 
 #ifdef USE_CONVOLUTION
@@ -196,6 +358,16 @@ void AudioDriver_CalcConvolutionFilterCoeffs (int N, float32_t f_low, float32_t 
   float32_t cosphi;
   float32_t posi, posj;
   float32_t sinc, window, coef;
+
+  // The two cases in the loop below are the whole table.  An unrecognised wintype used to leave
+  // `window` holding whatever the previous iteration had left in it, so the coefficients - and the
+  // masks built from them, and the audio filtered by those masks - came out as a scaled copy of
+  // stale memory rather than as a filter.  Every caller in the tree means Blackman-Harris 4-term,
+  // so that is what an unknown value means now.
+  if (wintype != 0 && wintype != 1)
+  {
+    wintype = 0;
+  }
 
   if (N & 1)
   {
@@ -304,6 +476,17 @@ void AudioDriver_SetConvolutionFilter (int nc, float32_t f_low, float32_t f_high
 #ifdef USE_CONVOLUTION
 void convolution_handle()
 {
+	// This runs in the PendSV handler, out of the audio interrupt, which is the whole reason the
+	// design is interesting: a 256-point complex FFT is not something to want inside the sample ISR.
+	// It is called whenever the interrupt is pended, so all it may assume is that a block the
+	// interrupt finished writing is waiting in the in queue.  Nothing here may wait for one.
+	Sample_Buffer* block;
+
+	if (Sample_in_buffer_remove(&block) == 0)
+	{
+		return;
+	}
+
 	// put everything that should happen, when 128 samples are ready, into this function
 	/****************************************************************
 	 *
@@ -316,14 +499,12 @@ void convolution_handle()
 	 ****************************************************************/
 
 
-	            // input file: cob.i_buffer_convolution
+	            // input of this pass: the block the audio interrupt filled, one complex sample per
+	            // slot, oldest first
 	            // IIIIIIIIIIIIIIII
 	            // <- cbs.size   ->
 	            //
-	            // input file: cob.q_buffer_convolution
-	            // QQQQQQQQQQQQQQQQ
-	            // <- cbs.size   ->
-	            //
+	            // (the I and Q of one sample sit together in .real/.imag of the same slot)
 
 	            // NEW AUDIO SAMPLES: the two files interleaved
 	            // IQIQIQIQIQIQIQIQIQIQIQIQIQIQIQIQ
@@ -372,8 +553,8 @@ void convolution_handle()
 	                // left half already contains data from last round
 	                for(int idx=0; idx < cbs.size; idx++)
 	                {
-	                	cob.fftin[fft_conv_size + 2 * idx + 0] = cob.i_buffer_convolution[idx];
-	                  	cob.fftin[fft_conv_size + 2 * idx + 1] = cob.q_buffer_convolution[idx];
+	                	cob.fftin[fft_conv_size + 2 * idx + 0] = block->samples[idx].real;
+	                  	cob.fftin[fft_conv_size + 2 * idx + 1] = block->samples[idx].imag;
 	                }
 
 	                // fftin --> one input buffer
@@ -384,6 +565,18 @@ void convolution_handle()
 	                for (int idx = 0; idx < fft_conv_size * 2; idx++)
 	                {
 	                	cob.fftout[cbs.buffidx][idx] = cob.fftin[idx];
+	                }
+	                // The transform above is in place, so fftin now holds a spectrum and its time
+	                // samples are gone.  The next block needs these ones as the low half of its
+	                // window, and the only copy left is the block that has not been written over
+	                // yet, so the history is restored from there here - not after the inverse
+	                // transform, which is where this code used to do it and where fftin has been a
+	                // spectrum for two steps by then.  wdsp, which this was adapted from, does not
+	                // have the problem because its plan writes the transform to a separate buffer.
+	                for(int idx = 0; idx < cbs.size; idx++)
+	                {
+	                	cob.fftin[2 * idx + 0] = block->samples[idx].real;
+	                	cob.fftin[2 * idx + 1] = block->samples[idx].imag;
 	                }
 	                //fftw_execute (a->pcfor[a->buffidx]);
 
@@ -427,19 +620,29 @@ void convolution_handle()
 	                // audio is in right half of the output buffer accum
 	                arm_cfft_f32(&arm_cfft_sR_f32_len256, cob.accum, 1, 1);
 	                // fftw_execute (a->crev);
-	                // copy FFT input buffer to left half of FFT input buffer for next round
-	                // --> overlap 50%
-	                for(int idx=0; idx < cbs.size; idx++)
-	                {
-	                	cob.fftin[2 * idx + 0] = cob.fftin[fft_conv_size + 2 * idx + 0];
-	                	cob.fftin[2 * idx + 1] = cob.fftin[fft_conv_size + 2 * idx + 1];
-	                }
+	                // the input history was already restored from the block above, before the
+	                // inverse transform; taking it from fftin here would take the spectrum instead
 	                //memcpy (a->fftin, &(a->fftin[2 * a->size]), a->size * sizeof(complex));
-	                // copy I & Q inverse FFT results (from second half of accum) to adb.i_buffer_convolution and adb.q_buffer_convolution
+	                // Take the LEFT half of the inverse FFT output, and discard the right one.
+	                // This is what the note above the mask generator has said all along - "I
+	                // right-justified the impulse response => take output from left side of output
+	                // buff, discard right side" - with DD4WH's own "unsure how to interpret that"
+	                // next to it, and the code did the opposite: it kept the right half.  The two
+	                // halves of an overlap-save block are the circular part and the clean part, so
+	                // choosing the wrong one is not a delay, it is a filter that is not the filter
+	                // that was designed.  Measured (support/digi/convolution_probe.c), with the
+	                // passband at +270..+2700 designed against 12 kHz:
+	                //
+	                //   right half:  opposite sideband leaks at -12 dB, and the output differs from
+	                //                  a plain complex FIR over the same taps by 0.97 (relative)
+	                //   left half :  opposite sideband -140 dB, and 3e-07 from the same FIR
+	                //
+	                // which is also the difference between a 12 dB sideband score and the 88 dB the
+	                // 199-tap Hilbert pair already gives the receiver today.
 	                for(int idx = 0; idx < cbs.size; idx++)
 	                {
-	                	cob.i_buffer_convolution[idx] = cob.accum[fft_conv_size + 2 * idx + 0];
-	                	cob.q_buffer_convolution[idx] = cob.accum[fft_conv_size + 2 * idx + 1];
+	                	block->samples[idx].real = cob.accum[2 * idx + 0];
+	                	block->samples[idx].imag = cob.accum[2 * idx + 1];
 	                }
 	                // these buffers now contain the bandpass filtered audio
 	                // which already has suppressed opposite sideband (if cutoff-frequencies have been set correctly for the BP filter)
@@ -452,591 +655,21 @@ void convolution_handle()
 	/* ************************************************
 	 *  AGC
 	 * ************************************************/
-	            // perform AGC on I and Q
-	                // we need the stereo version of the AGC
-	    AudioDriver_RxAgcWdsp(cbs.size, cob.i_buffer_convolution, cob.q_buffer_convolution);
+	            // AGC: deliberately not here.  The AGC the radio runs today is driven from the audio
+	            // interrupt on the blocks of adb.a_buffer, with its rate and its DC removal set up
+	            // next to the filter path, so a second copy running on I and Q before demodulation
+	            // would leave the receiver with two AGCs fighting over one gain.  This function hands
+	            // the filtered block back and lets the part of the chain that is maintained do the
+	            // rest - which is also the part the sketch below the convolution never wrote.
+	            //
+	            // The old line was `AudioDriver_RxAgcWdsp(cbs.size, cob.i_buffer_convolution,
+	            // cob.q_buffer_convolution)`: no function of that name has existed in the tree since
+	            // 2019, which is the same year the rest of this branch stopped compiling.
 
-	            /*
-	             *  TODO: deal with Digimodes and FM
-	             *
-	             */
-
-	/* ************************************************
-	 *  DEMODULATION
-	 * ************************************************/
-
-
-	    // for first test, we assume USB demodulation (hard coded filter passband +250Hz to +2700Hz in AudioDriver_SetRxAudioProcessing)
-	    // for LSB, you would use -2700Hz to -250Hz
-
-	    // very easy: in SSB, the real part of the (second half of the) iFFT output is the demodulated audio!
-	    // switching between sidebands is only done by selecting the passband cutoff frequencies (coefficients) of the bandpass filter
-
-	    // that means, that the cob.i_buffer_convolution already contains the demodulated audio for SSB and CW mode!
-
-	    // i_buffer_convolution
-	    // IIIIIIIIIIIIIIII
-	    // <- cbs.size   ->
-	    // --> this is the demodulated audio of size -> cob.size)
+	if (Sample_out_buffer_add(block) == 0)
+	{
+		conv_block_give(block);        // the interrupt is not reading: this block is late, not lost
+	}
 }
 
 #endif
-
-#ifdef USE_CONVOLUTION
-//
-//*----------------------------------------------------------------------------
-//* Function Name       : Convolution-based audio_rx_processor
-//* Object              :
-//* Object              : audio sample processor based on partitioned block convolution, DD4WH 2018_08_18
-//* Input Parameters    :
-//* Output Parameters   :
-//* Functions called    :
-//*----------------------------------------------------------------------------
-void AudioDriver_RxProcessorConvolution(AudioSample_t * const src, AudioSample_t * const dst, const uint16_t blockSize)
-{
-    // this is the main RX audio function
-	// it is driven with 32 samples in the complex buffer scr, meaning 32 * I AND 32 * Q
-	// blockSize is thus 32, DD4WH 2018_02_06
-
-	//	const int16_t blockSizeDecim = blockSize/(int16_t)ads.decimation_rate;
-	const int16_t blockSizeDecim = blockSize/(int16_t)cbs.DF;
-    // we copy volatile variables which are used multiple times to local consts to let the compiler to its optimization magic
-    // since we are in an interrupt, no one will change these anyway
-    // shaved off a few bytes of code
-    const uint8_t dmod_mode = ts.dmod_mode;
-    const uint8_t tx_audio_source = ts.tx_audio_source;
-    const uint8_t iq_freq_mode = ts.iq_freq_mode;
-    const uint8_t  dsp_active = ts.dsp_active;
-#ifdef USE_TWO_CHANNEL_AUDIO
-    const bool use_stereo = ((dmod_mode == DEMOD_IQ || dmod_mode == DEMOD_SSBSTEREO || (dmod_mode == DEMOD_SAM && ads.sam_sideband == SAM_SIDEBAND_STEREO)) && ts.stereo_enable);
-#endif
-    float post_agc_gain_scaling;
-
-    if (tx_audio_source == TX_AUDIO_DIGIQ)
-    {
-
-        for(uint32_t i = 0; i < blockSize; i++)
-        {
-            // 16 bit format - convert to float and increment
-            // we collect our I/Q samples for USB transmission if TX_AUDIO_DIGIQ
-            audio_in_put_buffer(src[i].l);
-            audio_in_put_buffer(src[i].r);
-        }
-    }
-
-    if (ads.af_disabled == 0 )
-    {
-        // Split stereo channels
-        for(uint32_t i = 0; i < blockSize; i++)
-        {
-            if(src[i].l > ADC_CLIP_WARN_THRESHOLD/4)            // This is the release threshold for the auto RF gain
-            {
-                ads.adc_quarter_clip = 1;
-                if(src[i].l > ADC_CLIP_WARN_THRESHOLD/2)            // This is the trigger threshold for the auto RF gain
-                {
-                    ads.adc_half_clip = 1;
-                    if(src[i].l > ADC_CLIP_WARN_THRESHOLD)          // This is the threshold for the red clip indicator on S-meter
-                    {
-                        ads.adc_clip = 1;
-                    }
-                }
-            }
-            adb.i_buffer[i] = (float32_t)src[i].l;
-            adb.q_buffer[i] = (float32_t)src[i].r;
-        }
-
-        // artificial amplitude imbalance for testing of the automatic IQ imbalance correction
-        //    arm_scale_f32 (adb.i_buffer, 0.6, adb.i_buffer, blockSize);
-
-
-        AudioDriver_RxHandleIqCorrection(blockSize);
-
-
-        // Spectrum display sample collect for magnify == 0
-        AudioDriver_SpectrumNoZoomProcessSamples(blockSize);
-
-        if(iq_freq_mode)            // is receive frequency conversion to be done?
-        {
-            AudioDriver_FreqConversion(adb.i_buffer, adb.q_buffer, blockSize, iq_freq_mode == FREQ_IQ_CONV_P6KHZ || iq_freq_mode == FREQ_IQ_CONV_P12KHZ);
-        }
-
-        // Spectrum display sample collect for magnify != 0
-        AudioDriver_SpectrumZoomProcessSamples(blockSize);
-
-        //  Demodulation, optimized using fast ARM math functions as much as possible
-
-        bool dvmode_signal = false;
-
-
-	// Convolution Filtering DD4WH 2018_08_18
-
-	//      1. decimation
-	//		2. collect samples until we have 128 samples to deal within the convolution
-	//		3. Convolution Filtering
-	//		4. AGC working on both I & Q independently
-	//		5. demodulation (LSB, USB, AM, SAM)
-	//		6. LPC-based noise blanker
-	//		7. spectral noise reduction
-	//		8. scaling
-	//		9. auto-notch LMS filter
-	//		10. biquad filter (manual notch, peak, bass adjustment)
-	//      11. RTTY/BPSK/CW decoding
-	//		12. interpolation
-	//		13. biquad treble filter
-	//		14. mute/scale for lineout, beep etc.
-	//		15. account for 128 output samples
-//
-
-        if (dvmode_signal == false)
-        {
-        	//
-        	if(cbs.DF != 1)
-        	{
-        	//      1. decimation
-        	// I & Q are decimated in place the same buffer
-        		arm_fir_decimate_f32(&DECIMATE_RX_I, adb.i_buffer, adb.i_buffer, blockSize);
-        		arm_fir_decimate_f32(&DECIMATE_RX_Q, adb.q_buffer, adb.q_buffer, blockSize);
-        	}
-/********************************************************************************************************************/
-        	//		2. collect samples until we have 128 samples to deal within the convolution
-            // put those samples into a new buffer cob.i_buffer_convolution and cob.q_buffer_convolution
-
-            // when 128 samples are ready, continue HERE:
-            // BTW, please use cbs.size instead of hard coded 128, because that could change.
-            // TODO: I will set cbs.size in the function AudioDriver_SetRxAudioProcessing
-
-                const uint8_t  dsp_active = ts.dsp_active;
-                static int trans_count_in=0;
-                static int outbuff_count=0;
-                static int Sample_fill_in_pt=0;
-                static Sample_Buffer* out_buffer = NULL;
-                //
-                // attention -> change no of samples according to decimation factor!
-
-                for (int k = 0; k < blockSizeDecim; k++) //transfer our noisy audio to our NR-input buffer
-                {
-                	// use new buffers for I & Q, because we cannot use the shared buffers
-                	cob.i_buffer_convolution[Sample_fill_in_pt][trans_count_in] = adb.i_buffer[k];
-                	cob.q_buffer_convolution[Sample_fill_in_pt][trans_count_in] = adb.q_buffer[k];
-
-                    //mmb.nr_audio_buff[Sample_fill_in_pt].samples[trans_count_in].real=inout_buffer[k];
-                    //mmb.nr_audio_buff[Sample_fill_in_pt].samples[trans_count_in].imag=inout_buffer[k+1];
-                    //trans_count_in++;
-                    trans_count_in++; // count the samples towards FFT-size
-                }
-
-                if (trans_count_in >= (cbs.size * 2)) // FFT size is always (input block size * 2)
-                    //FFT_SIZE has to be an integer mult. of blockSizeDecim!!!
-                {
-                	// I do not understand the next line? Where is that saved?
-                	// makes no sense to me to call a function with a return value, where the return value is not used
-                    //Sample_in_buffer_add(&mmb.nr_audio_buff[Sample_fill_in_pt]); // save pointer to full buffer
-                    Sample_in_buffer_add(&mmb.nr_audio_buff[Sample_fill_in_pt]); // save pointer to full buffer
-                    trans_count_in=0;                              // set counter to 0
-                    Sample_fill_in_pt++;                               // increase pointer index
-                    Sample_fill_in_pt %= SAMPLE_BUFFER_NUM;            // make sure, that index stays in range
-
-                    //at this point we have transfered one complete block of 128 (?) samples to one buffer
-                }
-
-                //**********************************************************************************
-                //don't worry!  in the mean time the noise reduction routine is (hopefully) doing it's job within ui
-                //as soon as "fdv_audio_has_data" we can start harvesting the output
-                //**********************************************************************************
-
-                if (out_buffer == NULL && SAMPLE_out_has_data() > 1)
-                {
-                    Sample_out_buffer_peek(&out_buffer);
-                }
-
-                float32_t Sample_dec_buffer[blockSizeDecim];
-
-                if (out_buffer != NULL)  // Convolution-routine has finished it's job
-                {
-                    for (int j=0; j < blockSizeDecim; j=j+2) // transfer filtered data back to our buffer
-                    {
-                    	//                        NR_dec_buffer[j]   = out_buffer->samples[outbuff_count+NR_FFT_SIZE].real; //here add the offset in the buffer
-                    	//                        NR_dec_buffer[j+1] = out_buffer->samples[outbuff_count+NR_FFT_SIZE].imag; //here add the offset in the buffer
-                    	// totally unclear to me, what ->samples means . . .
-                    	// why offset?
-                    	Sample_dec_buffer[j]   = out_buffer->samples[outbuff_count+NR_FFT_SIZE].real; //here add the offset in the buffer
-                    	Sample_dec_buffer[j+1] = out_buffer->samples[outbuff_count+NR_FFT_SIZE].imag; //here add the offset in the buffer
-                        outbuff_count++;
-                    }
-
-                    if (outbuff_count >= (cbs.size * 2)) // we reached the end of the buffer coming from NR
-                    {
-                        outbuff_count = 0;
-                        Sample_out_buffer_remove(&out_buffer);
-                        out_buffer = NULL;
-                        Sample_out_buffer_peek(&out_buffer);
-                    }
-                }
-
-                {
-                    arm_copy_f32(NR_dec_buffer, inout_buffer, blockSizeDecim);
-                }
-
-
-/********************************************************************************************************************/
-
-/*
- *
- *  FROM HERE: OLD CODE!!!!
- *  TODO: work on this
- *
- */
-
-#if 0
-            switch(dmod_mode)
-            {
-            case DEMOD_LSB:
-                arm_sub_f32(adb.i_buffer, adb.q_buffer, adb.a_buffer[0], blockSizeIQ);   // difference of I and Q - LSB
-                break;
-            case DEMOD_CW:
-                if(!ts.cw_lsb)  // is this USB RX mode?  (LSB of mode byte was zero)
-                {
-                    arm_add_f32(adb.i_buffer, adb.q_buffer, adb.a_buffer[0], blockSizeIQ);   // sum of I and Q - USB
-                }
-                else    // No, it is LSB RX mode
-                {
-                    arm_sub_f32(adb.i_buffer, adb.q_buffer, adb.a_buffer[0], blockSizeIQ);   // difference of I and Q - LSB
-                }
-                break;
-
-            case DEMOD_AM:
-            case DEMOD_SAM:
-                AudioDriver_DemodSAM(blockSize); // lowpass filtering, decimation, and SAM demodulation
-                // TODO: the above is "real" SAM, old SAM mode (below) could be renamed and implemented as DSB (double sideband mode)
-                // if anybody needs that
-
-                //            arm_sub_f32(adb.i_buffer, adb.q_buffer, adb.f_buffer, blockSize);   // difference of I and Q - LSB
-                //            arm_add_f32(adb.i_buffer, adb.q_buffer, adb.e_buffer, blockSize);   // sum of I and Q - USB
-                //            arm_add_f32(adb.e_buffer, adb.f_buffer, adb.a_buffer[0], blockSize);   // sum of LSB & USB = DSB
-
-                break;
-            case DEMOD_FM:
-                AudioDriver_DemodFM(blockSize);
-                break;
-            case DEMOD_DIGI:
-                // if we are here, the digital codec (e.g. because of no signal) asked to decode
-                // using analog demodulation in the respective sideband
-                if (ts.digi_lsb)
-                {
-                    arm_sub_f32(adb.i_buffer, adb.q_buffer, adb.a_buffer[0], blockSizeIQ);   // difference of I and Q - LSB
-                }
-                else
-                {
-                    arm_add_f32(adb.i_buffer, adb.q_buffer, adb.a_buffer[0], blockSizeIQ);   // sum of I and Q - USB
-                }
-                break;
-#ifdef USE_TWO_CHANNEL_AUDIO
-            case DEMOD_IQ:	// leave I & Q as they are!
-            	arm_copy_f32(adb.i_buffer, adb.a_buffer[0], blockSizeIQ);
-            	arm_copy_f32(adb.q_buffer, adb.a_buffer[1], blockSizeIQ);
-            	break;
-            case DEMOD_SSBSTEREO: // LSB-left, USB-right
-            	arm_add_f32(adb.i_buffer, adb.q_buffer, adb.a_buffer[0], blockSizeIQ);   // sum of I and Q - USB
-                arm_sub_f32(adb.i_buffer, adb.q_buffer, adb.a_buffer[1], blockSizeIQ);   // difference of I and Q - LSB
-            	break;
-#endif
-            case DEMOD_USB:
-            default:
-                arm_add_f32(adb.i_buffer, adb.q_buffer, adb.a_buffer[0], blockSizeIQ);   // sum of I and Q - USB
-                break;
-            }
-
-            if(dmod_mode != DEMOD_FM)       // are we NOT in FM mode?  If we are not, do decimation, filtering, DSP notch/noise reduction, etc.
-            {
-                // Do decimation down to lower rate to reduce processor load
-                if (    DECIMATE_RX_I.numTaps > 0
-                        && use_decimatedIQ == false // we did not already decimate the input earlier
-                        && dmod_mode != DEMOD_SAM
-                        && dmod_mode != DEMOD_AM) // in AM/SAM mode, the decimation has been done in both I & Q path --> AudioDriver_Demod_SAM
-                {
-                    // TODO HILBERT
-                    arm_fir_decimate_f32(&DECIMATE_RX_I, adb.a_buffer[0], adb.a_buffer[0], blockSizeIQ);      // LPF built into decimation (Yes, you can decimate-in-place!)
-#ifdef USE_TWO_CHANNEL_AUDIO
-                    if(use_stereo)
-                    {
-                        arm_fir_decimate_f32(&DECIMATE_RX_Q, adb.a_buffer[1], adb.a_buffer[1], blockSizeIQ);      // LPF built into decimation (Yes, you can decimate-in-place!)
-                    }
-#endif
-                }
-
-                if (ts.dsp_inhibit == false)
-                {
-                    if((dsp_active & DSP_NOTCH_ENABLE) && (dmod_mode != DEMOD_CW) && !(dmod_mode == DEMOD_SAM && (FilterPathInfo[ts.filter_path].sample_rate_dec) == RX_DECIMATION_RATE_24KHZ))       // No notch in CW
-                    {
-                        {
-//#ifdef OBSOLETE_NR
-#ifdef USE_LMS_AUTONOTCH
-                        	AudioDriver_NotchFilter(blockSizeDecim, adb.a_buffer[0]);     // Do notch filter
-#endif
-                        }
-                    }
-
-                }
-
-                // Apply audio  bandpass filter
-                if ((IIR_PreFilter[0].numStages > 0))   // yes, we want an audio IIR filter
-                {
-                    arm_iir_lattice_f32(&IIR_PreFilter[0], adb.a_buffer[0], adb.a_buffer[0], blockSizeDecim);
-#ifdef USE_TWO_CHANNEL_AUDIO
-                    if(use_stereo && !ads.af_disabled)
-                    {
-                         arm_iir_lattice_f32(&IIR_PreFilter[1], adb.a_buffer[1], adb.a_buffer[1], blockSizeDecim);
-                    }
-#endif
-                }
-
-                // now process the samples and perform the receiver AGC function
-#ifdef USE_TWO_CHANNEL_AUDIO
-                    AudioDriver_RxAgcWdsp(blockSizeDecim, adb.a_buffer[0], adb.a_buffer[1]);
-#else
-                    AudioDriver_RxAgcWdsp(blockSizeDecim, adb.a_buffer[0]);
-#endif
-
-                if (ts.nb_setting > 0 || (dsp_active & DSP_NR_ENABLE)) //start of new nb or new noise reduction
-                {
-                    // NR in and out buffers are the share of the multi mode buffers used for the audio
-                    // interrupt: the input uses the first half of each array, the output the second half
-
-                    if (ads.decimation_rate == 4)   //  to make sure, that we are at 12Ksamples
-                    {
-                        AudioDriver_RxProcessorNoiseReduction(blockSizeDecim, adb.a_buffer[0]);
-
-                    }
-                } // end of new nb
-
-                // Calculate scaling based on decimation rate since this affects the audio gain
-                if ((FilterPathInfo[ts.filter_path].sample_rate_dec) == RX_DECIMATION_RATE_12KHZ)
-                {
-                    post_agc_gain_scaling = POST_AGC_GAIN_SCALING_DECIMATE_4;
-                }
-                else
-                {
-                    post_agc_gain_scaling = POST_AGC_GAIN_SCALING_DECIMATE_2;
-                }
-
-                // Scale audio according to AGC setting, demodulation mode and required fixed levels and scaling
-                float32_t scale_gain;
-                if(dmod_mode == DEMOD_AM || dmod_mode == DEMOD_SAM)
-                {
-                        scale_gain = post_agc_gain_scaling * 0.5; // ignore ts.max_rf_gain  --> has no meaning with WDSP AGC; and take into account AM scaling factor
-                }
-                else        // Not AM
-                {
-                        scale_gain = post_agc_gain_scaling * 0.333; // ignore ts.max_rf_gain --> has no meaning with WDSP AGC
-                }
-                arm_scale_f32(adb.a_buffer[0],scale_gain, adb.a_buffer[0], blockSizeDecim); // apply fixed amount of audio gain scaling to make the audio levels correct along with AGC
-#ifdef USE_TWO_CHANNEL_AUDIO
-                if(use_stereo)
-                {
-                    arm_scale_f32(adb.a_buffer[1],scale_gain, adb.a_buffer[1], blockSizeDecim); // apply fixed amount of audio gain scaling to make the audio levels correct along with AGC
-                }
-#endif
-                // this is the biquad filter, a notch, peak, and lowshelf filter
-                arm_biquad_cascade_df1_f32 (&IIR_biquad_1[0], adb.a_buffer[0],adb.a_buffer[0], blockSizeDecim);
-#ifdef USE_TWO_CHANNEL_AUDIO
-                if(use_stereo)
-                {
-                    arm_biquad_cascade_df1_f32 (&IIR_biquad_1[1], adb.a_buffer[1],adb.a_buffer[1], blockSizeDecim);
-                }
-#endif
-#ifdef USE_RTTY_PROCESSOR
-                if (is_demod_rtty() && blockSizeDecim == 8) // only works when decimation rate is 4 --> sample rate == 12ksps
-                {
-                    AudioDriver_RxProcessor_Rtty(adb.a_buffer[0], blockSizeDecim);
-                }
-#endif
-                if (is_demod_psk() && blockSizeDecim == 8) // only works when decimation rate is 4 --> sample rate == 12ksps
-                {
-                    AudioDriver_RxProcessor_Bpsk(adb.a_buffer[0], blockSizeDecim);
-                }
-//                if(blockSizeDecim ==8 && dmod_mode == DEMOD_CW)
-//                if(ts.cw_decoder_enable && blockSizeDecim ==8 && (dmod_mode == DEMOD_CW || dmod_mode == DEMOD_AM || dmod_mode == DEMOD_SAM))
-                if(blockSizeDecim ==8 && (dmod_mode == DEMOD_CW || dmod_mode == DEMOD_AM || dmod_mode == DEMOD_SAM))
-// switch to use TUNE HELPER in AM/SAM
-                {
-                	CwDecode_RxProcessor(adb.a_buffer[0], blockSizeDecim);
-                }
-
-                // resample back to original sample rate while doing low-pass filtering to minimize audible aliasing effects
-                if (INTERPOLATE_RX[0].phaseLength > 0)
-                {
-#ifdef USE_TWO_CHANNEL_AUDIO
-                    float32_t temp_buffer[IQ_BLOCK_SIZE];
-                    if(use_stereo)
-                    {
-                        arm_fir_interpolate_f32(&INTERPOLATE_RX[1], adb.a_buffer[1], temp_buffer, blockSizeDecim);
-                    }
-#endif
-                    arm_fir_interpolate_f32(&INTERPOLATE_RX[0], adb.a_buffer[0], adb.a_buffer[1], blockSizeDecim);
-
-#ifdef USE_TWO_CHANNEL_AUDIO
-                    if(use_stereo)
-                    {
-                        arm_copy_f32(temp_buffer,adb.a_buffer[0],blockSize);
-                    }
-#endif
-
-                }
-                // additional antialias filter for specific bandwidths
-                // IIR ARMA-type lattice filter
-                if (IIR_AntiAlias[0].numStages > 0)   // yes, we want an interpolation IIR filter
-                {
-                    arm_iir_lattice_f32(&IIR_AntiAlias[0], adb.a_buffer[1], adb.a_buffer[1], blockSize);
-#ifdef USE_TWO_CHANNEL_AUDIO
-                    if(use_stereo)
-                    {
-                        arm_iir_lattice_f32(&IIR_AntiAlias[1], adb.a_buffer[0], adb.a_buffer[0], blockSize);
-                    }
-#endif
-                }
-
-            } // end NOT in FM mode
-            else if(dmod_mode == DEMOD_FM)           // it is FM - we don't do any decimation, interpolation, filtering or any other processing - just rescale audio amplitude
-            {
-                arm_scale_f32(
-                        adb.a_buffer[0],
-                        RadioManagement_FmDevIs5khz() ? FM_RX_SCALING_5K : FM_RX_SCALING_2K5,
-                                adb.a_buffer[1],
-                                blockSizeDecim);  // apply fixed amount of audio gain scaling to make the audio levels correct along with AGC
-#ifdef USE_TWO_CHANNEL_AUDIO
-                    AudioDriver_RxAgcWdsp(blockSizeDecim, adb.a_buffer[0], adb.a_buffer[1]);
-#else
-                    AudioDriver_RxAgcWdsp(blockSizeDecim, adb.a_buffer[0]);
-#endif
-            }
-
-            // this is the biquad filter, a highshelf filter
-            arm_biquad_cascade_df1_f32 (&IIR_biquad_2[0], adb.a_buffer[1],adb.a_buffer[1], blockSize);
-#ifdef USE_TWO_CHANNEL_AUDIO
-            if(use_stereo)
-            {
-                arm_biquad_cascade_df1_f32 (&IIR_biquad_2[1], adb.a_buffer[0],adb.a_buffer[0], blockSize);
-            }
-#endif
-
-#endif // of temporary #if 0
-        } // end of if (dvmode_signal == false)
-
-    } // end of     if (ads.af_disabled == 0 )
-
-    // interpolation
-
-// TODO: at this point we have 128 real audio samples filtered and AGC´ed in the variable 	 (for mono modes)
-    // for stereo modes (not yet implemented), the other channel is in cob.q_buffer_convolution
-
-    // now we have to make blocks of 32 samples out of that for further processing
-    // and put these into adb.a_buffer[0] and adb.a_buffer[1]
-    // (the latter is only different from adb.a_buffer[0] for stereo modes, not yet implemented)
-
-
-
-    bool do_mute_output =
-            ts.audio_dac_muting_flag
-            || ts.audio_dac_muting_buffer_count > 0
-            || (ads.af_disabled)
-            || ((dmod_mode == DEMOD_FM) && ads.fm_squelched);
-    // this flag is set during rx tx transition, so once this is active we mute our output to the I2S Codec
-
-    if (do_mute_output)
-        // fill audio buffers with zeroes if we are to mute the receiver completely while still processing data OR it is in FM and squelched
-        // or when filters are switched
-    {
-        arm_fill_f32(0, adb.a_buffer[0], blockSize);
-        arm_fill_f32(0, adb.a_buffer[1], blockSize);
-        if (ts.audio_dac_muting_buffer_count > 0)
-        {
-            ts.audio_dac_muting_buffer_count--;
-        }
-    }
-    else
-    {
-#ifdef USE_TWO_CHANNEL_AUDIO
-        // BOTH CHANNELS "FIXED" GAIN as input for audio amp and headphones/lineout
-        // each output path has its own gain control.
-    	// Do fixed scaling of audio for LINE OUT
-    	arm_scale_f32(adb.a_buffer[1], LINE_OUT_SCALING_FACTOR, adb.a_buffer[1], blockSize);
-    	if (use_stereo)
-    	{
-    		arm_scale_f32(adb.a_buffer[0], LINE_OUT_SCALING_FACTOR, adb.a_buffer[0], blockSize);
-    	}
-    	else
-    	{
-    		// we simply copy the data from the other channel
-    		arm_copy_f32(adb.a_buffer[1], adb.a_buffer[0], blockSize);
-    	}
-#else
-        // VARIABLE LEVEL FOR SPEAKER
-        // LINE OUT (constant level)
-    	arm_scale_f32(adb.a_buffer[1], LINE_OUT_SCALING_FACTOR, adb.a_buffer[0], blockSize);       // Do fixed scaling of audio for LINE OUT and copy to "a" buffer in one operation
-#endif
-    	//
-        // AF gain in "ts.audio_gain-active"
-        //  0 - 16: via codec command
-        // 17 - 20: soft gain after decoder
-        //
-#ifdef UI_BRD_MCHF
-        if(ts.rx_gain[RX_AUDIO_SPKR].value > CODEC_SPEAKER_MAX_VOLUME)    // is volume control above highest hardware setting?
-        {
-            arm_scale_f32(adb.a_buffer[1], (float32_t)ts.rx_gain[RX_AUDIO_SPKR].active_value, adb.a_buffer[1], blockSize);    // yes, do software volume control adjust on "b" buffer
-        }
-#endif
-    }
-
-
-
-    float32_t usb_audio_gain = ts.rx_gain[RX_AUDIO_DIG].value/31.0;
-
-    // Transfer processed audio to DMA buffer
-    for(int i=0; i < blockSize; i++)                            // transfer to DMA buffer and do conversion to INT
-    {
-        // TODO: move to softdds ...
-        if((ts.beep_active) && (ads.beep.step))         // is beep active?
-        {
-            // Yes - Calculate next sample
-            // shift accumulator to index sine table
-            adb.a_buffer[1][i] += (float32_t)softdds_nextSample(&ads.beep) * ads.beep_loudness_factor; // load indexed sine wave value, adding it to audio, scaling the amplitude and putting it on "b" - speaker (ONLY)
-        }
-        else                    // beep not active - force reset of accumulator to start at zero to minimize "click" caused by an abrupt voltage transition at startup
-        {
-            ads.beep.acc = 0;
-        }
-
-        if (do_mute_output)
-        {
-            dst[i].l = 0;
-            dst[i].r = 0;
-        }
-        else
-        {
-        	dst[i].l = adb.a_buffer[1][i];
-        	dst[i].r = adb.a_buffer[0][i];
-        }
-        // Unless this is DIGITAL I/Q Mode, we sent processed audio
-        if (tx_audio_source != TX_AUDIO_DIGIQ)
-        {
-        	int16_t vals[2];
-
-#ifdef USE_TWO_CHANNEL_AUDIO
-        	vals[0] = adb.a_buffer[0][i] * usb_audio_gain;
-        	vals[1] = adb.a_buffer[1][i] * usb_audio_gain;
-#else
-        	vals[0] = vals[1] = adb.a_buffer[0][i] * usb_audio_gain;
-#endif
-
-        	audio_in_put_buffer(vals[0]);
-            audio_in_put_buffer(vals[1]);
-        }
-
-    }
-
-}
-
-
-
-#endif
-

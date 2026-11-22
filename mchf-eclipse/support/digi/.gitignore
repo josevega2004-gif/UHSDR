@@ -8,3 +8,4 @@ digi_bench-break-rx
 # the WebSDR client capture/decode_oracle.js loads: pa3fwm's, all rights reserved, and allowed only
 # to be served unmodified by the receiver, so a local copy must never end up in a commit
 capture/websdr-sound.js
+convolution_probe

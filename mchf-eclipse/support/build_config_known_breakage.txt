@@ -20,35 +20,18 @@
 # than their own -D to be built at all are named with `SKIP OPTION` below, with the reason.
 
 # Fast convolution RX filtering.  hardware/uhsdr_board_config.h:89 has been commented out since
-# 3434f9db (2018-08-22), and the branch drifted from the API in the restructurings that followed:
+# 3434f9db (2018-08-22), and until now the branch could not be built at all: it had drifted from every
+# API the 2019 restructurings moved (adb.i_buffer, fm_squelched, ts.dsp_active, AudioDriver_FreqConversion,
+# the extra `muted` argument on the RX processor), it enqueued the noise reducer's mmb buffers as though
+# they were its own, its per-partition masks were never generated because nothing called
+# AudioDriver_SetConvolutionFilter(), it called AudioDriver_RxAgcWdsp(), which has not existed in the
+# tree since the same 1c09d16c that broke the call signature, and it designed a 250-2700 Hz bandpass
+# against IQ_SAMPLE_RATE while handing the worker decimated samples.  It is repaired rather than
+# deleted, and reads as an alternative RX *filter* now instead of a half-copied RX *chain*.
 #
-#   drivers/audio/audio_driver.c   the call at :2883 passes (iq, audio, blockSize, muted) to
-#                                  AudioDriver_RxProcessorConvolution, which is declared with three
-#                                  parameters at audio_convolution.h:73 - the `muted` argument was
-#                                  added to the RX processor path in 1c09d16c (2019-02-02) on the
-#                                  non-convolution call only
-#   drivers/audio/audio_convolution.c   uses adb.i_buffer and adb.q_buffer, which are
-#                                  adb.iq_buf.i_buffer and adb.a_buffer[n] now, and fm_squelched on
-#                                  the driver state, which is gone; calls AudioDriver_RxAgcWdsp,
-#                                  which exists nowhere and is called with two and three arguments by
-#                                  different sites in this file; calls audio_in_put_buffer,
-#                                  AudioDriver_FreqConversion, AudioDriver_RxHandleIqCorrection and
-#                                  the two spectrum processors, none of them declared; reads
-#                                  ts.dsp_active, which TransceiverState no longer has; and calls
-#                                  SAMPLE_out_has_data, which this file defines a few lines earlier
-#                                  as Sample_out_has_data
-#
-#                                  What is no longer silent is the queue itself: NR_Buffer is included
-#                                  and two _Static_asserts at the FIFO tie it to Sample_Buffer, so
-#                                  the assignments between the two types are reported rather than
-#                                  assumed to work.  Picking one type for both belongs to repairing
-#                                  this option - deleting Sample_Buffer is what the asserts expect.
-#
-# Fixing this is a working session on one file, not a tree-wide repair: 95 of these 476 units used to
-# fail from a single line, because Sample_Buffer in audio_driver.h used SAMPLE_BUFFER_SIZE from the
-# header that includes it.  That define is in audio_driver.h now, so only the two files above fail.
-USE_CONVOLUTION drivers/audio/audio_convolution.c
-USE_CONVOLUTION drivers/audio/audio_driver.c
+# What is not settled by this file is whether the filter is better than the Hilbert path it replaces;
+# support/digi measures that, and the answer is in the README.  Until it is built into a radio nobody
+# should hear a difference, because no shipping configuration defines the option.
 
 # The noise reducer that predates USE_ALTERNATE_NR.  hardware/uhsdr_board_config.h:93.
 #

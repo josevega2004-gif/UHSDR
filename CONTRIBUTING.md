@@ -45,6 +45,20 @@ The digital-mode tests do not need a radio either: they live in `support/digi` a
 `make digi-bench`, `make rtty`, `make oracle-check` and the other targets listed in
 `support/digi/README.md`.
 
+One of those targets answers a question about the receiver rather than about a mode.  A switched-off
+option that compiles is not the same thing as one that is worth switching on, and
+
+```
+make -C support/digi convolution-check
+```
+
+builds the shipped `drivers/audio/audio_convolution.c` on the host and measures what its filter
+actually does - sideband separation, stop-band shape, operations per sample and delay - against the
+199-tap Hilbert stage the receiver uses today, comparing the partitioned implementation with a plain
+time-domain complex FIR over the same taps.  That last comparison is what found two bugs in code that
+had never been executed, and it is the reason the option's numbers are in
+`support/digi/README.md` rather than in somebody's memory.
+
 ### Pull-requests
 
 If you fixed or added something useful to the project, you can send pull-request. It will be reviewed by coders and/or maintainer and accepted, or commented for rework, or declined.

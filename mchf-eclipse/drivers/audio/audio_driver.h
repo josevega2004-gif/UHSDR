@@ -63,6 +63,20 @@ typedef struct {
 }  Sample_Buffer;
 #endif
 
+// Which demod modes the partitioned convolution filter takes over, when the option is built in at
+// all: SSB and CW, and nothing else.  AM and SAM want both sidebands, FM discriminates on phase, and
+// the two-channel modes have to leave I and Q as they are, so those keep the Hilbert path whatever
+// the build options say.  Both places that have to agree about this - AudioDriver_SetProcessingChain()
+// designing the masks, and AudioDriver_RxProcessor() deciding block by block - read it from here,
+// because a design made against one rate and blocks handed over at another shifts the passband
+// instead of failing in any way you would notice while tuning.
+#ifdef USE_CONVOLUTION
+#define CONVOLUTION_USED_FOR(mode)  ((mode) != DEMOD_SAM && (mode) != DEMOD_AM && (mode) != DEMOD_FM \
+                                     && !RadioManagement_UsesBothSidebands(mode))
+#else
+#define CONVOLUTION_USED_FOR(mode)  false
+#endif
+
 // -----------------------------
 // FFT buffer, this is double the size of the length of the FFT used for spectrum display and waterfall spectrum
 #ifdef USE_FFT_1024
