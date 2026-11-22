@@ -148,19 +148,40 @@ floors-2k5-check: digi_bench
 record-check: digi_bench
 	@./digi_bench record-check
 
-# the capture decoder's own self-test, in capture/decode_oracle.js: a stream built element by
-# element there has to pass the framing walk with the counts it was built from, and seven streams
-# built to break one rule each - random bytes, stopped on an unknown message type, a silence run over
-# 2 s, a rate that changes mid-stream, audio before the rate element, an 8-bit block one byte short,
-# audio with no rate element, bytes after the last message - have to be refused with a nonzero exit,
-# no WAV and the whole complaint each was built to draw.  The first case is what catches a walk that
-# has stopped accepting valid traffic; the other seven say it is still strict.  That is the check on
-# the piece that decides whether a .stream is worth decoding at all - the client it loads is not
-# committed (see the licence note in README.md), so this grades the framing walk and the refusals,
-# and needs no capture, no client and no network.
+# the capture half's own self-tests, in capture/: decode_oracle.js and websdr_capture.py.  Neither
+# needs a capture, a client or a network, and both are graded before anything is written.
+#
+# The decoder: a stream built element by element has to pass the framing walk with the counts it was
+# built from, the same stream and a stream of blocks whose codes step between 0xd5 and 0xd6 both have
+# to stay recordable to the rules in front of the decoder, and ten streams built to break one rule
+# each - random bytes, stopped on an unknown message type, a silence run over 2 s, a rate that
+# changes mid-stream, audio before the rate element, an 8-bit block one byte short, audio with no
+# rate element, a take whose blocks are two copies of one code, a take that records nothing after its
+# rate element, a take of that fill and a silence marker, bytes after the last message - have to be
+# refused with a nonzero exit, no WAV and the whole complaint each was built to draw.  The two
+# recordable cases are what catches a walk, or a rule, that has stopped accepting valid traffic; the
+# ten refusals say it is still strict.  That is the check on the piece that decides whether a
+# .stream is worth decoding at all - the client it loads is not committed (see the licence note in
+# README.md), so this grades the framing walk and the refusals.
+#
+# The collector: 43 cases on fixtures/bandinfo-8band.js, the band table NA5B's front end serves.  The
+# tune request it builds (the dial in kHz, which is the 20 November fault, and the band index with
+# it), the eight spans, the band under each dial and the two gaps between them, the dials in those
+# gaps being refused, --band outside the table being refused, a named band that does not cover the
+# dial being warned about, the log line naming the band a part was tuned with, and the fetch that
+# reads the table.  A table is taken whole or not at all, by two guards: an entry with a centre and
+# no width is not skipped (it would move every index after it, and band= is an index), and a
+# var nbands count the entries do not fill gives no table either.  A body that arrives encoded, or
+# stops short of its own Content-Length, is an error rather than a short answer, for the same reason.
+#
+# What these two self-tests protect is the live retry, capture/ddk9_capture.sh, which is not a target
+# here because it needs a receiver: it will not print a character error rate until the control on a
+# dead channel has been refused as empty and the pinned DDK2 take has come back at its 2.7 %.
 oracle-check:
 	@command -v node >/dev/null 2>&1 || { echo "FAIL  node is needed for capture/decode_oracle.js"; exit 1; }
+	@command -v python3 >/dev/null 2>&1 || { echo "FAIL  python3 is needed for capture/websdr_capture.py"; exit 1; }
 	@node capture/decode_oracle.js --self-test
+	@python3 capture/websdr_capture.py --self-test
 
 rtty-shift: digi_bench
 	@./digi_bench rtty-shift

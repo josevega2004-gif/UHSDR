@@ -7,12 +7,16 @@
 // It refuses rather than guesses.  The client's message loop has no error case: a byte below 0x80
 // falls through to `else if (128 != (b[a] & 128)) m = 1, s = 2` and the sample loop then invents
 // samples out of whatever follows, so any byte soup "decodes".  A WAV appearing therefore proves
-// nothing, so before the decoder is even loaded the file has to satisfy four things:
+// nothing, so before the decoder is even loaded the file has to satisfy five things:
 //
 //   * every message is a sequence of known elements that ends exactly on its last byte
 //   * the sample rate comes from the stream's rate element, and never changes
 //   * no run of silence markers lasts longer than 2 s (the client's recorder stops appending there)
 //   * no audio arrives in a message before the rate element (it could not be recorded at that rate)
+//   * the take carries audio at all: 8-bit blocks of one code repeated 128 times are the fill an
+//     empty band gets and a silence marker is 128 zeros, each one level held for 128 samples, so a
+//     take made only of those - or with nothing after its rate element at all - decodes to levels,
+//     not to a noise floor
 //
 // and after decoding, the recorder has to have produced exactly the samples the walk counted.
 // The file is written last, so a refusal leaves no WAV behind.
@@ -25,16 +29,23 @@
 // WAV writer below are all checked into this tree.
 //
 // usage: node decode_oracle.js <stream-file> <out.wav> [--client <websdr-sound.js>]
-//        node decode_oracle.js --self-test   (a built conformant stream must walk clean, and seven
-//                                             streams built to break one rule each must be refused)
+//        node decode_oracle.js --self-test   (a built conformant stream must walk clean and stay
+//                                             recordable, and ten streams built to break one rule
+//                                             each must be refused)
 //
 // --self-test needs no client, on purpose: every case is decided by the framing walk and the checks
-// in front of the decoder, so CI can grade them without the client file or a network.  The
-// conformant case is the one that catches a walk which has stopped accepting valid traffic - a
-// refusal test alone cannot tell a strict walk from one that rejects everything - and the seven
-// refusals pin the rules a later simplification could quietly loosen: random bytes, which stop on an
+// in front of the decoder, so CI can grade them without the client file or a network.  Two streams
+// have to stay acceptable where the other ten have to be refused, because refusals alone cannot tell
+// a strict check from one that rejects everything: the built stream, which is what catches a walk
+// that has stopped accepting valid traffic, and a stream of 8-bit blocks whose codes vary by one,
+// which is what catches a rule in front of the decoder that has stopped telling fill from a signal.
+// Those rules are read as a function rather than through a decode, since the client they would need
+// is not committed: unrecordable() is what a later change could quietly over-tighten, and it is
+// graded against both streams.  The ten refusals pin the rules a later simplification could quietly
+// loosen instead: random bytes, which stop on an
 // unknown message type, a silence run over 2 s, a rate that changes mid-stream, audio in a message
-// before the rate element, a block cut off, a stream with no rate element, and bytes after the last
+// before the rate element, a block cut off, a stream with no rate element, a take that is one code
+// throughout, a take that records nothing, a take of fill and silence, and bytes after the last
 // message.
 const fs = require('fs');
 const os = require('os');
@@ -83,11 +94,35 @@ function packedBytes(b, start, m, G) {
   return a + 1 - start;
 }
 
+// How a message's samples arrived, which is what decodeStream reads over the recorded frames:
+// `varies` is set by anything carrying changes - a delta block, or an 8-bit block whose 128 bytes
+// are not one code - and `kinds` counts the elements that hold one level for 128 samples, by the
+// code they hold it at ('0xd5') or as the silence marker.  A take with nothing recorded except
+// levels has no audio in it, which is the one thing the counts of samples and blocks cannot say.
+const SILENCE = 'silence';
+const codeKey = (v) => '0x' + v.toString(16).padStart(2, '0');
+
+function arrivalList(kinds) {
+  const parts = Array.from(kinds.entries())
+    .sort((x, y) => (x[0] === y[0] ? 0 : x[0] < y[0] ? -1 : 1))
+    .map(([kind, count]) => kind === SILENCE
+      ? count + (count === 1 ? ' silence marker' : ' silence markers')
+      : count + (count === 1 ? ' block of 128 copies of ' : ' blocks of 128 copies of ') + kind);
+  // not reachable while the no-recorded-sample rule is checked first, but a complaint that named
+  // nothing at all would read as 'undefined', so the fallback keeps it a sentence
+  if (!parts.length) return 'no block and no marker';
+  return parts.length > 1
+    ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1]
+    : parts[0];
+}
+
 // Walk one message against the format.  Returns null when the whole message is a sequence of known
 // elements that ends exactly, or a string saying where it stopped being one.
 function walkMessage(b, st, frame) {
   let a = 0;
   const n = b.length;
+  const arrival = { varies: false, kinds: new Map() };
+  st.arrival = arrival;
   while (a < n) {
     const t = b[a];
     if ((t & 0xF0) === 0xF0) {                       // S-meter: 0xF0/0xF1 + value
@@ -98,6 +133,12 @@ function walkMessage(b, st, frame) {
       st.blocks8++;
       st.samples += 128;
       st.silence = 0;
+      // An empty band arrives as 8-bit blocks of one code repeated 128 times, which the client's
+      // table maps to a single level: not audio, though it counts like it.
+      let flat = b[a + 1];
+      for (let i = 2; i < 129 && flat >= 0; i++) if (b[a + i] !== flat) flat = -1;
+      if (flat < 0) arrival.varies = true;
+      else arrival.kinds.set(codeKey(flat), (arrival.kinds.get(codeKey(flat)) || 0) + 1);
       a += 129;
     } else if (t < 128 || (t >= 144 && t <= 223)) {  // packed block, 128 samples
       const m = t < 128 ? 1 : 4;
@@ -109,6 +150,7 @@ function walkMessage(b, st, frame) {
       st.blocks14++;
       st.samples += 128;
       st.silence = 0;
+      arrival.varies = true;                  // a delta block carries changes, so it is audio
       a += used;
     } else if (t === 129) {                          // sample rate
       if (a + 3 > n) return 'rate element cut off at byte ' + a;
@@ -126,7 +168,8 @@ function walkMessage(b, st, frame) {
       st.silence++;
       st.samples += 128;
       if (st.silence * 128 > st.maxSilence) st.maxSilence = st.silence * 128;
-      a += 1;
+      arrival.kinds.set(SILENCE, (arrival.kinds.get(SILENCE) || 0) + 1);
+      a += 1;                                 // zeros hold a level too: a marker is not modulation
     } else if (t === 133 || t === 135) {             // true frequency / time
       if (a + 7 > n) return 'element ' + t + ' cut off at byte ' + a;
       a += 7;
@@ -164,7 +207,7 @@ function readStream(streamPath) {
     const samplesBefore = st.samples;
     const err = walkMessage(msg, st, frames.length);
     if (err) fail('message ' + frames.length + ' at byte ' + at + ': ' + err);
-    frames.push({ body: msg, samplesBefore });
+    frames.push({ body: msg, samplesBefore, arrival: st.arrival });
   }
   if (off !== raw.length) fail((raw.length - off) + ' trailing bytes after the last message');
   return { frames, st };
@@ -212,35 +255,77 @@ function loadDecoder(clientPath) {
   return { sock, app };
 }
 
+// What the recorder is handed: the message carrying the rate, the samples that share that message
+// and are dropped with it, the frames the recorder gets, and how many samples that is.
+function recordingSpan(st, frames) {
+  const firstRate = st.rateFrame;
+  const next = frames[firstRate + 1];
+  const beforeRec = next ? next.samplesBefore : st.samples;
+  return { firstRate: firstRate, beforeRec: beforeRec, earlier: frames[firstRate].samplesBefore,
+           recorded: frames.slice(firstRate + 1), recordedSamples: st.samples - beforeRec };
+}
+
+// Whether a take could be recorded at all - a complaint, or null.  These rules live apart from the
+// walk because the rate is what they are read against, and apart from decodeStream because the
+// self-test has no client to load yet still has to show that they accept valid traffic: ten
+// refusals would also pass a rule that refused everything, which is the same blind spot the built
+// stream covers for the walk.  In order, because each is a different reason a take is worth nothing:
+//
+//   * with no rate element the client decodes at its 8000 Hz default and every count is wrong.  A
+//     usable rate always leaves rateFrame on a message, which is what keeps the frame index below
+//     off -1, where frames[] holds no message to read
+//   * the client's recorder stops appending after 2 s of silence and truncates the take silently
+//   * rec_start snapshots the client's current rate, that default until the rate element has been
+//     processed, so audio in an earlier message could not have been recorded at the stream's rate
+//   * a take with no recorded sample is the recorder being handed nothing at all
+//   * audio that is one level is not audio.  A block of 128 copies of one code is the fill a server
+//     sends for an empty band and a silence marker is 128 zeros, and each of them holds one level
+//     for 128 samples: a take made only of those arrives, walks and accounts for its samples
+//     perfectly while nothing in it varies, which is how a dead 10 MHz band came back as a -68 dBFS
+//     noise floor on 19 November (2464 copies of 0xD5 are 8 of 32768, and an rms of them is that 8).
+//     Only the frames after the rate one are read, because that is all the recorder gets.
+function unrecordable(st, frames) {
+  if (!st.rate) {
+    return 'no usable sample-rate element: the decoder would fall back to its 8000 Hz default';
+  }
+  if (st.maxSilence > 2 * st.rate) {
+    return 'the stream goes silent for ' + (st.maxSilence / st.rate).toFixed(2) + ' s (limit 2 s '
+           + 'at ' + st.rate + ' Hz); the client\'s recorder stops appending after that and '
+           + 'truncates the take without saying so';
+  }
+  const span = recordingSpan(st, frames);
+  if (span.earlier) {
+    return (span.earlier / st.rate).toFixed(2) + ' s of audio arrives in messages before the rate '
+           + 'element, so it could not be recorded at the stream\'s ' + st.rate + ' Hz';
+  }
+  if (!span.recordedSamples) {
+    return 'no audio in the take: no message after the rate element carries a sample, so the '
+           + 'recorder gets nothing to record and the WAV would be its 44 byte header alone';
+  }
+  if (span.recorded.every((f) => !f.arrival.varies)) {
+    const kinds = new Map();
+    span.recorded.forEach((f) => f.arrival.kinds.forEach(
+      (count, kind) => kinds.set(kind, (kinds.get(kind) || 0) + count)));
+    return 'no audio in the take: its ' + span.recordedSamples + ' samples arrive as '
+           + arrivalList(kinds) + ', and nothing in them varies; a block of 128 copies of one code '
+           + 'and a silence marker each hold one level for 128 samples rather than carry a signal, '
+           + 'so an rms of this take reads a level, not a noise floor';
+  }
+  return null;
+}
+
 function decodeStream(streamPath, outPath, clientPath) {
   const { frames, st } = readStream(streamPath);
 
-  // The two rules a take has to meet to be recordable, kept here rather than in the walk because this
-  // is where the rate is used: with no element the client would decode at its 8000 Hz default and
-  // every count would be wrong, and its recorder stops appending after 2 s of silence and truncates
-  // the take without saying so.  `!st.rate` also covers an element that declares 0 Hz, which is not
-  // a usable rate either; a usable rate always leaves rateFrame on a message, so this is what keeps
-  // the frame index below from being -1, where frames[] holds no message to read.
-  if (!st.rate) {
-    fail('no usable sample-rate element: the decoder would fall back to its 8000 Hz default');
-  }
-  if (st.maxSilence > 2 * st.rate) {
-    fail('the stream goes silent for ' + (st.maxSilence / st.rate).toFixed(2) + ' s (limit 2 s at ' +
-         st.rate + ' Hz); the client\'s recorder stops appending after that and truncates the take ' +
-         'without saying so');
-  }
+  const complaint = unrecordable(st, frames);
+  if (complaint) fail(complaint);
 
-  // rec_start snapshots the client's current rate, which is its 8000 Hz default until the rate
-  // element has been processed, so the frame carrying the rate is fed first and recording starts
-  // after it.  Anything in an earlier message would be lost: that is a refusal.
-  const firstRate = st.rateFrame;
-  const after = (i) => (i + 1 < frames.length ? frames[i + 1].samplesBefore : st.samples);
-  const beforeRec = after(firstRate);
-  const earlier = frames[firstRate].samplesBefore;
-  if (earlier) {
-    fail((earlier / st.rate).toFixed(2) + ' s of audio arrives in messages before the rate ' +
-         'element, so it could not be recorded at the stream\'s ' + st.rate + ' Hz');
-  }
+  // the message carrying the rate is fed first, so rec_start snapshots this stream's rate rather
+  // than the client's default, and everything recorded is what arrives after it
+  const span = recordingSpan(st, frames);
+  const firstRate = span.firstRate;
+  const beforeRec = span.beforeRec;
+  const recordedSamples = span.recordedSamples;
 
   const { sock, app } = loadDecoder(clientPath);
   const feed = (from, to) => {
@@ -256,7 +341,7 @@ function decodeStream(streamPath, outPath, clientPath) {
 
   // the decoder has to have accounted for exactly the samples the walk counted, at the rate the
   // stream declares - a mismatch means it consumed the bytes differently from the format
-  const expected = st.samples - beforeRec;
+  const expected = recordedSamples;
   const got = Math.floor(rec.len / 2);
   if (rec.sr !== st.rate) {
     fail('the recorder took ' + rec.sr + ' Hz, the stream declares ' + st.rate + ' Hz');
@@ -300,7 +385,7 @@ function decodeStream(streamPath, outPath, clientPath) {
       ' ms) shared the rate message and are not in the file\n' : ''));
 }
 
-// ---- self-test: a conformant stream must walk, and seven rules must still refuse -------------
+// ---- self-test: a conformant stream must walk and stay recordable, and ten rules refuse --------
 
 // A packed block is not arbitrary bytes: it is 128 samples at width G = 4, each with a zero run
 // length and a zero mantissa, so the client spends one bit on the run and four on the mantissa per
@@ -327,9 +412,19 @@ function streamMessage(...parts) {
 
 const rateElement = (rate) => [129, (rate >> 8) & 0xFF, rate & 0xFF];
 
-function block8() {
+function block8(code = 0) {
   const b = Buffer.alloc(129);
   b[0] = 128;
+  b.fill(code, 1);
+  return b;
+}
+
+// 128 samples that step between two adjacent codes: what real traffic looks like at the bottom of
+// the 8-bit table, and the one shape a rule about constant levels could mistake for fill.
+function block8Alternating(code = 0xD5) {
+  const b = Buffer.alloc(129);
+  b[0] = 128;
+  for (let i = 1; i < 129; i++) b[i] = i % 2 ? code : code + 1;
   return b;
 }
 
@@ -392,6 +487,7 @@ function expectRefusal(dir, name, buf, why) {
 function selfTest() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oracle-selftest-'));
   process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+  const RATE = 7119;              // the rate the built streams declare and the walk reads them at
 
   // the stream above has to pass the walk with the counts it was built from.  readStream refuses
   // with fail(), which exits, so a message naming the element it stopped on is the failure report.
@@ -411,6 +507,26 @@ function selfTest() {
     walk.st.samples + ' samples (' + walk.st.blocks8 + ' 8-bit, ' + walk.st.blocks14 + ' packed, ' +
     walk.st.silence + ' silence)\n');
 
+  // ...and the rules in front of the decoder, which are not the walk, have to accept it too.  No
+  // refusal case can show this: ten refusals would pass a rule that refused everything.  They are
+  // graded without a client here, which is the reason unrecordable() is a function rather than a run
+  // of fail() calls inside decodeStream.
+  const loosened = unrecordable(walk.st, walk.frames);
+  if (loosened) fail('the conformant self-test stream is no longer recordable: ' + loosened);
+  process.stdout.write('oracle:   the same stream still passes the rules in front of the decoder\n');
+
+  // and so does audio that only just varies: a take of blocks stepping between two adjacent codes is
+  // recordable, or the rule above has become one that refuses modulation instead of one that refuses
+  // fill.  Nothing in the refusals below could show this either way round.
+  const varying = path.join(dir, 'varying-blocks.stream');
+  fs.writeFileSync(varying, streamOf([rateElement(RATE)], [block8Alternating()],
+                                     [block8Alternating()]));
+  const audio = readStream(varying);
+  const tooStrict = unrecordable(audio.st, audio.frames);
+  if (tooStrict) fail('a take of blocks stepping between 0xd5 and 0xd6 is no longer recordable: ' +
+                      tooStrict);
+  process.stdout.write('oracle:   a take of blocks that vary by one code is recordable too\n');
+
   // One stream per refusal, each built to trip exactly one rule and be right everywhere else, with
   // the whole complaint it has to draw.  A refusal that still arrives but for another reason - or
   // from a rule that has moved behind loadDecoder(), where the missing client answers first - fails
@@ -419,7 +535,6 @@ function selfTest() {
   // a message type the client would have skipped silently.  The missing rate row is the decode's own
   // guard, not a twin of one in the walk: readStream hands back a walk with no rate in it, so
   // deleting that guard turns this row red instead of leaving the refusal to the walk.
-  const RATE = 7119;
   const refusals = [
     ['random bytes, on an unknown message type', randomStream(),
      /^message 0 at byte 0: unknown message type 0x8c at byte 281 \(the client would invent samples from it or skip it silently\)$/],
@@ -434,12 +549,20 @@ function selfTest() {
      /^message 1 at byte 7: 8-bit block cut off at byte 0 \(128 of 129 bytes\)$/],
     ['the missing rate, at the decode', streamOf([block8()]),
      /^no usable sample-rate element: the decoder would fall back to its 8000 Hz default$/],
+    ['the take with no audio in it', streamOf([rateElement(RATE)], [block8()], [block8()]),
+     /^no audio in the take: its 256 samples arrive as 2 blocks of 128 copies of 0x00, and nothing in them varies; a block of 128 copies of one code and a silence marker each hold one level for 128 samples rather than carry a signal, so an rms of this take reads a level, not a noise floor$/],
+    ['the take that records nothing', streamOf([rateElement(RATE), [0xF0, 0x40]], [[0xF1, 0x41]]),
+     /^no audio in the take: no message after the rate element carries a sample, so the recorder gets nothing to record and the WAV would be its 44 byte header alone$/],
+    ['the take of fill and silence',
+     streamOf([rateElement(RATE)], [block8(0xD5)], [[132]], [block8(0xD4)]),
+     /^no audio in the take: its 384 samples arrive as 1 block of 128 copies of 0xd4, 1 block of 128 copies of 0xd5 and 1 silence marker, and nothing in them varies; a block of 128 copies of one code and a silence marker each hold one level for 128 samples rather than carry a signal, so an rms of this take reads a level, not a noise floor$/],
     ['the trailing bytes', Buffer.concat([conformantStream(), Buffer.from([1, 2, 3])]),
      /^3 trailing bytes after the last message$/],
   ];
   for (const [name, buf, why] of refusals) expectRefusal(dir, name, buf, why);
-  process.stdout.write('oracle: self-test ok - the built stream walks, and ' + refusals.length +
-                       ' streams were refused for the reason each was built to hit\n');
+  process.stdout.write('oracle: self-test ok - the built stream walks and is still recordable, '
+                       + 'and ' + refusals.length + ' streams were refused for the reason each was '
+                       + 'built to hit\n');
 }
 
 // ---- main ------------------------------------------------------------------------------------

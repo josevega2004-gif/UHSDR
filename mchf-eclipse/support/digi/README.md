@@ -17,7 +17,7 @@ make -C support/digi floors-2k5 # the MFSK16 and Olivia floors over a shaped 2.5
 make -C support/digi floors-2k5-check # the points this file quotes, measured again and checked
                           # (CI, about 15 s)
 make -C support/digi record-check # the four non RTTY modes reading a WAV with a long lead
-make -C support/digi oracle-check # the capture decoder: a built stream has to walk, eight bad streams be refused
+make -C support/digi oracle-check # the capture half, self-tested: the stream rules and the band maths, no network
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi fixture-align  # per character: what the take sent, what the modem read, and the audio
 make -C support/digi rtty-trace    # the demodulator's own bit decisions, for the same take
@@ -531,20 +531,26 @@ on the same port, so the interface is readable straight out of the client script
 
 ```
 socket   ws://<host>:<port>/~~stream?v=11        binary frames, server -> client
-tuning   text frame:  GET /~~param?f=<Hz>&band=<x>&lo=<Hz>&hi=<Hz>&mode=<n>&name=<who>
+tuning   text frame:  GET /~~param?f=<kHz>&band=<i>&lo=<kHz>&hi=<kHz>&mode=<n>&name=<who>
 ```
 
-`lo`/`hi` are the audio passband edges (1400..2000 Hz is already the right shape for SITOR/NAVTEX
-or weather-fax tones). `name` is shown to the receiver's operator, so fill something honest in.
-These are shared receivers with a limited number of user slots: short sessions only.
+`f`, `lo` and `hi` are in kHz (the page's client keeps its frequency in kHz and sends the fractions
+unrounded). `band` is the index of the front-end band that covers the dial, and it is read off the
+receiver's own band table, served as `/tmp/bandinfo.js` (and tried as `/bandinfo.js`): NA5B's eight
+bands run 0-2048, 3200-5248, 5324-7372,
+8825-10873, 11599-13647, 13655-15703, 20888-21912 and 26961-29009 kHz, so 24 MHz is in a gap
+between two of them and cannot be reached at all. `lo`/`hi` are the audio passband edges
+(1400..2000 Hz is already the right shape for SITOR/NAVTEX or weather-fax tones). `name` is shown to
+the receiver's operator, so fill something honest in. These are shared receivers with a limited
+number of user slots: short sessions only.
 
 ### The collector, `capture/websdr_capture.py`
 
-It does the transport half and nothing else: connect, tune, write the raw stream to `part-NNN.stream`
-with one big-endian 32-bit length before each WebSocket message, resume at the next index, and
-reconnect with backoff after a drop. A part is `--part-seconds` of wall clock, since with no decode
-there is no sample count to reach. A fragment left by an attempt that was cut short keeps its own
-index and is recorded `"complete": false`, so the next attempt cannot truncate it:
+It does the transport half and nothing else: connect, tune, write the raw stream to
+`part-NNN.stream` with one big-endian 32-bit length before each WebSocket message, resume at the
+next index, and reconnect with backoff after a drop. A part is `--part-seconds` of wall clock, since
+with no decode there is no sample count to reach. A fragment left by an attempt that was cut short
+keeps its own index and is recorded `"complete": false`, so the next attempt cannot truncate it:
 
 ```
 ./websdr_capture.py --freq-khz 4581.41 --part-seconds 5 --parts 2 --out /tmp/proof
@@ -560,14 +566,61 @@ bytes. The collector grades nothing, and `--assemble` is rejected as an unknown 
 what the receiver sent and no more. Turning one into audio is `capture/decode_oracle.js` below, and
 then `digi_bench capture-check` on the WAV it writes.
 
+The collector reads the receiver's band table before it captures and sends the covering band with
+the tune, because on a multi-band receiver the band is half of what "this frequency" means. Left
+out, the server applies the passband and the mode to the band the connection opened in and leaves
+the front end there, so two dials in different bands come back as the same audio: on 20 November the
+12:00 UTC takes at 24000 and 10100.8 kHz both returned NA5B's default band - one hum, the same two
+frequencies found in it, 169 messages each - and `decode_oracle.js` decoded it perfectly,
+because it was a perfectly decodable stream of nothing. Sending `band=3` for the same 10.1 MHz dial
+gave a live S-meter and DDK9's pair; `band=0` for it gave the hum back. A dial no band of the
+receiver covers is now refused before a byte is captured, with the receiver's own band spans in the
+message, rather than recorded as a take of whatever band it was already on. The refusal lists the
+receiver's own band spans one per line and ends by asking for a frequency inside one, or `--band`
+to name one.
+
+The table is read whether or not `--band` names a band, because the name and the span an index
+covers are the only thing that index can be checked against. Naming one is still the way to reach a
+receiver whose table cannot be read, so `--band` overrides the dial rather than being refused by it:
+an index past the end of a table that *was* read is refused, since it names no band and the server's
+answer would be a fallback nobody could name, and a named band that does not cover the dial is
+warned about on stderr and then used as asked. With no table at all the collector says so, tunes
+without `band=`, and records `"band": null` in `parts.json` so the takes can be told apart later;
+the log line says `band none`, and a band with no table behind it says `unnamed` rather than being
+shown with a blank where its name should be.
+
+Both halves of this are graded with no receiver on the end of it:
+
+```
+./capture/websdr_capture.py --self-test
+```
+
+It reads `fixtures/bandinfo-8band.js` - the table NA5B's front end serves, with only its scale-image
+lists trimmed and its keys, order and number formatting left as received - and grades 43 cases: the
+tune request built from it, the eight spans, the band under each of eight dials and the two gaps,
+the dial in a gap being refused, `--band` outside the table being refused, a named band that does
+not cover the dial being warned about, the log line naming the band a part was tuned with, and the
+fetch that reads the table: asked for with `Accept-Encoding: identity`, and refused outright if the
+body arrives encoded, claims more than the 8 MB ceiling, or stops short of its own `Content-Length`.
+The table is also taken whole or not at all: an entry that carries a centre without a width, or a
+`var nbands` count the entries do not fill, gives no table rather than a table whose indices have
+all moved one place up - because `band=` is a *position* in this file, and a shifted index is the
+same fault as a missing band, one dial quieter and one that no log line would show. Why there is no
+table comes back with the answer and goes into the single line the collector prints before tuning
+blind. `make -C support/digi oracle-check` runs this and the decoder's self test.
+
 ### The decode oracle, `capture/decode_oracle.js`
 
 It turns a `part-NNN.stream` into a WAV with the receiver's own client code - the script the WebSDR
 page runs - rather than with a port, because the port is the part nobody trusted. Before the decoder
-is even loaded the whole file has to satisfy four rules: every message is a sequence of known
+is even loaded the whole file has to satisfy five rules: every message is a sequence of known
 elements and ends exactly on its last byte, the rate comes from the stream's rate element and never
 changes, no run of silence markers lasts more than 2 s (the client's recorder stops appending there
-and truncates a take without saying so), and no audio arrives in a message before the rate element.
+and truncates a take without saying so), no audio arrives in a message before the rate element, and
+the take has audio in it at all - a block of 128 copies of one code is the fill an empty band gets
+and a silence marker is 128 zeros, each one level held for 128 samples, so a take made only of them
+changes nothing and decodes to levels, not to a noise floor.  A take with no recorded sample after
+its rate element is the same fault with nothing to decode at all.
 After decoding, the recorder has to have produced exactly the samples the framing walk counted. The
 WAV is written last, so a refusal leaves no file:
 
@@ -587,25 +640,29 @@ rights reserved, and the permission it carries covers serving it unmodified from
 clients, not redistributing it, so the copy stays local and is ignored by git. Save the script your
 receiver's page loads, unmodified, and pass `--client`.
 
-The self test is nine cases, and it takes all of them: a stream built in the file element by
+The self test is thirteen cases, and it takes all of them: a stream built in the file element by
 element - 7119 Hz, one 8-bit block, one packed block from a `144..223` header, one from a sub-`0x80`
 byte, one silence marker, 512 samples in 3 messages - has to pass the framing walk with exactly
-those counts, and eight streams, each built to break one rule and be right everywhere else, have to
-be refused with a nonzero exit, no WAV and the whole complaint they were built to draw: 169 frames
-of the size a real take arrives in, filled from a fixed sequence so the refusal is the same byte
-for the same reason on every run (it stops on an `0x8c` message type, one the client would have
-skipped silently), 112 silence markers (2.01 s, the first whole count over the 2 s rule at 7119
-Hz), that same rate repeated as 8000 in a later message, three audio blocks in a message before
-any rate element, an 8-bit block one byte short of the 129 it needs, audio with no rate element at
-all, a take whose 8-bit blocks are all one repeated code (what a dead band arrives as), and three
-bytes after a stream that otherwise ends cleanly. The built stream alone would pass a walk that
-accepted anything; the refusals alone would pass a walk that rejected every stream, which is why
-the packed blocks are built to the format's own arithmetic (128 samples of width 4, one run bit and
-four mantissa bits each, 640 bits in all) so the walk has to land on the byte the builder wrote,
-not merely accept it. None of the nine needs a client or a network, because all are decided before
-the decoder is loaded - which is why they are what CI runs. The missing-rate stream is refused by
-the decode rather than by the walk, since the rate is what the decode needs before it can index the
-messages at all, and that case goes red if the check is dropped instead of passing on the walk's.
+those counts *and* still be recordable to the rules in front of the decoder, a stream of two blocks
+whose codes step between `0xd5` and `0xd6` has to be recordable too, and ten streams, each built to
+break one rule and be right everywhere else, have to be refused with a nonzero exit, no WAV and
+the whole complaint they were built to draw: 169 frames of the size a real take arrives in, filled
+from a fixed sequence so the refusal is the same byte for the same reason on every run (it stops on
+an `0x8c` message type, one the client would have skipped silently), 112 silence markers (2.01 s,
+the first whole count over the 2 s rule at 7119 Hz), that same rate repeated as 8000 in a later
+message, three audio blocks in a message before any rate element, an 8-bit block one byte short of
+the 129 it needs, audio with no rate element at all, a take whose blocks are two copies of one code
+(what a dead band arrives as), a take that records nothing after its rate element, a take of that
+fill and a silence marker, and three bytes after a stream that otherwise ends cleanly. The built
+streams alone would pass a walk that accepted anything; the refusals alone would pass a walk - or a
+rule in front of the decoder - that rejected every stream, which is why the packed blocks are built
+to the format's own arithmetic (128 samples of width 4, one run bit and four mantissa bits each,
+640 bits in all) so the walk has to land on the byte the builder wrote, not merely accept it, and
+why the two recordable streams are graded by calling those rules directly. None of the thirteen needs
+a client or a network, because all are decided before the decoder is loaded - which is why they are
+what CI runs. The missing-rate stream is refused by the decode rather than by the walk, since the
+rate is what the decode needs before it can index the messages at all, and that case goes red if the
+check is dropped instead of passing on the walk's.
 
 The DDH 8 capture quoted below was taken from NA5B. The station list,
 baud rates and shifts came from the DWD table on the Franks-Weather page,
@@ -631,24 +688,24 @@ What is proven here and what is not:
   its `rec_start()` / `rec_finish()`. What this repository checks is the framing walk in front of
   the decoder and the decoder's own sample accounting, never a reimplementation of that loop;
 * **the capture recipe this section used to give is wrong for the build that serves NA5B today**.
-  `soundapplet.rec_start()` / `rec_finish()` **do exist** in this client, and they are the route that
-  works: `rec_start()` allocates a 64 kB chunk and appends one more per audio block the socket
-  delivers (about 4.1 s of audio at 8 kHz), and `rec_finish()` returns
-  `{wavdata: [ArrayBuffer, ...], len, sr}` at the stream rate (`soundapplet.g`, 8000 Hz here). It
-  needs no user gesture, no DPCM port and no server cooperation, and it fills from the WebSocket, so
-  it works whether or not the page is rendering audio. What does **not** work here is the
-  `soundapplet.p` ScriptProcessor tap: this client builds its node with
-  `createScriptProcessor(4096, 0, 1)` - zero input channels - so `onaudioprocess` hands out a **zero
-  length** `inputBuffer` (and a zero length `outputBuffer` in a tab that is not playing), and a tap
-  on it records nothing at all. The "peak 8 of 32767" capture came from that tap, not from the
-  recorder; the recorder was never the problem.
-  Three things do bite in practice. A bare `setfreq()` only moves the displayed frequency, so use
-  `setfreqif_fut('4581.84')` or the receiver stays where it was and the take is hum and rumble
-  rather than FSK. The passband matters as much as the dial: `setmf('usb', 0.85, 1.45)` around the
-  pair drops out-of-band noise by five orders of magnitude in the recording, where the default
-  50-2660 Hz passband leaves the modem fighting it. And getting the bytes out of the browser is the
-  remaining wrinkle: a `fetch` POST from the page to loopback is refused by the private network
-  policy, but a top-level navigation is not, so the page can hand a base64 blob to a local collector
+  `soundapplet.rec_start()` / `rec_finish()` **do exist** in this client, and they are the
+  route that works: `rec_start()` allocates a 64 kB chunk and appends one more per audio
+  block the socket delivers (about 4.1 s of audio at 8 kHz), and `rec_finish()` returns
+  `{wavdata: [ArrayBuffer, ...], len, sr}` at the stream rate (`soundapplet.g`, 8000 Hz
+  here). It needs no user gesture, no DPCM port and no server cooperation, and it fills from
+  the WebSocket, so it works whether or not the page is rendering audio. What does **not**
+  work here is the `soundapplet.p` ScriptProcessor tap: this client builds its node with
+  `createScriptProcessor(4096, 0, 1)` - zero input channels - so `onaudioprocess` hands out a
+  **zero length** `inputBuffer` (and a zero length `outputBuffer` in a tab that is not playing),
+  and a tap on it records nothing at all. The "peak 8 of 32767" capture came from that tap,
+  not from the recorder; the recorder was never the problem. Three things do bite in practice.
+  A bare `setfreq()` only moves the displayed frequency, so use `setfreqif_fut('4581.84')` or
+  the receiver stays where it was and the take is hum and rumble rather than FSK. The passband
+  matters as much as the dial: `setmf('usb', 0.85, 1.45)` around the pair drops out-of-band
+  noise by five orders of magnitude in the recording, where the default 50-2660 Hz passband
+  leaves the modem fighting it. And getting the bytes out of the browser is the remaining
+  wrinkle: a `fetch` POST from the page to loopback is refused by the private network policy,
+  but a top-level navigation is not, so the page can hand a base64 blob to a local collector
   as `?d=...` and lose nothing but its own tab. Keep any in-page `await` under about 10 s; the
   recorder keeps growing between calls, so a longer take is a longer wait, not a longer call.
 
@@ -786,35 +843,76 @@ at-level reading because the fixture is one, not because the statistic cannot se
 
 ### The second on-air case, DDK9 on 10100.8 kHz, is not pinned
 
-DDK9 was attempted on 19 November 2026 and **no fixture was committed**, because no take could be
-verified. NA5B, the receiver behind the DDK2 case, had nothing there that evening: RMS 2300-2440 over
-two passbands, with no FSK pair anywhere from 400 to 2500 Hz, which is a noise floor - 10 MHz was
-shut from Texas to Europe.
+DDK9 was attempted on 19 November 2026 and **no fixture was committed**, because
+no take could be verified. NA5B, the receiver behind the DDK2 case, had nothing
+there that evening: RMS 2300-2440 over two passbands, with no FSK pair anywhere
+from 400 to 2500 Hz, which is a noise floor - 10 MHz was shut from Texas to Europe.
 
-Twente (`websdr.ewi.utwente.nl`) did show a 450 Hz / **50.0 Bd** shape at **924.0 / 1371.0 Hz**, but
-nothing decodes through it: not this take, not DDK2, and not a synthesised 450 Hz / 50 Bd stream at
-Twente's 7119 Hz rate, which reads 4.1 %. That puts the fault in the capture path rather than the
-decoder, so a 90 %-CER line from it must not be pinned as ground truth. Reading that Twente take
-back through `capture/decode_oracle.js` says where in the path: its `.stream` is a conformant 7119 Hz
-stream - 353 messages, 2464 8-bit blocks, 7 delta blocks, no silence run, every message ending
-exactly on its last byte - and it decodes to a noise floor at -68 dBFS with no keying at 924 / 1371
-Hz. Nothing was lost in the framing or in the decode; the audio the receiver sent was empty on that
-band. Two takes that are both noise floors also score high against each other on a spectral
-similarity check, so a 0.97 there is neither confirmation nor refutation. The rest of the sweep is no
-better: DF0HTE (Friedrichshafen) and ES4O (Estonia) hold only a weak carrier in noise there (5 ms
-windows, 60 % of them with both tones within 6 dB), and Hack Green has no 10 MHz band; Twente's dial
-sits 1.025 kHz off its marker and ES4O's 105 Hz.
+Twente (`websdr.ewi.utwente.nl`) did show a 450 Hz / **50.0 Bd** shape at **924.0 / 1371.0
+Hz**, but nothing decodes through it: not this take, not DDK2, and not a synthesised 450 Hz /
+50 Bd stream at Twente's 7119 Hz rate, which reads 4.1 %. That puts the fault in the capture
+path rather than the decoder, so a 90 %-CER line from it must not be pinned as ground truth.
+Reading that Twente take back through `capture/decode_oracle.js` says where in the path: its
+`.stream` is a conformant 7119 Hz stream - 353 messages, 2464 8-bit blocks, 7 delta blocks, no
+silence run, every message ending exactly on its last byte - and every one of those 2464 blocks
+is 128 copies of the code `0xD5`, which the client's table maps to one level, 8 of 32768. That
+is not a noise floor at -68 dBFS: the take carries no audio at all, and an rms of 8 counts is
+the level itself. Nothing was lost in the framing or in the decode - the receiver sent nothing
+on the channel it was left on - and a take like it is now refused by name rather than reported
+as a signal. An rms on its own cannot tell a noise floor from a constant level; that is the
+reading this rule takes away. Two takes that are both noise floors also score high against each
+other on a spectral similarity check, so a 0.97 is neither confirmation nor refutation on its
+own. The rest of the sweep is no better: DF0HTE (Friedrichshafen) and ES4O (Estonia) hold only
+a weak carrier in noise there (5 ms windows, 60 % of them with both tones within 6 dB), and
+Hack Green has no 10 MHz band; Twente's dial sits 1.025 kHz off its marker and ES4O's 105 Hz.
 
-The comparison this case lacks is a propagation problem, not a bench one: retry on NA5B when 10 MHz
-is open to Europe, and prove any new receiver by copying DDK2 through it to a few percent before
-trusting a 10100.8 kHz take. A receiver's S-meter is not evidence; the tone pair plus a clean decode
-is.
+20 November's captures - taken at several widely spaced frequencies, 10100.8 kHz among them -
+are the same hash at every one of them: a **0.974 spectral correlation** against the dead-band
+take above, **75 to 85 %** of the gate's 5 ms windows holding **both tones at once** where
+the gate allows 0.35, and a **100 % character error rate** against the DWD text on every
+take. Those numbers are still what those takes measured, and those captures **must never be
+pinned as a fixture**. What they are not is evidence about the band they were named after,
+and the 21 November fix to `capture/websdr_capture.py` found why: the collector built `f=`
+from `--freq-khz` times 1000, so a request for 10100.8 kHz went out as `f=10100800.000`, which
+no receiver can tune - the server leaves the dial where it already was. Every take in an
+attempt therefore came off one channel whatever the flag said, which is exactly what "content
+that does not change with the dial" looked like: bytes that never left the collector's own
+arithmetic, rather than anything the front end was hearing.
+
+The dial is checked now rather than assumed. WWV's 10 MHz carrier, asked for at **9999.0 kHz** in
+USB, sits at **1008.1 Hz** of audio (10,000.008 kHz) and, asked for at **9998.5 kHz**, at **1506.4
+Hz** (10,000.006 kHz): the carrier stays on 10 MHz and only the audio offset follows the flag. The
+old format still reproduces the fault, which is what makes it the explanation - `--freq-khz 5000000`
+and `--freq-khz 10000000` both land on the same dead fallback channel, the constant fill the rule
+above refuses, so an untunable frequency is visibly dead rather than quietly somewhere else.
+Nothing in this tree is derived from those 20 November takes, and `capture/ddk9_capture.sh`
+below is what a retry has to clear before a take from that band is graded at all.
+
+The comparison this case lacks is a propagation problem, not a bench one:
+retry on NA5B when 10 MHz is open to Europe, and prove any new receiver by
+copying DDK2 through it to a few percent before trusting a 10100.8 kHz take.
+A receiver's S-meter is not evidence; the tone pair plus a clean decode is.
+
+That retry is `capture/ddk9_capture.sh`, and it will not grade a run until two things have
+cleared. First a dead-band control on a channel the receiver hears nothing on (`--dead-khz`,
+required): the oracle has to refuse that take *as an empty take* - a refusal for bad framing says
+the stream was broken, not that this pipeline can tell nothing from a station - or it has to decode
+and the gate have to reject it. A gate that printed neither ACCEPT nor REJECT, and an oracle that
+crashed or never found its client, are not refusals either and are reported separately, because a
+run that reads them as one is a run that passed its control without measuring anything. A pipeline
+that accepts the control stops the run there, and nothing later in it is read. Then the pinned DDK2
+take, which has to come back at its 2.7 % to
+within `--ddk2-tol` (0.3 by default) - DDK9 is the same transmitter family through the same
+receiver, so a modem that has stopped copying the one take that is pinned condemns the 10.1
+MHz attempt before a capture slot is spent on it. Only then is 10100.8 kHz captured, and a
+CER is printed only when the gate accepts the take and `--expect` gives the text to grade
+against; a take the gate or the oracle refuses is reported as a refusal, never as a number.
 
 ## Reading a take: `fixture-align`, `rtty-trace` and the other two verbs
 
-Four bench verbs answer questions that a character error rate cannot. `rtty-ddk2` says the take
-scores 2.7 %; these say what that number is made of, and one of them measures the transmitter instead
-of the receiver.
+Four bench verbs answer questions that a character error rate cannot.
+`rtty-ddk2` says the take scores 2.7 %; these say what that number is made
+of, and one of them measures the transmitter instead of the receiver.
 
 ### `fixture-align` (the `align-check` verb)
 
