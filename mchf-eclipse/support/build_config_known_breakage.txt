@@ -1,0 +1,64 @@
+# Build options that do not compile, recorded so that `make build-config-check` can tell a mode that
+# has been broken for years from one that broke yesterday.
+#
+# Every line is `OPTION path/to/file.c`, where the path is relative to mchf-eclipse and is one of the
+# translation units that fail with `-D<OPTION>` added to the build's own command line.  A file that
+# fails and is not listed here is a regression; a file listed here that compiles again has to be
+# deleted from this list, which is also the moment the option becomes buildable.  An option with no
+# lines here compiles completely, and there are more of those than there were before this file:
+# CODEC_USE_SPI, DEBUG_BUILD, IS_SMALL_BUILD, USE_GFX_SSD1289, USE_SMALL_HILBERT_DECIMATION_FILTERS
+# and USE_USBDRIVE each build every one of the 476 translation units of the mcHF configuration.
+#
+# Two of those are green for a reason worth stating, because "compiles" is not the same as "means
+# something": CODEC_USE_SPI is named by no source file at all (0 of 476 units can see it), and
+# DEBUG_BUILD reaches one unit, hardware/uhsdr_board.c, where its block sits inside an `#if 0` - the
+# `#error "Debug Build No Longer Supported"` in it is dead, so switching the option on does nothing
+# rather than saying what the author intended it to say.
+#
+# Generated and checked by support/build_config_check.py, which sweeps the value-less commented
+# `#define`s of hardware/uhsdr_board_config.h and hardware/uhsdr_board.h.  Options that need more
+# than their own -D to be built at all are named with `SKIP OPTION` below, with the reason.
+
+# Fast convolution RX filtering.  hardware/uhsdr_board_config.h:89 has been commented out since
+# 3434f9db (2018-08-22), and the branch drifted from the API in the restructurings that followed:
+#
+#   drivers/audio/audio_driver.c   the call at :2883 passes (iq, audio, blockSize, muted) to
+#                                  AudioDriver_RxProcessorConvolution, which is declared with three
+#                                  parameters at audio_convolution.h:73 - the `muted` argument was
+#                                  added to the RX processor path in 1c09d16c (2019-02-02) on the
+#                                  non-convolution call only
+#   drivers/audio/audio_convolution.c   uses adb.i_buffer and adb.q_buffer, which are
+#                                  adb.iq_buf.i_buffer and adb.a_buffer[n] now, and fm_squelched on
+#                                  the driver state, which is gone; calls AudioDriver_RxAgcWdsp,
+#                                  which exists nowhere and is called with two and three arguments by
+#                                  different sites in this file; calls audio_in_put_buffer,
+#                                  AudioDriver_FreqConversion, AudioDriver_RxHandleIqCorrection and
+#                                  the two spectrum processors, none of them declared; reads
+#                                  ts.dsp_active, which TransceiverState no longer has; and calls
+#                                  SAMPLE_out_has_data, which this file defines a few lines earlier
+#                                  as Sample_out_has_data
+#
+#                                  What is no longer silent is the queue itself: NR_Buffer is included
+#                                  and two _Static_asserts at the FIFO tie it to Sample_Buffer, so
+#                                  the assignments between the two types are reported rather than
+#                                  assumed to work.  Picking one type for both belongs to repairing
+#                                  this option - deleting Sample_Buffer is what the asserts expect.
+#
+# Fixing this is a working session on one file, not a tree-wide repair: 95 of these 476 units used to
+# fail from a single line, because Sample_Buffer in audio_driver.h used SAMPLE_BUFFER_SIZE from the
+# header that includes it.  That define is in audio_driver.h now, so only the two files above fail.
+USE_CONVOLUTION drivers/audio/audio_convolution.c
+USE_CONVOLUTION drivers/audio/audio_driver.c
+
+# The noise reducer that predates USE_ALTERNATE_NR.  hardware/uhsdr_board_config.h:93.
+#
+#   drivers/ui/menu/ui_menu_internal.h:226-228   three notch CONFIG_ enumerators are declared twice
+#                                  when this option is on, once for each side of a conditional block,
+#                                  so ui_menu.c, ui_menu_internal.c and ui_menu_structure.c all stop
+#   drivers/ui/ui_configuration.c  reads dsp_params_t.nr_delaybuf_len and DSP_NR_BUFLEN_DEFAULT,
+#                                  _MIN and _MAX, none of which exist since the delay buffer length
+#                                  went away with the alternate NR's own buffer sizing
+OBSOLETE_NR drivers/ui/menu/ui_menu.c
+OBSOLETE_NR drivers/ui/menu/ui_menu_internal.c
+OBSOLETE_NR drivers/ui/menu/ui_menu_structure.c
+OBSOLETE_NR drivers/ui/ui_configuration.c

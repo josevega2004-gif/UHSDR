@@ -21,6 +21,30 @@ make all
 
 For more information and details how to build and debug on your own machine, see the [Wiki](https://github.com/df8oe/UHSDR/wiki/Topics:-UHSDR-SW-Development)
 
+### Checks that run without a radio
+
+`make all` builds the one configuration the release ships. The board config headers offer more
+switches than that - `USE_CONVOLUTION`, `OBSOLETE_NR`, `DEBUG_BUILD`, `IS_SMALL_BUILD`,
+`CODEC_USE_SPI` and the rest - and each one left commented out is a claim: switch it on and the mode
+comes back. Two of those claims had been false for years without anything noticing, because the only
+build that ever ran had the options off.
+
+```
+cd mchf-eclipse
+make build-config-check        # needs arm-none-eabi-gcc on PATH
+```
+
+That compiles every translation unit once per switched-off option with `-fsyntax-only` and compares
+which files fail against `support/build_config_known_breakage.txt`. A failure that is not in that
+file is a mode that just broke, and belongs in the commit that broke it. A failure that is listed and
+now compiles has to be deleted from the file, which is also the moment that mode becomes buildable.
+The manifest carries the reason for every line in it, so an option that stays broken is a decision
+rather than a surprise.
+
+The digital-mode tests do not need a radio either: they live in `support/digi` and run through
+`make digi-bench`, `make rtty`, `make oracle-check` and the other targets listed in
+`support/digi/README.md`.
+
 ### Pull-requests
 
 If you fixed or added something useful to the project, you can send pull-request. It will be reviewed by coders and/or maintainer and accepted, or commented for rework, or declined.

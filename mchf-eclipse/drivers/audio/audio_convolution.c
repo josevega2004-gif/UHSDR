@@ -12,6 +12,7 @@
 
 #include "audio_convolution.h"
 #include "audio_driver.h"
+#include "audio_nr.h"
 #include "arm_const_structs.h"
 #include "filters.h"
 
@@ -26,6 +27,22 @@ __IO int32_t Sample_out_tail = 0;
 
 Sample_Buffer* Sample_in_buffers[SAMPLE_BUFFER_FIFO_SIZE];
 Sample_Buffer* Sample_out_buffers[SAMPLE_BUFFER_FIFO_SIZE];
+
+// Both queues hold pointers to mmb.nr_audio_buff[] - NR_Buffer objects - while the arrays themselves
+// are typed Sample_Buffer*, and the add and remove functions on either side of them disagree about
+// which of the two they take (Sample_in_buffer_add takes an NR_Buffer*, :59, while
+// Sample_out_buffer_remove hands back an NR_Buffer* read from a Sample_Buffer* array, :109).  Nothing
+// in the tree relates the two types: each is `comp_float_t samples[256]` because SAMPLE_BUFFER_SIZE
+// and NR_BUFFER_SIZE happen to name the same length, so changing one of them leaves the queue giving
+// the audio interrupt a pointer it runs past the end of.  Tied here, where the pun is, so that day is
+// a compile error.  Without USE_ALTERNATE_NR there is no mmb to enqueue at all, hence the guard.
+#ifdef USE_ALTERNATE_NR
+_Static_assert(sizeof(NR_Buffer) == sizeof(Sample_Buffer),
+               "the Sample_in/Sample_out queues enqueue NR_Buffer pointers, so NR_Buffer and "
+               "Sample_Buffer must stay the same type");
+_Static_assert(NR_BUFFER_SIZE == SAMPLE_BUFFER_SIZE,
+               "NR_BUFFER_SIZE and SAMPLE_BUFFER_SIZE have to name the same block length");
+#endif
 
 int Sample_in_buffer_peek(Sample_Buffer** c_ptr)
 {

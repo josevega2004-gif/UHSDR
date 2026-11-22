@@ -52,6 +52,12 @@ typedef struct {
 } IqSample_t;
 
 #ifdef USE_CONVOLUTION
+// The geometry belongs here rather than in audio_convolution.h: this typedef is reached by every
+// translation unit that includes audio_driver.h, and audio_convolution.h - which used to own the
+// define - includes this header, so it cannot be the other way round.  Before this was moved, one
+// undeclared name here took down 95 of the 476 translation units built with USE_CONVOLUTION, which
+// is how a six year old break in one file stayed hidden as a break in the whole tree.
+#define SAMPLE_BUFFER_SIZE 				256
 typedef struct {
    comp_float_t samples[SAMPLE_BUFFER_SIZE];
 }  Sample_Buffer;

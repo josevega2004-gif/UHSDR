@@ -1011,15 +1011,38 @@ bool CatDriver_CloneInStart()
 }
 
 
+// the offset between the frequency a CAT master names and the dial: in digital IQ output mode the
+// master works on the translated frequency, everywhere else the two are the same.  Both the read and
+// the write path need this, and a copy of it that learns a condition on one side only would make the
+// radio answer a frequency query with something other than the frequency it just accepted.
+static ulong CatDriver_TranslateOffset(void)
+{
+    if(ts.xlat != 0)
+    {
+        return 0;
+    }
+    // If we are in DIGITAL IQ Output mode, use real tune frequency frequency instead
+    // translated RX frequency
+    return (ts.tx_audio_source == TX_AUDIO_DIGIQ)? AudioDriver_GetTranslateFreq(): 0;
+}
+
+
 static void CatDriver_HandleCommands()
 {
-    uint8_t bc = 0;
+    uint8_t bc;
     uint8_t resp[32];
 
     cat_driver_sync_data();
 
     while (CatDriver_InterfaceBufferGetData(ft817.req,5))
     {
+        // reset per command, not once for the batch: a command that answers nothing - FT817_NOOP, a
+        // code that matches no case, a frame this function refuses - used to fall through to the put
+        // at the end with the previous command's length and bytes still in them, and so replay an old
+        // reply as if it were this one.  With a burst of commands in the buffer, which is how a
+        // poller drives CAT, that is a wrong answer that looks like a right one.
+        bc = 0;
+
 #ifdef DEBUG_FT817
         int debug_idx;
         for (debug_idx = 0; debug_idx < 5 && ft817.cmd_cntr < FT817_MAX_CMD; debug_idx++ )
@@ -1034,26 +1057,37 @@ static void CatDriver_HandleCommands()
         case FT817_SET_FREQ:
         {
             ulong f = 0;
-            ulong fdelta;
+            ulong fdelta = CatDriver_TranslateOffset();
 
-            if(ts.xlat == 0)
-            {
-                fdelta = (ts.tx_audio_source == TX_AUDIO_DIGIQ)?AudioDriver_GetTranslateFreq():0;
-                // If we are in DIGITAL IQ Output mode, use real tune frequency frequency instead
-                // translated RX frequency
-            }
-            else
-            {
-                fdelta = 0;
-            }
-
+            // The four bytes are two BCD digits each, and an FT817 sends decimal digits only: a
+            // nibble over 9 means this is not a frequency at all, which is what a master that lost
+            // synchronisation or a byte dropped on the line arrives as.  Adding 0x0f as 15 was
+            // silent, and the result was a dial frequency nobody commanded - filed in the generic
+            // band, because no band contains it, and ACKed as though it had been tuned.
             int fidx;
             for (fidx = 0; fidx < 4; fidx++)
             {
+                uint8_t hi = ft817.req[fidx] >> 4;
+                uint8_t lo = ft817.req[fidx] & 0x0f;
+                if (hi > 9 || lo > 9)
+                {
+                    break;
+                }
                 f *= 100;
-                f +=  (ft817.req[fidx] >> 4) * 10 + (ft817.req[fidx] & 0x0f);
+                f += (uint32_t) (hi * 10 + lo);
+            }
+            if (fidx < 4)
+            {
+                break;                          // not a frequency: no tune, and no ACK claiming one
             }
             f *= 10;
+            if (f < fdelta)
+            {
+                // the offset is subtracted because the command names the translated frequency and the
+                // dial holds the RF one; below the offset that subtraction used to wrap the unsigned
+                // arithmetic to about 4.3 GHz, and the radio went to the generic band with an ACK
+                break;
+            }
             df.tune_new = f - fdelta;
 
             resp[0] = 0;
@@ -1067,18 +1101,7 @@ static void CatDriver_HandleCommands()
 
         case FT817_GET_FREQ:
         {
-            ulong fdelta;
-
-            if(ts.xlat == 0)
-            {
-                fdelta = (ts.tx_audio_source == TX_AUDIO_DIGIQ)?AudioDriver_GetTranslateFreq():0;
-                // If we are in DIGITAL IQ Output mode, send real tune frequency frequency instead
-                // translated RX frequency
-            }
-            else
-            {
-                fdelta = 0;
-            }
+            ulong fdelta = CatDriver_TranslateOffset();
 
             ulong f = (df.tune_new + fdelta  + 5)/ 10;
             ulong fbcd = 0;

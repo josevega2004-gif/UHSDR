@@ -120,6 +120,44 @@ jobs:
             mchf-eclipse/build/${{ matrix.dir }}/*.bin
             mchf-eclipse/build/${{ matrix.dir }}/*.dfu
 
+  # The matrix above varies the board - which UI, which RF board, which MCU - and never varies the
+  # audio and debug options that hardware/uhsdr_board_config.h and hardware/uhsdr_board.h leave
+  # commented out.  Those lines are claims as well: "uncomment this and the mode comes back".  Two of
+  # them had not been true for years, because the only builds that ever ran had the options off.  This
+  # job compiles every translation unit of the mcHF configuration once per switched-off option and
+  # compares the failures with mchf-eclipse/support/build_config_known_breakage.txt, so a mode that
+  # breaks is named in the commit that broke it and a mode that is repaired loses its manifest line.
+  # -fsyntax-only throughout, which is what keeps it to minutes instead of a second full build.
+  build-config-check:
+    name: Build options that are switched off
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the ARM toolchain
+        id: cache-toolchain-options
+        uses: actions/cache@v4
+        with:
+          path: ~/gcc-arm-none-eabi-10-2020-q4-major
+          key: gcc-arm-none-eabi-10-2020-q4-major-linux
+
+      - name: Download the ARM toolchain
+        if: steps.cache-toolchain-options.outputs.cache-hit != 'true'
+        run: |
+          curl -sL https://developer.arm.com/-/media/Files/downloads/gnu-rm/10-2020q4/gcc-arm-none-eabi-10-2020-q4-major-x86_64-linux.tar.bz2 \
+            | tar xj -C $HOME
+
+      # the script takes the command lines from `make -n` unchanged, so the compiler has to be
+      # reachable by name the way the build job reaches it by path
+      - name: Put the toolchain on PATH
+        run: echo "$HOME/gcc-arm-none-eabi-10-2020-q4-major/bin" >> "$GITHUB_PATH"
+
+      - name: Check the switched-off build options
+        working-directory: mchf-eclipse
+        run: make build-config-check
+
   release:
     # tag builds only, mirrors the old Travis deploy stage
     if: startsWith(github.ref, 'refs/tags/')

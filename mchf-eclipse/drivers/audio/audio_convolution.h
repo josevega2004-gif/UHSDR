@@ -24,9 +24,9 @@
 #include "usbd_audio_if.h"
 
 
-#define SAMPLE_BUFFER_SIZE 				256
 #define SAMPLE_BUFFER_NUM 				4
 #define SAMPLE_BUFFER_FIFO_SIZE 		(SAMPLE_BUFFER_NUM + 1)
+// SAMPLE_BUFFER_SIZE is in audio_driver.h, next to the Sample_Buffer typedef that uses it
 
 extern arm_fir_decimate_instance_f32   DECIMATE_RX_I;
 extern arm_fir_decimate_instance_f32   DECIMATE_RX_Q;

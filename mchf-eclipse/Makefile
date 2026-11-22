@@ -439,6 +439,18 @@ config-upgrade-check:
 	 $(RM) $(ROOTLOC)/support/config_upgrade/config_upgrade; \
 	 exit $$rc
 
+build-config-check:
+	# compile every translation unit of this configuration once per build option that the board config
+	# headers leave switched off, and compare what breaks with the manifest in
+	# support/build_config_known_breakage.txt.  The build matrix in .github/workflows varies the board
+	# - UI, RF board, MCU - and nothing there varies USE_CONVOLUTION, OBSOLETE_NR and the rest, so an
+	# option could stop compiling and no CI job would notice: two of them had been broken for years.
+	# A new failure is a mode somebody can still switch on and cannot build; a listed failure that
+	# compiles again has to lose its manifest line, which is the point at which that mode becomes
+	# buildable.  Needs arm-none-eabi-gcc on PATH.  Only the units that can see an option are compiled
+	# for it, which is what keeps this to a couple of minutes instead of a second full build.
+	@$(HOSTPYTHON) $(ROOTLOC)/support/build_config_check.py
+
 handbook-test:  
 	# extract UI Menu Descriptor data from source code and generate graph + table for handbook in different directory for test purposes
 	@$(ROOTLOC)/support/ui/menu/mk-menu-handbook test
