@@ -264,6 +264,13 @@ def http_get(host, port, path, timeout=20, connect=None):
             raise IOError("%s: body is %s-encoded, so the band table read from it would have no "
                           "bands in it"
                           % (path, encoding.group(1).decode(errors="replace")))
+        transfer = re.search(rb"transfer-encoding:\s*([^\s;,]+)", head, re.I)
+        if transfer:
+            # a chunked body would reach parse_bands with chunk sizes interleaved between the
+            # entries, which is the one input shape the whole-or-nothing guard cannot promise to
+            # notice - it only sees entries that moved, not entries with digits glued to them
+            raise IOError("%s: body is %s transfer-encoded, which this reader does not unwrap"
+                          % (path, transfer.group(1).decode(errors="replace")))
         length = re.search(rb"content-length:\s*(\d+)", head, re.I)
         if length:
             want = int(length.group(1))
@@ -330,29 +337,32 @@ def parse_bands(js):
 
 
 def fetch_bands(host, port, timeout=20, connect=None):
-    """The receiver's band table and, when there is none, the reason.
+    """The receiver's band table, the reason there is none, and the digest of the file it came from.
 
     The table is None for a server that serves none *and* for one whose table could not be read
     whole: the caller then tunes without band= and says why, which is a worse take and a better
-    report than an index out of a table whose entries moved.  The reasons come back rather than
-    going to stderr here so --self-test can pin them, and a receiver that serves no table costs one
-    line instead of two per attempt.  `connect` reaches http_get for that same self-test.
+    report than an index out of a table whose entries moved.  The digest is recorded beside a take
+    so a later reader can tell whether two parts were tuned against the same table or two
+    different ones.  The reasons come back rather than going to stderr here so --self-test can pin
+    them, and a receiver that serves no table costs one line instead of two per attempt.  `connect`
+    reaches http_get for that same self-test, which has no network.
     """
     reasons = []
     for path in BANDINFO:
         try:
-            bands = parse_bands(http_get(host, port, path, timeout, connect))
+            body = http_get(host, port, path, timeout, connect)
         except Exception as exc:
             reasons.append("%s: %s" % (path, exc))
             continue
+        bands = parse_bands(body)
         if bands is None:
             reasons.append("%s: a band entry did not read whole, or the entries are not the count "
                            "the page declares" % path)
             continue
         if bands:
-            return bands, None
+            return bands, None, hashlib.sha256(body.encode()).hexdigest()
         reasons.append("%s: no band entries in it" % path)
-    return None, "; ".join(reasons) if reasons else "nothing answered"
+    return None, "; ".join(reasons) if reasons else "nothing answered", None
 
 
 def band_for(bands, freq_khz):
@@ -474,6 +484,31 @@ def tune_text(freq_khz, mode, lo_hz, hi_hz, band=None):
         lo_hz / 1000.0, hi_hz / 1000.0, MODES.get(mode.lower(), 0))
 
 
+def part_provenance(args, tune, band, bands, note, why, digest):
+    """What a part was asked for, recorded in parts.json beside what arrived.
+
+    The 20 November takes were indistinguishable from live radio in the metadata this file used to
+    keep: index, name, time, bytes, messages and a band index, and nothing about the dial, the
+    passband or the request that produced them - so "five dials, one channel" had to be found by
+    comparing the files themselves.  Recording the tune string that went out makes that one field to
+    diff, the band's span says whether the index could reach the dial at all, and the table's digest
+    says whether two parts were even tuned against the same bands.
+    """
+    row = {"host": args.host,
+           "freq_khz": args.freq_khz,
+           "mode": args.mode,
+           "audio": args.audio,
+           "tune": tune,
+           "band": band,
+           "band_span": band_span(bands[band]) if (bands and 0 <= band < len(bands)) else None,
+           "bandinfo": "sha256:" + digest if digest else None,
+           "deadline": args.deadline or None}
+    said = note or why
+    if said:
+        row["band_note"] = said
+    return row
+
+
 def capture(args):
     outdir = args.out
     os.makedirs(outdir, exist_ok=True)
@@ -492,7 +527,7 @@ def capture(args):
     # in.  The table is read whether or not --band names a band, because the name and the span an
     # index covers are the only thing that index can be checked against.  With no table, the index
     # is taken as given and said so on stderr
-    bands, why = fetch_bands(host, port)
+    bands, why, digest = fetch_bands(host, port)
     band, note = choose_band(bands, args.freq_khz, args.band, args.host, why)
     if note:
         print(note, file=sys.stderr)
@@ -505,6 +540,10 @@ def capture(args):
     if not edges:
         raise SystemExit("--audio wants two edges in Hz, e.g. 600-1700 or -1700--600")
     lo, hi = int(edges.group(1)), int(edges.group(2))
+    # the request is built once and sent as that same string every attempt, so parts.json can record
+    # the exact text a take was asked with rather than a reconstruction of it
+    tune = tune_text(args.freq_khz, args.mode, lo, hi, band)
+    provenance = part_provenance(args, tune, band, bands, note, why, digest)
     index = next_index(outdir)
     deadline = time.time() + args.deadline if args.deadline else None
     failures = 0
@@ -523,7 +562,7 @@ def capture(args):
         complete = False
         try:
             client.connect()
-            client.send_text(tune_text(args.freq_khz, args.mode, lo, hi, band))
+            client.send_text(tune)
             rawfile = open(rawpath, "wb")
             while True:
                 op, payload = client.recv()
@@ -567,16 +606,16 @@ def capture(args):
         if rawlen:
             # whatever arrived is kept, complete or not: a fragment is still radio that will not
             # come again, and the next attempt must not truncate it
-            rec = {
+            rec = dict(provenance)
+            rec.update({
                 "index": index,
                 "file": os.path.basename(rawpath),
                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started or time.time())),
                 "seconds": round(time.time() - started, 3) if started else 0.0,
                 "bytes": rawlen,
                 "messages": messages,
-                "band": band,
                 "complete": complete,
-            }
+            })
             meta.append(rec)
             json.dump(meta, open(meta_path, "w"), indent=1)
             print("part-%03d.stream  %6.1f s  %9d bytes  %5d messages  %s  band %s" %
@@ -827,35 +866,77 @@ def self_test():
           [response(table, length=MAX_BODY + 1)],
           "%s: claims %d bytes, over the %d byte ceiling" % (path, MAX_BODY + 1, MAX_BODY))
 
-    # fetch_bands over the same replays: what it hands the tune, and what it says when it cannot
-    def fetched(name, chunks, want_bands, want_why_contains):
+    # fetch_bands over the same replays: what it hands the tune, what it says when it cannot, and
+    # which file it read them from
+    def fetched(name, chunks, want_bands, want_why_contains, want_digest=False):
         total[0] += 1
-        got_bands, got_why = fetch_bands("na5b.co", 8901, connect=_replaying(chunks))
+        got_bands, got_why, got_digest = fetch_bands("na5b.co", 8901, connect=_replaying(chunks))
         ok = (len(got_bands) if got_bands else None) == want_bands
         ok = ok and (want_why_contains is None or
                      (got_why or "").find(want_why_contains) >= 0)
+        ok = ok and bool(got_digest) == want_digest
         if ok:
             print("capture: %-56s ok" % name)
         else:
             problems.append(name)
-            print("capture: %-56s FAIL\n           got  %r, %r\n           want %r in it, %r"
-                  % (name, got_bands, got_why, want_why_contains, want_bands))
+            print("capture: %-56s FAIL\n           got  %r, %r, %s\n           want %r in it, %r, "
+                  "digest %s" % (name, got_bands, got_why, bool(got_digest), want_why_contains,
+                                 want_bands, want_digest))
 
-    fetched("a whole table comes back as eight bands and no excuse",
-            [response(table) + table], 8, None)
+    fetched("a whole table comes back as eight bands, no excuse, and its own digest",
+            [response(table) + table], 8, None, True)
     fetched("a half-read one comes back as none, and says which path",
             [response(text[:len(text) // 2].encode()) + text[:len(text) // 2].encode()],
             None, "a band entry did not read whole")
     fetched("and a server that answers 404 says that instead",
             [("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").encode()], None, "404")
 
+    # what a part records about the ask, which is the field a later reader compares instead of the
+    # bytes: the 20 November takes differed from live radio only in what had been requested
+    ns = argparse.Namespace(host="na5b.co:8901", freq_khz=10100.8, mode="usb",
+                            audio="450-1350", deadline=0.0)
+    asked = part_provenance(ns, tune_text(10100.8, "usb", 450, 1350, 3), 3, bands,
+                            None, None, "0123456789abcdef" * 4)
+    case("a part records the request string, not a reconstruction of it", asked["tune"],
+         "GET /~~param?f=10100.800&band=3&lo=0.450&hi=1.350&mode=0")
+    case("the dial, the mode and the passband it was asked with",
+         (asked["host"], asked["freq_khz"], asked["mode"], asked["audio"]),
+         ("na5b.co:8901", 10100.8, "usb", "450-1350"))
+    case("the band's own span, so an index can be checked against the dial",
+         (asked["band"], asked["band_span"]), (3, "30m 8825.000-10873.000 kHz"))
+    case("which table the index came from", asked["bandinfo"],
+         "sha256:" + "0123456789abcdef" * 4)
+    case("and no band_note when there was nothing to say", asked.get("band_note"), None)
+    blind = part_provenance(ns, tune_text(10100.8, "usb", 450, 1350, None), None, None, None,
+                            "/tmp/bandinfo.js: HTTP/1.1 404 Not Found", None)
+    case("a take tuned without a table says so, in the file it lands in",
+         (blind["band"], blind["band_span"], blind["bandinfo"], blind.get("band_note")),
+         (None, None, None, "/tmp/bandinfo.js: HTTP/1.1 404 Not Found"))
+    warned = part_provenance(ns, tune_text(10100.8, "usb", 450, 1350, 0), 0, bands,
+                             band_mismatch_note(bands, 0, 10100.8, "na5b.co:8901"), None,
+                             "0123456789abcdef" * 4)
+    case("and a take whose named band misses the dial records the warning too",
+         next(iter((warned.get("band_note") or "").splitlines()), "no note recorded"),
+         "--band 0 is MW-160 0.000-2048.000 kHz, which does not cover 10100.800 kHz; "
+         "30m 8825.000-10873.000 kHz does.")
+    case("a part records the give-up it was given", asked["deadline"], None)
+    case("and the give-up when there is one",
+         part_provenance(argparse.Namespace(host="h", freq_khz=1.0, mode="usb", audio="1-2",
+                                            deadline=90.0), "t", 0, bands, None, None, "d")
+         ["deadline"], 90.0)
+
+    fetch("a chunked body is refused, not read as entries with digits glued to them",
+          [("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").encode()
+           + b"11\r\nvar nbands=0;\r\n0\r\n\r\n"],
+          "%s: body is chunked transfer-encoded, which this reader does not unwrap" % path)
+
     if problems:
         print("capture: SELF-TEST FAILED - %d of %d cases: %s"
               % (len(problems), total[0], ", ".join(problems)))
         return 1
-    print("capture: self-test ok - %d cases: the tune request in kHz with its band, the receiver's "
-          "own table, the dials in its gaps, a --band outside it, and the fetch that reads it"
-          % total[0])
+    print("capture: self-test ok - %d cases: the tune request in kHz with its band, the table it "
+          "came from, what a part records about the ask, the dials in the gaps, a --band outside "
+          "the table, and the fetch that reads it" % total[0])
     return 0
 
 

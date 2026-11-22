@@ -62,6 +62,17 @@ make -C support/digi capture-check
   ACCEPT    : the pair, the bit clock and the continuity are all inside the gate
 ```
 
+Two of the numbers above are the demodulator's own rather than this file's: the mark centre is
+label 0 of `Rtty_BenchFilterLabel()` and the space centre is the label the firmware picks for the
+shift it is set to, so retuning `rtty.c` moves the gate, the synthesiser and the report with the
+radio. Restating 915 and 1365 here is the same fault as a README quoting figures it remembers.
+
+Three exit statuses, and none of them is a verdict on its own: 0 for an ACCEPT inside every limit, 1
+for a REJECT *or* for an ACCEPT whose limits it broke, and 2 for a WAV it never opened, which is not
+a verdict about radio at all.  So the verdict is read off the printed line, and the status is used
+only to keep a missing file from being banked as a refusal - `capture/ddk9_capture.sh` reads 2 as
+"the gate did not run", which is the one reading a control step is not allowed to make of a pass.
+
 The four numbers, and why each one is measured the way it is:
 
 - **tones** are refined on 5 ms windows that hold one tone only, so a dial offset reports as an
@@ -589,6 +600,15 @@ without `band=`, and records `"band": null` in `parts.json` so the takes can be 
 the log line says `band none`, and a band with no table behind it says `unnamed` rather than being
 shown with a blank where its name should be.
 
+What `parts.json` keeps for a part is the ask as well as the arrival: the host, the dial in kHz, the
+mode, the passband, the exact tune request that went out, the band index with the span it names, the
+`sha256` of the table that index came from, and the deadline it was given, with the reason there is
+no table in place of the last three when there is none. Before this the file held bytes, messages,
+a band index and nothing about what had been requested, which is how five parts of one channel could
+sit in one directory and be five parts of five stations as far as anybody reading them could tell:
+the tune string alone turns that claim into one field to diff, and the digest says whether two parts
+were even tuned against the same bands.
+
 Both halves of this are graded with no receiver on the end of it:
 
 ```
@@ -596,12 +616,15 @@ Both halves of this are graded with no receiver on the end of it:
 ```
 
 It reads `fixtures/bandinfo-8band.js` - the table NA5B's front end serves, with only its scale-image
-lists trimmed and its keys, order and number formatting left as received - and grades 43 cases: the
+lists trimmed and its keys, order and number formatting left as received - and grades 53 cases: the
 tune request built from it, the eight spans, the band under each of eight dials and the two gaps,
 the dial in a gap being refused, `--band` outside the table being refused, a named band that does
-not cover the dial being warned about, the log line naming the band a part was tuned with, and the
-fetch that reads the table: asked for with `Accept-Encoding: identity`, and refused outright if the
-body arrives encoded, claims more than the 8 MB ceiling, or stops short of its own `Content-Length`.
+not cover the dial being warned about, the log line naming the band a part was tuned with, what a
+part records about the ask, and the fetch that reads the table: asked for with
+`Accept-Encoding: identity`, and refused outright if the body arrives encoded, arrives
+transfer-encoded, claims more than the 8 MB ceiling, or stops short of its own `Content-Length`. A
+chunked body is refused rather than unwrapped because the sizes would reach the table parser glued
+between the entries, which is the one shape the whole-or-nothing guard below cannot promise to see.
 The table is also taken whole or not at all: an entry that carries a centre without a width, or a
 `var nbands` count the entries do not fill, gives no table rather than a table whose indices have
 all moved one place up - because `band=` is a *position* in this file, and a shifted index is the
@@ -640,7 +663,8 @@ rights reserved, and the permission it carries covers serving it unmodified from
 clients, not redistributing it, so the copy stays local and is ignored by git. Save the script your
 receiver's page loads, unmodified, and pass `--client`.
 
-The self test is thirteen cases, and it takes all of them: a stream built in the file element by
+The self test is seventeen rows - thirteen streams and four recorder's answers - and it takes all of
+them: a stream built in the file element by
 element - 7119 Hz, one 8-bit block, one packed block from a `144..223` header, one from a sub-`0x80`
 byte, one silence marker, 512 samples in 3 messages - has to pass the framing walk with exactly
 those counts *and* still be recordable to the rules in front of the decoder, a stream of two blocks
@@ -658,9 +682,22 @@ streams alone would pass a walk that accepted anything; the refusals alone would
 rule in front of the decoder - that rejected every stream, which is why the packed blocks are built
 to the format's own arithmetic (128 samples of width 4, one run bit and four mantissa bits each,
 640 bits in all) so the walk has to land on the byte the builder wrote, not merely accept it, and
-why the two recordable streams are graded by calling those rules directly. None of the thirteen needs
-a client or a network, because all are decided before the decoder is loaded - which is why they are
-what CI runs. The missing-rate stream is refused by the decode rather than by the walk, since the
+why the two recordable streams are graded by calling those rules directly. None of the thirteen
+streams needs a client or a network, because all are decided before the decoder is loaded - which is
+why they are what CI runs. The four recorder's answers are there because the two checks that sit
+*after* the decoder loads were the only rules in this file with no test behind them: the rate the
+recorder says it took against the rate the stream declares, and the sample count it says it filled
+against the count the walk counted. They are graded by running the decode - `decodeWith()`, the half
+of `decodeStream()` after the load - against a client written by the self test that keeps nothing but
+the contract: it opens the socket, answers `rec_finish()` with a rate and a sample count the row
+chooses, and hands back silence. One row answers correctly and has to produce a WAV of exactly the
+samples it agreed to, at the stream's own rate; the other three record at the client's 8000 Hz
+default, come back 128 samples short, and invent one, and each has to be refused with no WAV left
+behind. That fake grades no decoding - a recorder's two answers are the whole input those rules look
+at - but it reaches the call in front of the WAV writer, which a row calling `decode_mismatch()`
+directly would have left ungraded: dropping either check, or the call, or writing the file before the
+check runs, now turns a row red instead of turning a live capture into a WAV holding samples the
+stream never carried. These four need no receiver either, so CI covers them too. The missing-rate stream is refused by the decode rather than by the walk, since the
 rate is what the decode needs before it can index the messages at all, and that case goes red if the
 check is dropped instead of passing on the walk's.
 
@@ -904,8 +941,12 @@ that accepts the control stops the run there, and nothing later in it is read. T
 take, which has to come back at its 2.7 % to
 within `--ddk2-tol` (0.3 by default) - DDK9 is the same transmitter family through the same
 receiver, so a modem that has stopped copying the one take that is pinned condemns the 10.1
-MHz attempt before a capture slot is spent on it. Only then is 10100.8 kHz captured, and a
-CER is printed only when the gate accepts the take and `--expect` gives the text to grade
+MHz attempt before a capture slot is spent on it. Only then is 10100.8 kHz captured, and the two
+stream files are compared outright first: if the dead channel and the 10.1 MHz dial came back as the
+same bytes, at most one of them reached the receiver and the run stops there. That is the 20 November
+fault named directly instead of inferred - five parts, one channel - and nothing recorded at the time
+could show it, which is why `parts.json` now keeps the request each part was asked with beside the
+bytes that came back. A CER is printed only when the gate accepts the take and `--expect` gives the text to grade
 against; a take the gate or the oracle refuses is reported as a refusal, never as a number.
 
 ## Reading a take: `fixture-align`, `rtty-trace` and the other two verbs
@@ -990,7 +1031,8 @@ make -C support/digi tx-check
 ```
 
 The transmitter's own 12 kHz output through the receiver's gate, for the two settings RTTY sends:
-170 Hz / 45.45 Bd and 450 Hz / 50 Bd. It measures the keyed pair against 915 and 915+shift, the bit
+170 Hz / 45.45 Bd and 450 Hz / 50 Bd. It measures the keyed pair against the demodulator's own mark
+filter and that filter plus the shift, and then the bit
 period and its scatter, and then the property only a keyer can fail - every interval between tone
 changes is a whole number of bits, with two bit stop runs and no 1.5 bit ones. A receiver loopback
 cannot see a keyer that sends a half stop bit, because the firmware's setting is 1.5 and
@@ -1372,7 +1414,7 @@ off, which is exactly the distortion the bench should be shown rather than hidin
 3. RTTY: chase the fast-fading failure with the numbers in front of us.
 4. Only then decide about FT8 RX, where the RAM question is per board rather than per mode.
 
-CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs eighteen steps - the
+CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs nineteen steps - the
 filter design check (`support/digi/design_rtty_filters.py`), `make digi-bench` (the self checks),
 the RTTY shift, SNR and reference error character error rate matrix, that matrix again with the long
 message, the negative control that tells the receiver the other symbol speed so the table has to
@@ -1381,8 +1423,10 @@ the per-character check of that take (`make -C support/digi rtty-ddk2` and `fixt
 two-path sweep (`rtty-multipath`), the transmitter's keying through the gate (`tx-check`), the four
 reference modems: NAVTEX, Hellschreiber, MFSK16 and Olivia, and the recording paths for the four of
 them through a WAV with a lead (`record-check`), the capture decoder's self test, a built
-conformant stream that has to walk and random bytes that have to be refused (`oracle-check`, which
-needs no WebSDR client), and the shaped 2.5 kHz floors against the readings
+conformant stream that has to walk, ten streams that have to be refused and a recorder's answer that
+has to agree with the stream it came from (`oracle-check`, which needs no WebSDR client), the gate
+run on the pinned take and on the fixture that take is quoted from (`capture-check` and
+`fixture-check`), and the shaped 2.5 kHz floors against the readings
 this file documents (`floors-2k5-check`). `make -C support/digi wefax` and `floors-2k5` are targets
-of their own and are not among the eighteen. `make digi-bench` is also available on its own; it is
-one of the eighteen, not the whole job.
+of their own and are not among the nineteen. `make digi-bench` is also available on its own; it is
+one of the nineteen, not the whole job.

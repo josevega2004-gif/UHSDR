@@ -314,6 +314,23 @@ function unrecordable(st, frames) {
   return null;
 }
 
+// The recorder's own accounting, as a complaint or null: it has to have taken the samples the walk
+// counted, at the rate the stream declares - a mismatch means the client consumed the bytes
+// differently from the format.  A function rather than two fail() calls in the decode because the
+// complaint is what the self test pins, and because the rows that run it go through the decode with
+// a recorder of their own: see expectAnswer() below.
+function decode_mismatch(st, rec, expected) {
+  if (rec.sr !== st.rate) {
+    return 'the recorder took ' + rec.sr + ' Hz, the stream declares ' + st.rate + ' Hz';
+  }
+  const got = Math.floor(rec.len / 2);            // 16-bit mono, as rec_finish reports it
+  if (got !== expected) {
+    return 'the decoder produced ' + got + ' samples where the stream carries ' + expected +
+           ' (' + (got - expected) + '); it did not consume the messages as the format says';
+  }
+  return null;
+}
+
 function decodeStream(streamPath, outPath, clientPath) {
   const { frames, st } = readStream(streamPath);
 
@@ -323,33 +340,31 @@ function decodeStream(streamPath, outPath, clientPath) {
   // the message carrying the rate is fed first, so rec_start snapshots this stream's rate rather
   // than the client's default, and everything recorded is what arrives after it
   const span = recordingSpan(st, frames);
-  const firstRate = span.firstRate;
-  const beforeRec = span.beforeRec;
-  const recordedSamples = span.recordedSamples;
 
-  const { sock, app } = loadDecoder(clientPath);
+  decodeWith(st, span, frames, loadDecoder(clientPath), outPath);
+}
+
+// Everything that happens once a decoder is loaded, split from the load so the self test can hand it
+// a recorder of its own.  The two accounting rules are the only checks in this file behind
+// loadDecoder(), and a row that called decode_mismatch() directly would grade its wording while
+// staying green if the call in front of the WAV writer went missing.
+function decodeWith(st, span, frames, decoder, outPath) {
+  const { sock, app } = decoder;
   const feed = (from, to) => {
     for (let i = from; i < to; i++) {
       const b = frames[i].body;
       sock.onmessage({ data: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
     }
   };
-  feed(0, firstRate + 1);
+  feed(0, span.firstRate + 1);
   app.rec_start();                                   // now the client's rate is the stream's
-  feed(firstRate + 1, frames.length);
+  feed(span.firstRate + 1, frames.length);
   const rec = app.rec_finish();
 
   // the decoder has to have accounted for exactly the samples the walk counted, at the rate the
   // stream declares - a mismatch means it consumed the bytes differently from the format
-  const expected = recordedSamples;
-  const got = Math.floor(rec.len / 2);
-  if (rec.sr !== st.rate) {
-    fail('the recorder took ' + rec.sr + ' Hz, the stream declares ' + st.rate + ' Hz');
-  }
-  if (got !== expected) {
-    fail('the decoder produced ' + got + ' samples where the stream carries ' + expected +
-         ' (' + (got - expected) + '); it did not consume the messages as the format says');
-  }
+  const mismatch = decode_mismatch(st, rec, span.recordedSamples);
+  if (mismatch) fail(mismatch);
 
   const body = Buffer.concat(rec.wavdata.map((b) => Buffer.from(b))).subarray(0, rec.len);
   const rate = rec.sr;
@@ -381,11 +396,15 @@ function decodeStream(streamPath, outPath, clientPath) {
     'oracle: ' + frames.length + ' messages, ' + st.rate + ' Hz, ' + n + ' samples, ' +
     (n / rate).toFixed(2) + ' s, rms ' + rms.toFixed(4) + '\n' +
     '        blocks: ' + st.blocks8 + ' 8-bit, ' + st.blocks14 + ' packed, ' + st.silence + ' silence\n' +
-    (beforeRec ? '        ' + beforeRec + ' samples (' + (1000 * beforeRec / st.rate).toFixed(0) +
+    (span.beforeRec ? '        ' + span.beforeRec + ' samples (' + (1000 * span.beforeRec / st.rate).toFixed(0) +
       ' ms) shared the rate message and are not in the file\n' : ''));
 }
 
 // ---- self-test: a conformant stream must walk and stay recordable, and ten rules refuse --------
+
+// Seventeen rows: thirteen streams - three that have to stay acceptable, ten that have to be
+// refused - and four recorder's answers run through the decode, which is how the two checks behind
+// loadDecoder() are graded at all.
 
 // A packed block is not arbitrary bytes: it is 128 samples at width G = 4, each with a zero run
 // length and a zero mantissa, so the client spends one bit on the run and four on the mantissa per
@@ -484,6 +503,61 @@ function expectRefusal(dir, name, buf, why) {
   process.stdout.write('oracle:   ' + name + ': refused - ' + said + '\n');
 }
 
+// A client that keeps only the contract decodeWith() reads from it: it opens the socket the loader
+// hands the stream to, answers rec_finish() with a rate and a sample count the row chose, and hands
+// back silence for the audio.  This is not the WebSDR client and it grades no decoding - the
+// recorder's two answers are the whole input the accounting rules look at - but it lets the decode
+// itself be run with answers the real client would only produce by disagreeing with a stream.
+function fakeClient(spec) {
+  return '// not the receiver\'s client, and no audio: only the recorder\'s answers, chosen by\n' +
+         '// the row that spawns it\n' +
+         'var spec = ' + JSON.stringify(spec) + ';\n' +
+         'var sock = new WebSocket("ws://oracle.local/");\n' +
+         'sock.onmessage = function () { };\n' +
+         'global.soundapplet = {\n' +
+         '  rec_start: function () { },\n' +
+         '  rec_finish: function () {\n' +
+         '    return { sr: spec.rate, len: 2 * spec.samples,\n' +
+         '             wavdata: [new Uint8Array(2 * spec.samples)] };\n' +
+         '  }\n' +
+         '};\n';
+}
+
+// One recorder's answer against one stream, run through the decode.  The accepted case has to write
+// the WAV with the samples it agreed to, and a refused case has to leave nothing behind - which is
+// the promise the ten stream refusals already make and the accounting checks could break silently.
+function expectAnswer(dir, name, stream, spec, samples, rate, why) {
+  const slug = name.replace(/[^a-z0-9]+/gi, '-');
+  const client = path.join(dir, slug + '-client.js');
+  const out = path.join(dir, slug + '.wav');
+  fs.writeFileSync(client, fakeClient(Object.assign({ samples: samples, rate: rate }, spec)));
+  const r = spawnSync(process.execPath, [__filename, stream, out, '--client', client],
+                      { encoding: 'utf8' });
+  if (why === null) {
+    if (r.status !== 0) {
+      fail(name + ': refused an answer that agrees with the stream (exit ' + r.status + '): ' +
+           (r.stderr || '').trim().split('\n')[0]);
+    }
+    if (!fs.existsSync(out)) fail(name + ': accepted and wrote no WAV');
+    const wav = fs.readFileSync(out);
+    if (wav.length !== 44 + 2 * samples) {
+      fail(name + ': wrote ' + (wav.length - 44) / 2 + ' samples where it agreed to ' + samples);
+    }
+    if (wav.readUInt32LE(24) !== rate) fail(name + ': wrote a ' + wav.readUInt32LE(24) + ' Hz WAV');
+    fs.unlinkSync(out);
+    process.stdout.write('oracle:   ' + name + ': accepted, and the WAV is ' + samples + ' samples of ' +
+                         rate + ' Hz\n');
+    return;
+  }
+  if (fs.existsSync(out)) fail(name + ': left a WAV behind');
+  if (r.status === 0) fail(name + ': accepted (exit 0)');
+  const said = (r.stderr || '').trim().split('\n')[0];
+  const prefix = 'oracle: FAIL ';
+  if (!said.startsWith(prefix)) fail(name + ': not refused by a format check (a crash?): ' + said);
+  if (said.slice(prefix.length) !== why) fail(name + ': refused for the wrong reason: ' + said);
+  process.stdout.write('oracle:   ' + name + ': refused - ' + said + '\n');
+}
+
 function selfTest() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oracle-selftest-'));
   process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
@@ -527,6 +601,27 @@ function selfTest() {
                       tooStrict);
   process.stdout.write('oracle:   a take of blocks that vary by one code is recordable too\n');
 
+  // The two accounting checks, run through the decode with a recorder whose answers the rows choose.
+  // These are the only checks in this file behind loadDecoder(), the client that fills a real
+  // recorder is not committed, and a row calling decode_mismatch() directly would leave the call in
+  // front of the WAV writer ungraded, so the decode is spawned with the fake client above.
+  const answered = recordingSpan(walk.st, walk.frames);
+  expectAnswer(dir, "the recorder's own answer is accepted", good, {},
+               answered.recordedSamples, RATE, null);
+  expectAnswer(dir, "a recorder at the client's default rate", good, { rate: 8000 },
+               answered.recordedSamples, 8000,
+               'the recorder took 8000 Hz, the stream declares ' + RATE + ' Hz');
+  expectAnswer(dir, "a recorder 128 samples short", good, {},
+               answered.recordedSamples - 128, RATE,
+               'the decoder produced ' + (answered.recordedSamples - 128) + ' samples where the '
+               + 'stream carries ' + answered.recordedSamples + ' (-128); it did not consume the '
+               + 'messages as the format says');
+  expectAnswer(dir, "a recorder that invented one sample", good, {},
+               answered.recordedSamples + 1, RATE,
+               'the decoder produced ' + (answered.recordedSamples + 1) + ' samples where the stream '
+               + 'carries ' + answered.recordedSamples + ' (1); it did not consume the messages as '
+               + 'the format says');
+
   // One stream per refusal, each built to trip exactly one rule and be right everywhere else, with
   // the whole complaint it has to draw.  A refusal that still arrives but for another reason - or
   // from a rule that has moved behind loadDecoder(), where the missing client answers first - fails
@@ -560,8 +655,9 @@ function selfTest() {
      /^3 trailing bytes after the last message$/],
   ];
   for (const [name, buf, why] of refusals) expectRefusal(dir, name, buf, why);
-  process.stdout.write('oracle: self-test ok - the built stream walks and is still recordable, '
-                       + 'and ' + refusals.length + ' streams were refused for the reason each was '
+  process.stdout.write('oracle: self-test ok - the built stream walks and is still recordable, four '
+                       + 'rows run the recorder\'s answers through the decode itself, and '
+                       + refusals.length + ' streams were refused for the reason each was '
                        + 'built to hit\n');
 }
 

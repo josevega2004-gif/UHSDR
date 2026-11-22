@@ -193,12 +193,18 @@ jobs:
       # in front of the decoder, a stream of blocks that vary by one code has to stay recordable, and
       # ten streams built to break one rule each - random bytes among them - have to be refused with a
       # nonzero exit and no WAV.  The refusals alone would pass a check that rejected every stream,
-      # which is why the recordable cases run beside them.  The collector: its tune request (the dial
-      # in kHz with the band covering it) and its band table, read from a fixture rather than a
-      # receiver, with the dials in the receiver's gaps and a --band outside the table both refused.
-      # The WebSDR client decode_oracle.js loads is not committed (its licence allows it only to be
-      # served by the receiver; see the licence note in support/digi/README.md), so these steps grade
-      # the framing walk, the rules in front of it and the transport maths, not the decode.
+      # which is why the recordable cases run beside them, and the two accounting checks that sit
+      # after the decoder loads are graded against a recorder's answer - the right one, a take
+      # recorded at 8000 Hz instead of the stream's own rate, one short and one over - because a rule
+      # with no row beside it is a rule nobody knows is load bearing.  The collector: its tune request
+      # (the dial in kHz with the band covering it) and its band table, read from a fixture rather
+      # than a receiver, with the dials in the receiver's gaps and a --band outside the table both
+      # refused, an unreadable table falling back to no band rather than to a shifted index, what a
+      # part records about the ask, and the fetch that reads the table refusing an encoded, a
+      # transfer-encoded, an over-long or a truncated body.  The WebSDR client decode_oracle.js loads
+      # is not committed (its licence allows it only to be served by the receiver; see the licence
+      # note in support/digi/README.md), so these steps grade the framing walk, the rules in front of
+      # it and the transport maths, not the decode.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -206,3 +212,11 @@ jobs:
       - name: Check the capture path's own self-tests (decoder framing, refusals, band maths)
         working-directory: mchf-eclipse
         run: make -C support/digi oracle-check
+
+      # The gate itself, on the take this tree pins.  These two need no client and no network: one
+      # measures a recorded WAV for a pair, a bit clock and continuity, and the other checks the
+      # fixture it measures is still the fixture whose characters are quoted in the README.  Neither
+      # ran in CI before, which is how a take that was one hum arrived with a CER in front of people.
+      - name: Check the capture gate against the pinned take
+        working-directory: mchf-eclipse
+        run: make -C support/digi capture-check fixture-check

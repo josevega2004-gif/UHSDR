@@ -283,6 +283,28 @@ static float score_aligned(const char* expected, const char* got){
     return need ? 100.0f * (float) wrong / (float) need : 0.0f;
 }
 
+// The modem's own two centres, asked of the demodulator instead of restated here.  The mark filter
+// is label 0, and the space filter is the label the firmware picks for the shift it is set to, so a
+// retuned rtty.c moves the synthesiser, the gate and the report with it rather than leaving this
+// file grading tones against a pair the receiver no longer filters.  That is the same mistake as a
+// README quoting the 915/1365 it remembers instead of the pair it measures, and every number here
+// is unchanged today because label 0 is 915 and the space labels are 915 + shift.
+static float bench_mark_hz(void)
+{
+    return (float) Rtty_BenchFilterLabel(0);
+}
+
+static float bench_space_hz(uint16_t shift)
+{
+    for (int i = 0; i < RTTY_SHIFT_NUM; i++)
+    {
+        if (rtty_shifts[i].value == (float32_t) shift) return (float) Rtty_BenchFilterLabel(1 + (unsigned) i);
+    }
+    // no filter in the bank carries that shift: this is what the firmware's own selection drives, so
+    // ask for it and let the row that cannot be met fail on its pair, not on a missing constant
+    return bench_mark_hz() + (float) shift;
+}
+
 // until_eot says how the transmission is bounded: false runs for 13.3 s, room for the 48 character
 // matrix message, and true runs until the modulator has sent its EOT, which is what the long
 // message needs because its length is a property of the caller and not of the text. It is a
@@ -316,7 +338,7 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
     // the signal keeps the shift it was sent with; without this the transmitter would follow the
     // receiver's setting, the loopback would decode its own mistake, and the case could not fail
     if (c->rx_shift && c->rx_shift != c->shift)
-        Rtty_BenchTxSpaceTone(915.0f + (float) c->shift + tune, (uint32_t) TXRATE);
+        Rtty_BenchTxSpaceTone(bench_space_hz(c->shift) + tune, (uint32_t) TXRATE);
     // the transmitter's symbol clock against the receiver's: a station 1 % fast sends 1 % shorter
     // bits, and the hook only touches how long the modulator holds a bit
     Rtty_BenchTxBitScale(1.0f / (1.0f + c->tx_clock / 100.0f));
@@ -350,10 +372,10 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
     n = used;
     *eot = Bench_TxOffRequested() ? 1 : 0;
 
-    // a station whose mark tone is the weak one: take the 915 Hz tone's own 20 Hz wide band out of
+    // a station whose mark tone is the weak one: take the mark tone's own 20 Hz wide band out of
     // the transmit audio. Its peak gain is exactly 1, so the mark tone comes out c->mark_db weaker
     // and the space tone, one shift away, loses half a dB (94 % of its level at 170 Hz shift).
-    if (c->mark_db > 0.0f) weaken_tone(buf, n, 915.0f + tune, 20.0f, c->mark_db);
+    if (c->mark_db > 0.0f) weaken_tone(buf, n, bench_mark_hz() + tune, 20.0f, c->mark_db);
 
     // an unmodulated carrier next to the space tone. The space filter has to reject it: if it does
     // not, the ATC sees that filter loud all the time and cannot tell a space bit from the carrier.
@@ -362,7 +384,7 @@ static float rtty_run(const rtty_case_t* c, const char* msg, bool until_eot, cha
         double sum = 0.0;
         for (size_t i = 0; i < n; i++) sum += (double) buf[i] * buf[i];
         float amp = (float) sqrt(sum / (double) n) * powf(10.0f, c->adj_db / 20.0f) * 1.41421356f;
-        float w = (float) (2.0 * M_PI * (915.0 + tune + c->shift + c->adj_hz) / RATE);
+        float w = (float) (2.0 * M_PI * (bench_mark_hz() + (float) c->shift + tune + c->adj_hz) / RATE);
         for (size_t i = 0; i < n; i++) buf[i] += amp * sinf(w * (float) i);
     }
 
@@ -3026,7 +3048,13 @@ static void gate_dropouts(const cap_t* c, gate_drop_t* d)
 static int capture_check(const char* path, uint16_t shift, uint16_t baud)
 {
     cap_t c;
-    if (!cap_load(path, &c)) return 1;
+    if (!cap_load(path, &c))
+    {
+        // 1 means the gate measured the take and refused it; this measured nothing, and the two
+        // have to be told apart by anything that decides whether a take is worth pinning
+        printf("NO FILE   : capture-check never opened %s, so it graded nothing\n", path);
+        return 2;
+    }
     printf("capture   : %s\n", path);
     float peak = 0.0f;
     for (size_t k = 0; k < c.n; k++) if (fabsf(c.x[k]) > peak) peak = fabsf(c.x[k]);
@@ -3052,8 +3080,9 @@ static int capture_check(const char* path, uint16_t shift, uint16_t baud)
 
     printf("tones     : %.0f / %.0f Hz, separation %.0f Hz (declared %u), centre %.0f Hz\n",
            pair.lo_hz, pair.hi_hz, sep, (unsigned)shift, centre);
-    printf("            spread %.1f / %.1f Hz; offset from the modem's 915/1365 %.0f / %.0f Hz\n",
-           pair.lo_spread, pair.hi_spread, 915.0 - pair.lo_hz, 1365.0 - pair.hi_hz);
+    printf("            spread %.1f / %.1f Hz; offset from the modem's %.0f/%.0f %.0f / %.0f Hz\n",
+           pair.lo_spread, pair.hi_spread, (double) bench_mark_hz(), (double) bench_space_hz(shift),
+           (double) bench_mark_hz() - pair.lo_hz, (double) bench_space_hz(shift) - pair.hi_hz);
     printf("bimodality: %.2f low, %.2f high, %.2f both (5 ms windows, %d)\n",
            pair.f_low, pair.f_high, pair.f_both, pair.windows);
     if (clock.transitions)
@@ -3747,11 +3776,12 @@ static int tx_check(void)
                (unsigned)baud, pair.lo_hz, pair.hi_hz, clock.period_ms, clock.mad_pct,
                pair.f_both, worst, stops, "");
 
-        const double pair_pct = fabs(pair.lo_hz - 915.0) + fabs(pair.hi_hz - (915.0 + shift));
+        const double pair_pct = fabs(pair.lo_hz - bench_mark_hz()) + fabs(pair.hi_hz - bench_space_hz(shift));
         if (pair_pct > 6.0)
         {
-            printf("FAIL  %u/%u: the keyed pair is %.1f / %.1f Hz, not the 915 / %.0f Hz it is sent\n",
-                   (unsigned)shift, (unsigned)baud, pair.lo_hz, pair.hi_hz, 915.0 + shift);
+            printf("FAIL  %u/%u: the keyed pair is %.1f / %.1f Hz, not the %.0f / %.0f Hz it is sent\n",
+                   (unsigned)shift, (unsigned)baud, pair.lo_hz, pair.hi_hz,
+                   (double) bench_mark_hz(), (double) bench_space_hz(shift));
             failures++;
         }
         if (pair.f_both > 0.25 || pair.f_low + pair.f_high < 0.70)

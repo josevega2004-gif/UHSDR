@@ -18,7 +18,9 @@
 #      within --ddk2-tol.  DDK9 is the same transmitter family, sent through the same receiver, so a
 #      modem or a gate that has stopped copying the one take that is pinned condemns a 10100.8 kHz
 #      take before a capture slot is spent on it.
-#   3. only then is 10100.8 kHz captured, gated, and - only when the gate accepts it - graded.
+#   3. only then is 10100.8 kHz captured, gated, and - only when the gate accepts it - graded, and
+#      only if it arrived as different bytes from the control: two dials that come back as the same
+#      stream are one dial, which is how the 20 November parts came to look like five stations.
 #
 # A capture that cannot get a receiver is given up on after --deadline seconds rather than retried
 # into the night: the collector reconnects forever until a part is complete, and a control step that
@@ -167,14 +169,18 @@ decode_one() { # stream wav
     esac
 }
 
-# ACCEPT, REJECT, or unrunnable: which of the three it is comes from the gate's own line, not its
-# exit status, because the bench exits 1 both for a REJECT it measured and for a WAV it never
-# opened - and reading the second as the first would hand step 1 a pass it did not earn.
+# ACCEPT, REJECT, or unrunnable.  The verdict is the gate's own line rather than its status, because
+# the bench exits 1 both for a REJECT it measured and for an ACCEPT whose limits it broke, and the
+# second of those is a take that passed.  A status of 2 is the other half: capture-check returns it
+# when it never opened the WAV, which is not a verdict about radio and must not be read as a REJECT
+# that step 1 could bank as a pass.
 gate_one() { # wav
-    local out verdict
+    local out rc verdict
     [ -x "$DIGI/digi_bench" ] || { printf 'unrunnable\n'; return; }
     out=$("$DIGI/digi_bench" capture-check "$1" "$SHIFT" "$BAUD" 2>&1)
+    rc=$?
     printf '%s\n' "$out" >"$1.gate"
+    [ "$rc" -eq 2 ] && { printf 'unrunnable\n'; return; }
     verdict=$(printf '%s\n' "$out" | sed -n 's/^ACCEPT.*/ACCEPT/p; s/^REJECT.*/REJECT/p' | head -1)
     case $verdict in
         ACCEPT) printf 'ACCEPT\n' ;;
@@ -227,11 +233,20 @@ say "   DDK2 ${cer} % against the pinned ${PINNED} %"
 say "== 3. DDK9 on 10100.8 kHz"
 ddk9=$(capture_one "$OUT/ddk9" 10100.8) || exit 1
 [ -n "$ddk9" ] || die "the DDK9 capture reported success and handed back no take"
+
+# The two dials have to have produced two streams.  On 20 November five parts came off five
+# frequencies and were one channel: the receiver served the same buffer, each take was gated as if it
+# had been tuned, and nothing recorded at the time could show the dial had not moved - parts.json
+# only kept bytes, messages and a band index.  The request each part was asked with now goes in
+# beside them, and here the two takes are compared outright before either is graded.
+if [ -s "$control" ] && cmp -s "$control" "$ddk9"; then
+    die "the ${DEAD_KHZ} kHz control and the 10100.8 kHz take arrived as the same $(stat -c %s "$ddk9") bytes: at most one dial reached the receiver, so there is no pair to score and no verdict in this run means anything"
+fi
 wav=${ddk9%-*.stream}.wav
 decode_one "$ddk9" "$wav"
 case $? in
     2) die "the oracle could not run on the take: $(head -1 "$wav.log")" ;;
-    1) die "the take is refused before any sample is scored ($(grep -m1 'oracle: FAIL' "$wav.log" | sed 's/^oracle: FAIL //')), so a CER from it would be a number with no signal behind it" ;;
+    1) die "the oracle refused the take ($(grep -m1 'oracle: FAIL' "$wav.log" | sed 's/^oracle: FAIL //')), so there is no WAV behind it and a CER from it would be a number with no signal" ;;
 esac
 verdict=$(gate_one "$wav")
 case $verdict in
