@@ -17,8 +17,30 @@ tracked on purpose (`!fixtures/*.wav`), so each one has to say where it came fro
 | Trim | **19.1-32.8 s of that 38 s window** (not of the 64.1 s) -> **13.7 s** kept |
 | Stored as | 4 kHz mono 16-bit, 54 800 frames, **109 644 bytes**: decimated 2:1 from the 8 kHz stream, which is safe because the pair sits below 1.5 kHz |
 | Tone pair | **927.9 / 1375.4 Hz**, separation **447.5 +/- 0.2 Hz**, from single-tone runs only; both tones sit about **11 Hz above the modem's 915/1365 Hz filters** |
-| Decode | **2.7 % CER** at the receiver's **450 Hz shift / 50 Bd**; 425 Hz gives 49.3 %, 45.45 Bd gives 37.0 % |
+| Decode | **2.7 % CER** at the receiver's **450 Hz shift / 50 Bd**; 425 Hz gives 49.3 %, 45.45 Bd gives 35.6 %. The same 2.7 % comes back at 8 kHz and 12 kHz made of different characters - see "The count is stable, the characters are not" |
 | Re-verify | `make -C support/digi rtty-ddk2` - fails above 3 % CER |
+
+### The count is stable, the characters are not
+
+The file is stored at 4 kHz because 2:1 decimation of an 8 kHz stream loses nothing below 1.5 kHz,
+but a re-derivation can end up at another rate - the native 8 kHz stream, or 12 kHz for the bench's
+own TX path. Resampling this fixture with `sox` and decoding it again at 450 Hz / 50 Bd gives
+**2.7 % in all three cases** (2 edits over 73 characters), and 8 kHz and 12 kHz print the same text
+as each other. The two edits are not the same two:
+
+| rate | decoded after `DDH7` | the two edits against the pinned text |
+| --- | --- | --- |
+| 4 kHz (stored) | `DDK59FREQUENCIES   4583 KHZ` | inserted `5` after the `DDK9`; the junction space is lost |
+| 8 kHz (`sox -r 8000`) | `DDK9FREQUENCIES   583 KHZ` | the junction space is lost; the `4` of `4583` is missing |
+| 12 kHz (`sox -r 12000`) | `DDK9FREQUENCIES   583 KHZ` | as 8 kHz |
+
+So the junction space at `DDK9|FREQUENCIES` is charged at every rate, the extra character after the
+`DDK9` only appears at 4 kHz, and at 8 and 12 kHz the second edit moves down the line and costs the
+`4` of `4583` instead. Matching 2.7 % therefore does not mean a re-derivation reproduced this take's
+errors: only the same two characters would. The characters track the resampling as much as the
+rate - a plain linear interpolation of the 4 kHz file back to 8 or 12 kHz decodes exactly like the
+4 kHz file, extra `5` and lost space included - so a re-derivation should say which resampler it
+used before either reading is called a regression.
 
 ### How it was taken
 

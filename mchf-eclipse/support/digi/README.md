@@ -17,7 +17,7 @@ make -C support/digi floors-2k5 # the MFSK16 and Olivia floors over a shaped 2.5
 make -C support/digi floors-2k5-check # the points this file quotes, measured again and checked
                           # (CI, about 15 s)
 make -C support/digi record-check # the four non RTTY modes reading a WAV with a long lead
-make -C support/digi oracle-check # the capture decoder: a built stream has to walk, seven bad streams be refused
+make -C support/digi oracle-check # the capture decoder: a built stream has to walk, eight bad streams be refused
 make -C support/digi rtty-ddk2  # the one on air case: a real DDK2 recording off the NA5B WebSDR
 make -C support/digi fixture-align  # per character: what the take sent, what the modem read, and the audio
 make -C support/digi rtty-trace    # the demodulator's own bit decisions, for the same take
@@ -65,71 +65,75 @@ make -C support/digi capture-check
 The four numbers, and why each one is measured the way it is:
 
 - **tones** are refined on 5 ms windows that hold one tone only, so a dial offset reports as an
-offset instead of a pair the modem cannot filter. 5 ms matters: at 20 ms a straddling bit reads as
-both tones at once and any pair looks well behaved.
-- **bimodality** is the fraction of those 5 ms windows holding one tone or both. A two tone signal
-being switched reads about 0.86 single tone and 0.14 both, the both being transitions; a single
-carrier or a stretch of noise reads near 0.0 single and 1.0 both, whatever its spectrum looks like.
-- **clock** fits the bit period to the times the signal changes tone, then measures how far those
-transitions scatter off that grid, as a percentage of a bit. Each transition is the zero crossing of
-the tone discriminator, interpolated between the last 5 ms window that settled on the old tone and
-the first that settled on the new one: the window centre trails the change and folds that smear into
-every reading. A Baudot character is 7.5 bits long - one start, five data, 1.5 stop - so the
-transitions at a character boundary sit half a bit away from the ones inside it. The period is
-fitted on the squared phase, which cancels that half bit and leaves the bit itself, and the two
-phases come back as two centres that the scatter is measured against. Without the split the fixture
-fitted to 18.75 ms - 6 % short of the rate the modem decodes it at - with 13.9 % scatter, and that
-shape looked like a recorder rate error; with it the same audio reads 20.000 ms and 7.0 % median
-scatter (8.8 % rms), which leaves the take's 2.7 % to the text rather than to the clock. The
-reassignment is seeded from twelve phases around the circle, because seeded once from the take's
-mean phase a split whose halfway boundary lands inside a cluster leaves each bucket holding half of
-both and the centres stranded between them: a fixture stretched 3 % then reads 24.7 % of a bit of
-scatter while decoding at 4.1 %. `fixture-align` places it there: the
-two characters the scorer charges carried their own keying at the take's own mean level, their
-worse tone 7.1 and 5.5 dB under it, so 2.7 % is the station's extra nine and the line break it
-sends where the pinned text has a space - not a copy that faded. A clean synthetic take measures
-20.000 ms and 0.1 %, and a 45.45 baud take measures 22.000 ms with 2.2 % and is refused on the
-period alone, though its pair and its scatter look perfect. The fit searches 30 % either side of
-the nominal period rather than at it, so a take at the wrong rate reports the rate it carries: a
-40 baud take reads 25.00 ms and 40.0 baud, and the rejection line names that beside the period.
-The window is a fraction of the bit and the bench asserts that both its ends sit clear of half a bit
-and of twice a bit, so a take repeating on a two bit lattice can only be read as its bit.
-- **dropouts** are 1 ms slots below 15 % of the median level, reported as a count and the longest
-run. Trimming the ends of a take does not remove a stall in the middle of one.
+offset instead of a pair the modem cannot filter. 5 ms matters: at 20 ms a straddling bit
+reads as both tones at once and any pair looks well behaved. - **bimodality** is the fraction
+of those 5 ms windows holding one tone or both. A two tone signal being switched reads about
+0.86 single tone and 0.14 both, the both being transitions; a single carrier or a stretch of
+noise reads near 0.0 single and 1.0 both, whatever its spectrum looks like. - **clock** fits
+the bit period to the times the signal changes tone, then measures how far those transitions
+scatter off that grid, as a percentage of a bit. Each transition is the zero crossing of the
+tone discriminator, interpolated between the last 5 ms window that settled on the old tone and
+the first that settled on the new one: the window centre trails the change and folds that smear
+into every reading. A Baudot character is 7.5 bits long - one start, five data, 1.5 stop - so
+the transitions at a character boundary sit half a bit away from the ones inside it. The period
+is fitted on the squared phase, which cancels that half bit and leaves the bit itself, and the
+two phases come back as two centres that the scatter is measured against. Without the split
+the fixture fitted to 18.75 ms - 6 % short of the rate the modem decodes it at - with 13.9 %
+scatter, and that shape looked like a recorder rate error; with it the same audio reads 20.000
+ms and 7.0 % median scatter (8.8 % rms), which leaves the take's 2.7 % to the text rather than
+to the clock. The reassignment is seeded from twelve phases around the circle, because seeded
+once from the take's mean phase a split whose halfway boundary lands inside a cluster leaves
+each bucket holding half of both and the centres stranded between them: a fixture stretched 3 %
+then reads 24.7 % of a bit of scatter while decoding at 4.1 %. `fixture-align` places it there:
+the two characters the scorer charges carried their own keying at the take's own mean level,
+their worse tone 7.1 and 5.5 dB under it, so 2.7 % is the station's extra nine and the line
+break it sends where the pinned text has a space - not a copy that faded. A clean synthetic take
+measures 20.000 ms and 0.1 %, and a 45.45 baud take measures 22.000 ms with 2.2 % and is refused
+on the period alone, though its pair and its scatter look perfect. The fit searches 30 % either
+side of the nominal period rather than at it, so a take at the wrong rate reports the rate it
+carries: a 40 baud take reads 25.00 ms and 40.0 baud, and the rejection line names that beside
+the period. The window is a fraction of the bit and the bench asserts that both its ends sit
+clear of half a bit and of twice a bit, so a take repeating on a two bit lattice can only be read
+as its bit. - **dropouts** are 1 ms slots below 15 % of the median level, reported as a count
+and the longest run. Trimming the ends of a take does not remove a stall in the middle of one.
 
-The limits are set just outside the fixture's own numbers (single tone above 0.55, both below 0.35,
-period within 5 %, median scatter under 12 % of a bit, no gap over 5 ms). The period window passes
-both reference takes at their nominal period and refuses a 45.45 baud take at 10 % long. The scatter
-limit is measured on the median absolute deviation, which one stray crossing cannot move: the
-fixture reads 7.0 % (8.8 % rms), the fixture stretched by 1, 2 and 3 % either way reads 6.4 to 7.4 %
-while still decoding at 2.7 to 6.8 %, and a clean synthetic take 0.6 %. Twelve per cent is therefore
-well above every take on hand that decodes, and the two takes above the old 8 % limit (`weak mark`
-and `shift 170/850`, both 8.9 %) are refused by the period they report (16.76 ms), not by their
-scatter. A take that fails these is not evidence about the modem either way. The gate has already earned its place: a 24 s take of the 10.1 MHz band whose free decode was
-`VXTYGJJUKD` reads 234 Hz apart with 0.66 of its windows holding both tones and is refused, while a
-synthetic 50 baud take - the same program, the same filters, where the pair really is switched -
-reads 0.00 both tones and 20.000 ms and is accepted.
+The limits are set just outside the fixture's own numbers (single tone above 0.55, both below
+0.35, period within 5 %, no gap over 5 ms). The period window passes both reference takes at their
+nominal period and refuses a 45.45 baud take at 10 % long. Scatter is printed and refuses nothing:
+it is read as a median absolute deviation, so one stray crossing cannot move it, and it says how
+much the recording has been through rather than whether it may be graded. The fixture reads 7.0 %
+(8.8 % rms), stretched by 1, 2 and 3 % either way 6.4 to 7.4 % while still decoding at 2.7 to
+6.8 %, and a clean synthetic take 0.6 %. What showed it cannot be a limit is the same fixture
+re-read with 4 ms of wow: its clock wanders by 0.2 of a bit, which the receiver follows to 9.6 %
+CER, but its transitions read 13.3 % MAD and the 12 % limit refused it while the text was there -
+and at 3 ms of wow, 11.0 % CER at 12.1 % MAD, the same. The rate decides the gate and the
+character error rate decides the take; one that fails the pair, the bimodality or the period is
+not evidence about the modem either way. The gate has already earned its place: a 24 s take of the
+10.1 MHz band whose free decode was `VXTYGJJUKD` reads 234 Hz apart with 0.66 of its windows
+holding both tones and is refused, while a synthetic 50 baud take - the same program, the same
+filters, where the pair really is switched - reads 0.00 both tones and 20.000 ms and is accepted.
 
 ## Recorded input for NAVTEX, Hell, MFSK16 and Olivia
 
-`navtex-wav`, `mfsk16-wav`, `olivia-wav` and `hell-wav` are the recording paths for the modes whose
-tables otherwise hand the decoder a buffer starting on a symbol boundary. Each takes the same 16 bit
-PCM WAV as `rtty-wav`, resamples it to 12 kHz and trims gain from the file peak. It then finds the
-first 5 ms window above 2 % of the take's loud windows - the 99th percentile, so a click or a burst
-of static cannot lift the threshold over the signal - that the next 50 ms stay above, and starts
-the search there. A recording may therefore open with seconds of silence, with the settling click a
-recorder writes first, or with a crash of static before the transmission. The symbol clock has no phase known in advance: the block modes try starts over
-one symbol in sixteenths and keep the decode with the fewest characters wrong (or, when no text is
-given, the most symbols heard); NAVTEX and Hell are already fitting the bit/pixel phase and column
-grouping themselves, and are given the same short set of starts around the onset. `hell-wav` writes
-the decoded raster as a PGM, since Hell has no character alphabet to score.
+`navtex-wav`, `mfsk16-wav`, `olivia-wav` and `hell-wav` are the recording paths for the modes
+whose tables otherwise hand the decoder a buffer starting on a symbol boundary. Each takes the
+same 16 bit PCM WAV as `rtty-wav`, resamples it to 12 kHz and trims gain from the file peak. It
+then finds the first 5 ms window above 2 % of the take's loud windows - the 99th percentile,
+so a click or a burst of static cannot lift the threshold over the signal - that the next 50
+ms stay above, and starts the search there. A recording may therefore open with seconds of
+silence, with the settling click a recorder writes first, or with a crash of static before the
+transmission. The symbol clock has no phase known in advance: the block modes try starts over
+one symbol in sixteenths and keep the decode with the fewest characters wrong (or, when no text
+is given, the most symbols heard); NAVTEX and Hell are already fitting the bit/pixel phase
+and column grouping themselves, and are given the same short set of starts around the onset.
+`hell-wav` writes the decoded raster as a PGM, since Hell has no character alphabet to score.
 
-The trials decode only the first 20 s of the take, which is enough to rank a start, and the take is
-then decoded once and whole from the start they chose: nine whole file decodes of a five minute
-NAVTEX broadcast took 163 s and now take 24 s, and the longer block modes gained the same way. What
-the decoders cannot hold is cropped rather than silently refused - 131 s of MFSK16, 209 s of Olivia,
-and the 2000 column Hell raster, about 16 s of picture - and the verb prints the crop when it takes
-one.
+The trials decode only the first 20 s of the take, which is enough to rank a start,
+and the take is then decoded once and whole from the start they chose: nine whole
+file decodes of a five minute NAVTEX broadcast took 163 s and now take 24 s, and the
+longer block modes gained the same way. What the decoders cannot hold is cropped
+rather than silently refused - 131 s of MFSK16, 209 s of Olivia, and the 2000 column
+Hell raster, about 16 s of picture - and the verb prints the crop when it takes one.
 
 ```
 ./digi_bench mfsk16-wav recording.wav "MFSK16 TEST DE UHSDR 12345" 0
@@ -142,33 +146,34 @@ one.
   CER       : 0.0 %
 ```
 
-The optional expected text and CER limit make a recording a graded case, as with `rtty-wav`; without
-them the verb prints the decode and the phase it chose. `make -C support/digi record-check` writes
-each mode's own take with a 0.75 s lead into `/tmp` and decodes it through these paths, which is the
-first check here that does not hand a decoder the transmission start. Hell has no text to score, so
-the PGM the verb wrote is read back and compared pixel by pixel with the picture the generator drew:
-the raster may slide by a column at the ends, nothing else may move, and a one-column shift fails
-the check.
+The optional expected text and CER limit make a recording a graded case, as with
+`rtty-wav`; without them the verb prints the decode and the phase it chose.
+`make -C support/digi record-check` writes each mode's own take with a 0.75 s lead into
+`/tmp` and decodes it through these paths, which is the first check here that does not hand
+a decoder the transmission start. Hell has no text to score, so the PGM the verb wrote is
+read back and compared pixel by pixel with the picture the generator drew: the raster may
+slide by a column at the ends, nothing else may move, and a one-column shift fails the check.
 
-`rtty-wav` takes any 16 bit PCM WAV, any sample rate, mono or stereo: it resamples to the 12 kHz
-the demodulator is pinned at and trims gain from the file peak, so a quiet recording still reaches
-its thresholds. The reader steps over chunks it does not need (`LIST`, `bext`, `fact`), accepts the
-extensible header ffmpeg and several recorders put around plain PCM, and decodes the audio that did
-arrive from a data chunk a recorder left cut off. **Note for real signals**: `rtty.c` filters are built around a mark of 915 Hz, while
-amateur RTTY puts mark and space at 2125/2295 Hz, so a live ham RTTY recording has to be tuned (or
-spectrally translated) so the pair lands at 915/1085 Hz audio. NAVTEX style pairs at 1615/1785 Hz
-are outside the filter bank as well, which is a real limit on reusing this modem for that service.
+`rtty-wav` takes any 16 bit PCM WAV, any sample rate, mono or stereo: it resamples to the
+12 kHz the demodulator is pinned at and trims gain from the file peak, so a quiet recording
+still reaches its thresholds. The reader steps over chunks it does not need (`LIST`, `bext`,
+`fact`), accepts the extensible header ffmpeg and several recorders put around plain PCM,
+and decodes the audio that did arrive from a data chunk a recorder left cut off. **Note for
+real signals**: `rtty.c` filters are built around a mark of 915 Hz, while amateur RTTY puts
+mark and space at 2125/2295 Hz, so a live ham RTTY recording has to be tuned (or spectrally
+translated) so the pair lands at 915/1085 Hz audio. NAVTEX style pairs at 1615/1785 Hz are
+outside the filter bank as well, which is a real limit on reusing this modem for that service.
 
 ## What is real and what is scaffolding
 
-`drivers/audio/rtty.c` is compiled from this Makefile, together with its own `rtty.h` (the bench
-hooks it exposes live in the file behind `HOST_BENCH`, which the radio build never defines, and
-nothing in the modem's own path is changed), and so is `drivers/audio/audio_agc.c`, whose cold-start
-reset hook is behind the same guard: every case runs through the radio's audio AGC before the
-demodulator, so the modem sees the level the receiver would hand it rather than the modulator's
-own output. Both the transmitter (`Rtty_Modulator_GenSample`), the AGC
-(`AudioAgc_RunAgcWdsp`) and the receiver (`Rtty_Demodulator_ProcessSample`) in the numbers below
-are firmware code. The only substitutes:
+`drivers/audio/rtty.c` is compiled from this Makefile, together with its own `rtty.h`
+(the bench hooks it exposes live in the file behind `HOST_BENCH`, which the radio
+build never defines, and nothing in the modem's own path is changed), and so is
+`drivers/audio/audio_agc.c`, whose cold-start reset hook is behind the same guard:
+every case runs through the radio's audio AGC before the demodulator, so the modem sees
+the level the receiver would hand it rather than the modulator's own output. Both the
+transmitter (`Rtty_Modulator_GenSample`), the AGC (`AudioAgc_RunAgcWdsp`) and the receiver
+(`Rtty_Demodulator_ProcessSample`) in the numbers below are firmware code. The only substitutes:
 
 | file | replaces | why it is safe |
 |---|---|---|
@@ -183,21 +188,21 @@ are firmware code. The only substitutes:
 The chain around the modem is `audio_driver.c`'s 12 ksps one: the AGC, then the fixed post-AGC
 gain (`POST_AGC_GAIN_SCALING_DECIMATE_4 * 0.333`, read from the real header), then the
 demodulator. Two stages of that pipeline are left out by name rather than by accident: the
-operator's notch/peak/lowshelf biquad, which stays a passthrough until a shape is picked and is a
-station setting this bench does not measure, and the impulse blanker, which needs an impulse and no
-case sends one. The AGC runs on the factory configuration from `audio_agc.h` (MED, 70 dB slope,
-20 dB threshold), because the firmware loads those from EEPROM; it is fed in ADC counts and its
-output scaled back into the bench's +-1 samples, because a +-1 input is 72 dB below the level its
-`max_input`/`out_target` are written for and its thresholds would then mean something else. Every
-case starts it cold: the AGC carries gain, ring buffer and hang counter from one transmission to
-the next, which would make a level row depend on the case before it, the same order dependency the
-WAV check had. `-Wno-sign-compare` is the target build's own flag and is passed to the firmware sources only, so
-those compile as they ship while the bench's own code stays under the full warning set. Moving
-the chain in found the WAV bug - the round trip had never reset the decoder, so it started from
-the previous case's filter state and only passed because that state happened to be harmless - and
-it withdrew the loopback's ability to grade the shift until the transmitter's tones could be
-held where they belong while only the receiver's setting moved, which is what `Rtty_BenchTxSpaceTone`
-is for and what the shift bullet above records.
+operator's notch/peak/lowshelf biquad, which stays a passthrough until a shape is picked and is
+a station setting this bench does not measure, and the impulse blanker, which needs an impulse
+and no case sends one. The AGC runs on the factory configuration from `audio_agc.h` (MED, 70 dB
+slope, 20 dB threshold), because the firmware loads those from EEPROM; it is fed in ADC counts
+and its output scaled back into the bench's +-1 samples, because a +-1 input is 72 dB below the
+level its `max_input`/`out_target` are written for and its thresholds would then mean something
+else. Every case starts it cold: the AGC carries gain, ring buffer and hang counter from one
+transmission to the next, which would make a level row depend on the case before it, the same
+order dependency the WAV check had. `-Wno-sign-compare` is the target build's own flag and is
+passed to the firmware sources only, so those compile as they ship while the bench's own code
+stays under the full warning set. Moving the chain in found the WAV bug - the round trip had never
+reset the decoder, so it started from the previous case's filter state and only passed because
+that state happened to be harmless - and it withdrew the loopback's ability to grade the shift
+until the transmitter's tones could be held where they belong while only the receiver's setting
+moved, which is what `Rtty_BenchTxSpaceTone` is for and what the shift bullet above records.
 
 The shims are deliberately thin. If a firmware source ever reaches for more of the radio than
 this, the bench stops compiling instead of quietly inventing behaviour, which is the point:
@@ -216,13 +221,13 @@ the size of the CW lift, measured rather than guessed.
 * `Rtty_Modem_Init()` accepts shifts 85/170/200/425/450/850 and **silently maps anything else to
   170**; mark is 915 Hz, space above it. A stored value outside that list decodes as 170.
 * **The shift setting matters much more on live radio than on a synthetic loopback.** Mark is
-  hard-wired to the 915 Hz bandpass (`rtty_bp_12khz_915`) and the space filter is picked from the
-  shift. Evaluated on the real coefficient tables as `|H(e^jw)|` of the `xv`/`yv` recursion, that
-  915 Hz filter peaks at 913.5 Hz with its 3 dB band at 865-965 Hz (about 100 Hz wide), and rejects
-  the space tone by 22.9 dB at 170 Hz shift, 26.1 dB at 200, 43.1 dB at 425, 44.7 dB at 450 and
-  83.9 dB at 850, but by only 10.2 dB at 85. On a clean generated two-tone recording the ATC
-  comparison can therefore decide from the mark channel alone - which is why decoding a 170 Hz-shift
-  *synthetic* recording returns 0.0% CER
+  hard-wired to the 915 Hz bandpass (`rtty_bp_12khz_915`) and the space filter is picked
+  from the shift. Evaluated on the real coefficient tables as `|H(e^jw)|` of the `xv`/`yv`
+  recursion, that 915 Hz filter peaks at 913.5 Hz with its 3 dB band at 865-965 Hz (about
+  100 Hz wide), and rejects the space tone by 22.9 dB at 170 Hz shift, 26.1 dB at 200,
+  43.1 dB at 425, 44.7 dB at 450 and 83.9 dB at 850, but by only 10.2 dB at 85. On a clean
+  generated two-tone recording the ATC comparison can therefore decide from the mark channel
+  alone - which is why decoding a 170 Hz-shift *synthetic* recording returns 0.0% CER
   whichever shift is selected, as the code's own comment predicts (*"works quite well with
   mark-only/space-only"*). **Do not generalise that.** The same test on a live DDH 8 capture gives:
 
@@ -233,18 +238,18 @@ the size of the CW lift, measured rather than guessed.
   So on air the space filter's selectivity is doing real work that an equal two-tone synthetic
   signal never asks of it: with both tones at full level the 915 Hz filter keeps the right polarity
   whatever the space filter does, so those rows decode at 0.0 % even when the receiver is given the
-  850 Hz space filter for a 170 Hz signal. One row was built to break that: `weak mark 170` sends the
-  mark tone 30 dB below the space tone, past the 22.9 dB by which the mark filter rejects the space
-  tone, so the mark channel inverts and the space filter has to carry the bits. That row stopped
-  grading anything the moment the shift setting started to move both ends of the loop: the
+  850 Hz space filter for a 170 Hz signal. One row was built to break that: `weak mark 170` sends
+  the mark tone 30 dB below the space tone, past the 22.9 dB by which the mark filter rejects the
+  space tone, so the mark channel inverts and the space filter has to carry the bits. That row
+  stopped grading anything the moment the shift setting started to move both ends of the loop: the
   transmitter took its shift from the receiver's filter, so "the 850 Hz setting" was really an
   850 Hz signal with an 850 Hz filter and decoded perfectly. `Rtty_BenchTxSpaceTone()` separates
   them - the signal stays at 170 Hz shift while only the setting moves - and with that, and the
   mark tone 30 dB down, the setting is graded again: 0.0 % at 170 and at 200 Hz (adjacent bands),
   **97.9 %** at 85, 425, 450 and 850. The clean two-tone signal still decodes at 0.0 % with every
   setting, because the mark channel carries the bits whatever the space filter does; that is
-  measured, printed next to the other column by `rtty-shift`, and it is why the guard row needs the
-  weak mark. A live capture, of course, still needs the tones on the modem's own frequencies.
+  measured, printed next to the other column by `rtty-shift`, and it is why the guard row needs
+  the weak mark. A live capture, of course, still needs the tones on the modem's own frequencies.
 * Inside the ATC branch the variable names are the opposite of what they hold. `mark_mag`/`mark_env`
   carry the **space** filter output and `space_mag`/`space_env` the **915 Hz mark** output, because
   the block starts by exchanging them to cancel the naming convention of the FlDigi formula it was
@@ -258,16 +263,18 @@ the size of the CW lift, measured rather than guessed.
 ## Baseline, `make -C support/digi rtty`
 
 Message `DE UHSDR BENCH RTTY 12345 TEST 45 BAUD 170 SHIFT`, 45.45 Bd, 1.5 stop bits.
-CER is measured after aligning away the lead-in junk, so it describes the modem in steady state.
-Every noise row is the mean of five noise seeds and the table prints the seed range beside it; a row
-with no channel in it is one draw and shows a dash, and the limit is applied to the mean.
+CER is measured after finding the message anywhere in the take: the characters before
+it and after it are free, so a take that opens inside a bulletin's RYRY run is scored
+on what its message says and not on the bulletin around it. Every noise row is the
+mean of five noise seeds and the table prints the seed range beside it; a row with
+no channel in it is one draw and shows a dash, and the limit is applied to the mean.
 
 | case | CER % |
 |---|---|
 | clean, 170 / 425 / 850 Hz shift | 0.0 |
 | AWGN 20, 10, 7 dB | 0.0 |
 | QSB 0.4 Hz, 6 dB deep | 0.0 |
-| QSB 2 Hz, 10 dB deep | **24.6** mean over five seeds (4.2..47.9, 23/48 on the first seed); **69.5** mean (0.8..93.6) in `rtty-long` |
+| QSB 2 Hz, 10 dB deep | **21.2** mean over five seeds (0.0..47.9, 23/48 on the first seed); **69.5** mean (0.8..93.6) in `rtty-long` |
 | weak mark, 30 dB below the space tone | 0.0 with the 170 Hz space filter (0.0 on every seed), **97.9** with the 850 Hz one (`rtty-shift`, one draw) |
 | 170 Hz signal decoded with the 850 Hz setting, mark 30 dB down | **95.8** mean (87.5..97.9; 47/48 on the first seed), against 0.0 % at 170 and 200 Hz |
 | weak mark + carrier 300 Hz above the space tone at +20 dB | 0.0 at 170 Hz on every seed, **31.2** with the carrier at +30 dB (11.7 in `rtty-long`); **97.9** at either carrier level once the setting is 850 Hz |
@@ -283,8 +290,8 @@ eight copies of the text - 392 characters with the spaces between them - through
 the same limits: a clean row is then under 0.26 %, which separates a decoder that is exactly right
 from one that is quietly worse. Measured, every row that is clean at 48 characters is clean at 392,
 so the loopback has no residual errors left to find. The two rows that are not clean are clean in
-neither length and carry a limit in both: fast fading at 24.6 % mean over five seeds short
-(4.2..47.9) and 69.5 % long (0.8..93.6), and a station sent at 45.45 Bd but decoded as 50 Bd at
+neither length and carry a limit in both: fast fading at 21.2 % mean over five seeds short
+(0.0..47.9) and 69.5 % long (0.8..93.6), and a station sent at 45.45 Bd but decoded as 50 Bd at
 69.6 % (66.7..70.8) short and 75.2 % (68.4..79.8) long.
 
 The AGC changes what this table says, and the honest version is that the earlier one was partly a
@@ -297,27 +304,26 @@ station 30 dB down decodes as well as one at nominal level, 0.0 % (0/48 and 0/39
 and +10 dB. The level rows therefore record the AGC working, not the modem being level proof.
 
 Two things still break it, and they are measured with the same chain. Fast fading, 2 Hz at 10 dB
-deep, costs **24.6 %** mean over five seeds (4.2..47.9, 23/48 on the first) at 45.45 Bd and **69.5 %**
-mean (0.8..93.6) over the long message: on the draws it catches, the modem loses lock partway and
-the rest never comes out. That spread is the point of running five seeds - a fade either reaches the
-lock or it does not, so one draw could not say where the row is. The 6.2 % this row used to report was measured
-against a noise generator whose state never advanced, so the row carried no noise at all. That
-class of bug is now checked before any case runs: the self test requires the added noise to have
-zero mean and to change on every sample, and the fading envelope to reach its trough and peak and
-to change on every sample, so a frozen generator fails the bench instead of making its rows look
-better. It also runs one case twice, with and without noise, and requires the difference - the noise
-the receiver is actually handed - to have zero mean, the level the SNR asks for, and a new value on
-every sample. In the other direction, `make -C support/digi break-rx` builds the bench with the
-receiver told the other symbol speed, and the target only succeeds when the real build passes that
-same table, the broken build fails it, the failure names the `clean 170` row and its character
-error rate, and the run reaches the end of the table. A table that can no longer see a broken
-receiver fails there, and so does a bench that crashed or failed on an unrelated row - a nonzero
-exit on its own is not the control this is. A strong signal next door is the remaining cliff: an unmodulated carrier 300 Hz above the
-space tone is harmless at +20 dB
-over the wanted signal and costs **31.2 %** at +30 dB, with the weak mark tone in the same row
-holding the bits on the space filter. That is a filter rejection limit, not a level one - which is
-what makes it the interesting failure, since the AGC cannot help with it. It reproduces without a
-radio or an antenna.
+deep, costs **21.2 %** mean over five seeds (0.0..47.9, 23/48 on the first) at 45.45 Bd and **69.5
+%** mean (0.8..93.6) over the long message: on the draws it catches, the modem loses lock partway
+and the rest never comes out. That spread is the point of running five seeds - a fade either reaches
+the lock or it does not, so one draw could not say where the row is. The 6.2 % this row used to
+report was measured against a noise generator whose state never advanced, so the row carried no
+noise at all. That class of bug is now checked before any case runs: the self test requires the
+added noise to have zero mean and to change on every sample, and the fading envelope to reach its
+trough and peak and to change on every sample, so a frozen generator fails the bench instead of
+making its rows look better. It also runs one case twice, with and without noise, and requires the
+difference - the noise the receiver is actually handed - to have zero mean, the level the SNR asks
+for, and a new value on every sample. In the other direction, `make -C support/digi break-rx` builds
+the bench with the receiver told the other symbol speed, and the target only succeeds when the real
+build passes that same table, the broken build fails it, the failure names the `clean 170` row and
+its character error rate, and the run reaches the end of the table. A table that can no longer see
+a broken receiver fails there, and so does a bench that crashed or failed on an unrelated row -
+a nonzero exit on its own is not the control this is. A strong signal next door is the remaining
+cliff: an unmodulated carrier 300 Hz above the space tone is harmless at +20 dB over the wanted
+signal and costs **31.2 %** at +30 dB, with the weak mark tone in the same row holding the bits on
+the space filter. That is a filter rejection limit, not a level one - which is what makes it the
+interesting failure, since the AGC cannot help with it. It reproduces without a radio or an antenna.
 
 ## Shift setting, `make -C support/digi rtty-shift`
 
@@ -359,11 +365,12 @@ where it was. Measured at 20 dB SNR, 170 Hz shift, in 0.5 % steps around the edg
 | -8, -8.5, -9 % | 64.6 to 68.8 | 65.1 to 69.4 |
 | 45.45 Bd decoded as 50 Bd (-9.1 %) | **70.8** (34/48) | **69.4** (272/392) |
 
-The window is about **+8 % / -7 %**, and it is not symmetric: the decoder follows a transmitter
-that is fast up to +8 % and a slow one only to -7 %. The failure either way is a cliff rather than a slope -
-+8 % is exact and +8.5 % already costs characters - and past it the text collapses to a handful of
-surviving characters. Why the DPLL tolerates one direction more than the other is measured but not
-explained here.
+The window is about **+8 % / -7 %**, and it is not symmetric: the
+decoder follows a transmitter that is fast up to +8 % and a slow one
+only to -7 %. The failure either way is a cliff rather than a slope - +8
+% is exact and +8.5 % already costs characters - and past it the text
+collapses to a handful of surviving characters. Why the DPLL tolerates
+one direction more than the other is measured but not explained here.
 
 Four rows pin that edge instead of sampling the tolerance evenly: `clk +8 %` and `clk -7 %` inside,
 exact in both matrices, and `clk +8.5 %` and `clk -7.5 %` at it, where the bench asserts the failure
@@ -396,12 +403,12 @@ negative / positive error:
 
 | error | 170 Hz shift | 170 Hz, mark 30 dB down | 450 Hz / 50 Bd |
 |---|---|---|---|
-| 14 Hz | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 |
-| 50 Hz | 0.0 / 0.0 | **16.7** / 0.0 | 0.0 / 0.0 |
+| 14 Hz | 0.0 / 0.0 | 0.0 / **97.9** | 0.0 / 0.0 |
+| 50 Hz | 0.0 / 0.0 | **8.3** / 0.0 | 0.0 / 0.0 |
 | 70 Hz | 0.0 / 0.0 | **100** / 0.0 | 0.0 / 0.0 |
-| 85 Hz | **93.8 / 93.8** | **100 / 100** | 0.0 / 0.0 |
-| 100 Hz | **87.5 / 87.5** | **89.6 / 97.9** | 0.0 / 0.0 |
-| 140 Hz | 87.5 / 87.5 | 87.5 / 95.8 | **100 / 97.9** |
+| 85 Hz | **85.4 / 89.6** | **97.9 / 95.8** | 0.0 / 0.0 |
+| 100 Hz | **87.5 / 89.6** | **93.8 / 93.8** | 0.0 / 0.0 |
+| 140 Hz | 87.5 / 87.5 | 87.5 / **93.8** | **100 / 95.8** |
 
 The window is between 70 and 85 Hz with equal tones (41..50 % of the shift) and closes at 28 Hz
 (16 %) once the mark channel is out of the picture, and it ends in a cliff, not a slope. The weak
@@ -420,13 +427,13 @@ equal tones while the weak mark row is already at 10 % on the low side, and **2 
 70 Hz on the pair at 6 m, which is the whole window. Tuning RTTY on 6 m therefore needs both ends
 within about 1.4 ppm of the filters, which is the same order as the references themselves.
 
-Our own side, measured rather than assumed: **warm**, with the software TCXO on and the radio nulled
-against WWV, the residual is about **+-10 Hz at 14 MHz** (+-0.7 ppm), so roughly 20 Hz on 10 m and
-36 Hz on 6 m. What it takes to get there is the part that has to be maintained, not just set: the
-Si570's uncompensated swing is -203..+24 Hz at 14 MHz (16 ppm) over 0..99 C, `soft_tcxo.c` removes it with
-a per-unit table (on by default, and its own header says the curve varies from unit to unit), and
-`ts.freq_cal` nulls what is left in 0.1 ppm steps (range +-149.9 ppm). One number cannot follow
-drift, so the calibration has to be redone.
+Our own side, measured rather than assumed: **warm**, with the software TCXO on and the radio
+nulled against WWV, the residual is about **+-10 Hz at 14 MHz** (+-0.7 ppm), so roughly 20 Hz
+on 10 m and 36 Hz on 6 m. What it takes to get there is the part that has to be maintained,
+not just set: the Si570's uncompensated swing is -203..+24 Hz at 14 MHz (16 ppm) over 0..99
+C, `soft_tcxo.c` removes it with a per-unit table (on by default, and its own header says
+the curve varies from unit to unit), and `ts.freq_cal` nulls what is left in 0.1 ppm steps
+(range +-149.9 ppm). One number cannot follow drift, so the calibration has to be redone.
 
 Warm-up is part of that, not a detail. The table is referenced to 43 C and its header only claims
 the curve for an Si570 and an MCP9801 that are thermally bonded, so before the two settle the
@@ -436,18 +443,19 @@ is a third of the 170 Hz window, and a cold radio is the opposite of a calibrate
 above is the warm figure; nothing here measures the first minutes, and the bench has no thermal
 model to do it.
 
-Si5351A boards get no temperature correction at all:
-`Si5351a_PrepareNextFrequency()` takes the temperature factor and discards it, so there the +-10 Hz
-holds only at the temperature it was calibrated at. The audio and symbol clocks do not enter into it
-- a ppm of the 12 kHz side clock moves a 915 Hz tone by 0.001 Hz and a 22 ms bit by 22 ns - the
-whole error is the RF reference times the band.
+Si5351A boards get no temperature correction at all: `Si5351a_PrepareNextFrequency()`
+takes the temperature factor and discards it, so there the +-10 Hz holds only
+at the temperature it was calibrated at. The audio and symbol clocks do not
+enter into it - a ppm of the 12 kHz side clock moves a 915 Hz tone by 0.001 Hz
+and a 22 ms bit by 22 ns - the whole error is the RF reference times the band.
 
 ## Weather fax, `make -C support/digi wefax`
 
-Synthetic 120 lines/min broadcast at 12 kHz: 5 ms sync tip at 1857 Hz, picture tone 1500 Hz (black)
-to 2300 Hz (white), 300 columns per line, deterministic test chart (gradient, bars, two blobs, frame).
-The reference demodulator finds the tip, then gives every pixel its own exact two-bin DFT over the
-pixel slot, so no filter bank has to be tuned; per sample that is a handful of multiply accumulates.
+Synthetic 120 lines/min broadcast at 12 kHz: 5 ms sync tip at 1857 Hz, picture
+tone 1500 Hz (black) to 2300 Hz (white), 300 columns per line, deterministic test
+chart (gradient, bars, two blobs, frame). The reference demodulator finds the
+tip, then gives every pixel its own exact two-bin DFT over the pixel slot, so no
+filter bank has to be tuned; per sample that is a handful of multiply accumulates.
 
 | case | lines | chart correlation |
 |---|---|---|
@@ -471,33 +479,34 @@ The negative correlation is the useful number: the picture is recovered perfectl
 upside down, which is why a station parameter (or an automatic decision) is required before this is
 usable on air.
 
-A frequency error is applied to the fax generator the same way it is to the RTTY pair: every tone
-of the emission moves by ppm x band while the demodulator's bins stay at 1857/1500/2300 Hz. Unlike
-RTTY, the correlation barely reacts - Pearson removes the constant grey bias the offset causes, so
-a band that is 5 ppm off still correlates at 0.976. The mean column is where it shows: 199.5 clean
-against 207.6 mean at 70 Hz, about 3 % of the 800 Hz tone spacing. Correlation alone would therefore pass
-those rows at every offset, and the wrong reason is worse than no assertion: the four ppm rows pin
-the decoded grey mean as well (200.5..203.5 at 14 Hz, 205..209 at 56 Hz, 204.5..208 at 50 Hz,
-206..210 at 70 Hz), so an offset that stopped moving the tone, or that moved it much further,
-fails here. At 250 Hz off (5 ppm on 6 m) two of twelve sync tips are no longer found and the picture
-is gone at mean 183.4, correlation 0.339, which is not a row because it would have to pass before
-it could be pinned. The fax tones are 800 Hz apart and the sync window is 5 ms, so it weathers a
-few ppm on HF and shares the 6 m limit with RTTY.
+A frequency error is applied to the fax generator the same way it is to the RTTY pair: every
+tone of the emission moves by ppm x band while the demodulator's bins stay at 1857/1500/2300 Hz.
+Unlike RTTY, the correlation barely reacts - Pearson removes the constant grey bias the offset
+causes, so a band that is 5 ppm off still correlates at 0.976. The mean column is where it shows:
+199.5 clean against 207.6 mean at 70 Hz, about 3 % of the 800 Hz tone spacing. Correlation
+alone would therefore pass those rows at every offset, and the wrong reason is worse than no
+assertion: the four ppm rows pin the decoded grey mean as well (200.5..203.5 at 14 Hz, 205..209
+at 56 Hz, 204.5..208 at 50 Hz, 206..210 at 70 Hz), so an offset that stopped moving the tone,
+or that moved it much further, fails here. At 250 Hz off (5 ppm on 6 m) two of twelve sync tips
+are no longer found and the picture is gone at mean 183.4, correlation 0.339, which is not a
+row because it would have to pass before it could be pinned. The fax tones are 800 Hz apart and
+the sync window is 5 ms, so it weathers a few ppm on HF and shares the 6 m limit with RTTY.
 
 ### Known gaps, all of them measured
 
 * **The sync capture does not track the tip.** Each line is skewed by up to +-120 samples and the
-  capture still locks to the grid of the first line: at 12 dB it finds 10 of 12 lines and the chart
-  correlates at 0.012 mean over five seeds (-0.112..0.144), and at 8 dB with QSB and a third of the
-  skew it finds 11 of 12 and correlates at 0.499 mean (0.441..0.535). The table and the self check pin those numbers as a known gap, so a capture
-  that started tracking would fail them and force this section to be rewritten. An envelope based
-  rising edge capture is the first real work item; a two stage version using a 12 sample window was
-  tried and is worse, because 1 ms of audio resolves nothing at 400 Hz tone spacing.
+  capture still locks to the grid of the first line: at 12 dB it finds 10 of 12 lines and
+  the chart correlates at 0.012 mean over five seeds (-0.112..0.144), and at 8 dB with QSB
+  and a third of the skew it finds 11 of 12 and correlates at 0.499 mean (0.441..0.535).
+  The table and the self check pin those numbers as a known gap, so a capture that started
+  tracking would fail them and force this section to be rewritten. An envelope based rising
+  edge capture is the first real work item; a two stage version using a 12 sample window
+  was tried and is worse, because 1 ms of audio resolves nothing at 400 Hz tone spacing.
 
-  The earlier claim here - still readable, correlation 0.975 - was measured while every line got the
-  *same* skew: `rng_next()` in the noise generator never wrote its new state back, so a take
-  received one Gaussian sample repeated and there was no per-line jitter at all. Fixing the generator
-  is what exposed this gap, and it is why every noise number in this file was re-measured.
+  The earlier claim here - still readable, correlation 0.975 - was measured while every line
+  got the *same* skew: `rng_next()` in the noise generator never wrote its new state back, so a
+  take received one Gaussian sample repeated and there was no per-line jitter at all. Fixing the
+  generator is what exposed this gap, and it is why every noise number in this file was re-measured.
 * **Left/right steering is invisible to this metric by construction**: the ground truth follows the
   transmitted scan order, and the reference decoder has no phasing reference. A real receiver needs
   the steer control, not a smarter score.
@@ -568,40 +577,42 @@ node capture/decode_oracle.js part-000.stream take.wav --client ~/websdr-sound.j
           blocks: 2464 8-bit, 7 packed, 0 silence
 ```
 
-That take is a noise floor, and that is the reading that matters: the oracle says the bytes are a
-valid stream and that the receiver's own decoder read them exactly as sent. It does not say the
-audio holds a station - `capture-check` answers that question, and only then is a take worth pinning.
+That take is a noise floor, and that is the reading that matters: the oracle
+says the bytes are a valid stream and that the receiver's own decoder
+read them exactly as sent. It does not say the audio holds a station -
+`capture-check` answers that question, and only then is a take worth pinning.
 
 `websdr-sound.js` is deliberately not in this tree. It is Copyright 2013-2025 pa3fwm@websdr.org, all
 rights reserved, and the permission it carries covers serving it unmodified from his servers to his
 clients, not redistributing it, so the copy stays local and is ignored by git. Save the script your
 receiver's page loads, unmodified, and pass `--client`.
 
-The self test is eight cases, and it takes all of them: a stream built in the file element by element
-- 7119 Hz, one 8-bit block, one packed block from a `144..223` header, one from a sub-`0x80` byte,
-one silence marker, 512 samples in 3 messages - has to pass the framing walk with exactly those
-counts, and seven streams, each built to break one rule and be right everywhere else, have to be
-refused with a nonzero exit, no WAV and the whole complaint they were built to draw: 169 frames of
-the size a real take arrives in, filled from a fixed sequence so the refusal is the same byte for
-the same reason on every run (it stops on an `0x8c` message type, one the client would have skipped
-silently), 112 silence markers (2.01 s, the first whole count over the 2 s rule at 7119 Hz), that
-same rate repeated as 8000 in a later message, three audio blocks in a message before any rate
-element, an 8-bit block one byte short of the 129 it needs, audio with no rate element at all, and
-three bytes after a stream that otherwise ends cleanly. The built stream alone would pass a walk
-that accepted anything; the refusals alone would pass a walk that rejected every stream, which is
-why the packed blocks are built to the format's own arithmetic (128 samples of width 4, one run bit
-and four mantissa bits each, 640 bits in all) so the walk has to land on the byte the builder wrote,
-not merely accept it. None of the eight needs a client or a network, because all are decided before
-the decoder is loaded - which is why they are what CI runs. The missing-rate stream is refused by the
-decode rather than by the walk, since the rate is what the decode needs before it can index the
+The self test is nine cases, and it takes all of them: a stream built in the file element by
+element - 7119 Hz, one 8-bit block, one packed block from a `144..223` header, one from a sub-`0x80`
+byte, one silence marker, 512 samples in 3 messages - has to pass the framing walk with exactly
+those counts, and eight streams, each built to break one rule and be right everywhere else, have to
+be refused with a nonzero exit, no WAV and the whole complaint they were built to draw: 169 frames
+of the size a real take arrives in, filled from a fixed sequence so the refusal is the same byte
+for the same reason on every run (it stops on an `0x8c` message type, one the client would have
+skipped silently), 112 silence markers (2.01 s, the first whole count over the 2 s rule at 7119
+Hz), that same rate repeated as 8000 in a later message, three audio blocks in a message before
+any rate element, an 8-bit block one byte short of the 129 it needs, audio with no rate element at
+all, a take whose 8-bit blocks are all one repeated code (what a dead band arrives as), and three
+bytes after a stream that otherwise ends cleanly. The built stream alone would pass a walk that
+accepted anything; the refusals alone would pass a walk that rejected every stream, which is why
+the packed blocks are built to the format's own arithmetic (128 samples of width 4, one run bit and
+four mantissa bits each, 640 bits in all) so the walk has to land on the byte the builder wrote,
+not merely accept it. None of the nine needs a client or a network, because all are decided before
+the decoder is loaded - which is why they are what CI runs. The missing-rate stream is refused by
+the decode rather than by the walk, since the rate is what the decode needs before it can index the
 messages at all, and that case goes red if the check is dropped instead of passing on the walk's.
 
-The DDH 8 capture quoted below was taken from NA5B. The station list, baud rates and shifts came
-from the DWD table on the Franks-Weather page,
-http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts - 50 Bd with 225 Hz
-either side of the carrier on 4583/7646/10100.8/11039/14467.3 kHz, and 50 Bd with 42.5 Hz on
-147.3 kHz. The receiver's own tuning readout is what turns those numbers into the audio pair the
-modem sees; do not take the dial frequency for the tone pair.
+The DDH 8 capture quoted below was taken from NA5B. The station list,
+baud rates and shifts came from the DWD table on the Franks-Weather page,
+http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts - 50 Bd
+with 225 Hz either side of the carrier on 4583/7646/10100.8/11039/14467.3 kHz, and 50 Bd
+with 42.5 Hz on 147.3 kHz. The receiver's own tuning readout is what turns those numbers
+into the audio pair the modem sees; do not take the dial frequency for the tone pair.
 
 What is proven here and what is not:
 
@@ -659,19 +670,19 @@ an inversion there would have produced letters that are not in the DWD message s
 ## The on air case, `make rtty-ddk2`
 
 The only case in this bench that is not synthetic. `fixtures/ddk2-4583.wav` is 13.7 s of a real
-**DDK2** transmission (4583 kHz, 00:00-24:00 UTC, F1B, 50 Bd, +/-225 Hz), recorded through the NA5B
-WebSDR client's own recorder on 19 November 2026 at about 20:45 local time on the recording
-workstation - that clock reading was never logged against UTC, so it is not a UTC time - on a dial of
-4581.84 kHz in USB with an 850-1450 Hz passband. The client's recorder ran for **64.1 s**, and only
-the **last 38 s** of it were transferred out of the browser, since the hand-off is one top-level
-navigation with one blob in it; every offset below is an offset into that 38 s window, not into the
-whole take. That 38 s was decimated 2:1 to 4 kHz from the client's 8 kHz stream rate (the pair sits
-below 1.4 kHz, more than 600 Hz clear of the 2 kHz Nyquist limit) and trimmed to the one clean
-repetition, 19.1-32.8 s of the transferred 38 s. `fixtures/MANIFEST.md` carries the same provenance
-as fields, so a re-capture is checked against numbers rather than against this prose.
+**DDK2** transmission (4583 kHz, 00:00-24:00 UTC, F1B, 50 Bd, +/-225 Hz), recorded through the
+NA5B WebSDR client's own recorder on 19 November 2026 at about 20:45 local time on the recording
+workstation - that clock reading was never logged against UTC, so it is not a UTC time - on a dial
+of 4581.84 kHz in USB with an 850-1450 Hz passband. The client's recorder ran for **64.1 s**,
+and only the **last 38 s** of it were transferred out of the browser, since the hand-off is one
+top-level navigation with one blob in it; every offset below is an offset into that 38 s window,
+not into the whole take. That 38 s was decimated 2:1 to 4 kHz from the client's 8 kHz stream rate
+(the pair sits below 1.4 kHz, more than 600 Hz clear of the 2 kHz Nyquist limit) and trimmed to the
+one clean repetition, 19.1-32.8 s of the transferred 38 s. `fixtures/MANIFEST.md` carries the same
+provenance as fields, so a re-capture is checked against numbers rather than against this prose.
 
-The pinned text is the CQ line these stations send; the DDH 8 copy in the section above shows it with
-that transmitter's own call sign and frequency list:
+The pinned text is the CQ line these stations send; the DDH 8 copy in the
+section above shows it with that transmitter's own call sign and frequency list:
 
 ```
 expected: CQ CQ CQ DE DDK2 DDH7 DDK9 FREQUENCIES   4583 KHZ   7646 KHZ   10100.8 KHZ
@@ -679,36 +690,36 @@ decoded : CQ CQ CQ DE DDK2 DDH7 DDK59FREQUENCIES   4583 KHZ   7646 KHZ   101008 
 CER     : 2.7 %
 ```
 
-`101008` is not a decode error: `norm_baudot()` keeps only A-Z, 0-9 and space, so the decimal point
-never reaches the report. What the take carries at the `DDK9` junction is **one extra character**,
-not two misreads: the line reads `DDK99` and then breaks, where the pinned text carries one `9` and a
-space. The decoder prints `DDK59` - it reads the extra slot as code 16 (`'5'` in FIGS), one data bit
-away from the code 24 (`'9'` in FIGS) the audio carries - then a **line break**, then `FREQUENCIES`.
-The `9` before the extra character and every character the pinned text carries are read correctly.
-`fixture-align` names the same insertion from the other side: one inserted, no substitution, the
-pinned space absent because the take breaks the line there - and both windows carry the take's own
-keying at level, not a faded copy of it: the nine's mark and space read -53.6 and -32.8 dB, the
-break -52.0 and -31.1 dB, against the take's own mean of -46.5 / -38.4 dB, and the worse tone of
-those two windows is 7.1 and 5.5 dB under it.
+`101008` is not a decode error: `norm_baudot()` keeps only A-Z, 0-9 and space, so the decimal
+point never reaches the report. What the take carries at the `DDK9` junction is **one extra
+character**, not two misreads: the line reads `DDK99` and then breaks, where the pinned text
+carries one `9` and a space. The decoder prints `DDK59` - it reads the extra slot as code 16
+(`'5'` in FIGS), one data bit away from the code 24 (`'9'` in FIGS) the audio carries - then a
+**line break**, then `FREQUENCIES`. The `9` before the extra character and every character the
+pinned text carries are read correctly. `fixture-align` names the same insertion from the other
+side: one inserted, no substitution, the pinned space absent because the take breaks the line
+there - and both windows carry the take's own keying at level, not a faded copy of it: the nine's
+mark and space read -53.6 and -32.8 dB, the break -52.0 and -31.1 dB, against the take's own
+mean of -46.5 / -38.4 dB, and the worse tone of those two windows is 7.1 and 5.5 dB under it.
 
-The junction was read back from the audio without the decoder's decisions: 12 ms Goertzel windows at
-the two keying tones (929 Hz mark, 1357 Hz space), one window per data bit, aligned on each character.
-The first slot reads code 8 (CR) at its own alignment: its four space bits are 15-18 dB down on the
-mark tone, its data bit 3 is a 10 dB mark there (at a fixed half-bit centre it sits at 0 dB), and no
-alignment of the slot reads it as a space. The second reads code 2 (LF): its mark bit
-is 15 dB clear and its space bits 11-29 dB down. So the break was transmitted; it is not a space
-misread as CR - that would need a mark at data bit 2, and the slot carries space there at every
-alignment tested. The extra slot is real too: a full seven-and-a-half bit character whose audio
-reads code 24 (`'9'`) at its best alignment, one bit from the code 16 the decoder printed.
+The junction was read back from the audio without the decoder's decisions: 12 ms Goertzel windows
+at the two keying tones (929 Hz mark, 1357 Hz space), one window per data bit, aligned on each
+character. The first slot reads code 8 (CR) at its own alignment: its four space bits are 15-18 dB
+down on the mark tone, its data bit 3 is a 10 dB mark there (at a fixed half-bit centre it sits at
+0 dB), and no alignment of the slot reads it as a space. The second reads code 2 (LF): its mark
+bit is 15 dB clear and its space bits 11-29 dB down. So the break was transmitted; it is not a
+space misread as CR - that would need a mark at data bit 2, and the slot carries space there at
+every alignment tested. The extra slot is real too: a full seven-and-a-half bit character whose
+audio reads code 24 (`'9'`) at its best alignment, one bit from the code 16 the decoder printed.
 
-The extra character is **not** a shift-handling defect. `rtty.c` has no unshift-on-space at all -
-only codes 27 and 31 change `charSetMode`, and a space is `' '` in both tables. The audio carries
-code 24 in FIGS, which is `RTTYSymbols[24]` = `'9'`, so the extra character is a second nine; the
-`'5'` is `RTTYSymbols[16]`, one data bit away, and that is the bit the decoder got wrong on a slot
-with no counterpart to compare it against. A synthesised stream of this text decodes at **0.0 %**, so
-the alphabet and the decoder reproduce the line exactly and the extra character is in the take.
-Three takes of the same transmission read `DDK9`, `DDK95` and `DDK59` there, so the extra slot's
-identity came with the signal rather than with the logic.
+The extra character is **not** a shift-handling defect. `rtty.c` has no unshift-on-space at
+all - only codes 27 and 31 change `charSetMode`, and a space is `' '` in both tables. The
+audio carries code 24 in FIGS, which is `RTTYSymbols[24]` = `'9'`, so the extra character is a
+second nine; the `'5'` is `RTTYSymbols[16]`, one data bit away, and that is the bit the decoder
+got wrong on a slot with no counterpart to compare it against. A synthesised stream of this
+text decodes at **0.0 %**, so the alphabet and the decoder reproduce the line exactly and the
+extra character is in the take. Three takes of the same transmission read `DDK9`, `DDK95` and
+`DDK59` there, so the extra slot's identity came with the signal rather than with the logic.
 
 The scorer charges the insertion and the pinned space the line break stands in for: 2 edits over the
 **73** characters is 2.74 %, which is the 2.7 % this case pins, and the target fails it above 3 %.
@@ -721,21 +732,21 @@ The average spectrum is the tempting measurement and the wrong one. Its humps ar
 teeth from the idle `RYRY...` pattern, with keying sidebands at +-50 and +-100 Hz, so "the peak" is
 whichever tooth is tallest and the answer comes out pulled inward: **441 +- 3 Hz** (932.0 / 1370.6).
 
-Single tone runs only - 55 ms or longer, transitions trimmed, so neither the comb nor the other
-tone's sidebands can bias the peak - give space **927.9 Hz** (n = 24, sd 0.44) and mark **1375.4 Hz**
-(n = 15, sd 0.87), separation **447.5 +- 0.2 Hz**. Three estimators agree: per run maximum likelihood
-median 447.54, a length extrapolation that removes the fixed window bias 447.51, and the phase slope
-across runs 447.62. **447.5 Hz** is the number to use. On this take that is 0.55 % below the nominal
-450 Hz, and the WWV check below holds the audio axis to 0.03 %, eighteen times smaller, so the offset
-belongs to the emission and not to the reading.
+Single tone runs only - 55 ms or longer, transitions trimmed, so neither the comb nor the
+other tone's sidebands can bias the peak - give space **927.9 Hz** (n = 24, sd 0.44) and mark
+**1375.4 Hz** (n = 15, sd 0.87), separation **447.5 +- 0.2 Hz**. Three estimators agree: per
+run maximum likelihood median 447.54, a length extrapolation that removes the fixed window bias
+447.51, and the phase slope across runs 447.62. **447.5 Hz** is the number to use. On this
+take that is 0.55 % below the nominal 450 Hz, and the WWV check below holds the audio axis to
+0.03 %, eighteen times smaller, so the offset belongs to the emission and not to the reading.
 
 The receiver then decides the shift setting, and it is not close: **450 Hz decodes at 2.7 % CER**,
 425 Hz at 49.3 %, 170 Hz at 30.1 %, 850 Hz at 32.9 %. The measured 447.5 Hz sits 2.5 Hz from the
-450 Hz setting and 22.5 Hz from the 425 Hz one, which is why that is the setting to receive it with:
-the pair is a 450 Hz class emission that this take measures 0.55 % low, not a measurement that cannot
-tell the two apart. 50 Bd is confirmed the same way: 20.0 ms bit period from the transition
-spacing, and 2.7 % at 50 Bd against 37.0 % at 45.45 Bd. Both tones sit about 11 Hz above
-the modem's 915/1365 Hz filters, which moves the pair without touching the separation.
+450 Hz setting and 22.5 Hz from the 425 Hz one, which is why that is the setting to receive it
+with: the pair is a 450 Hz class emission that this take measures 0.55 % low, not a measurement
+that cannot tell the two apart. 50 Bd is confirmed the same way: 20.0 ms bit period from the
+transition spacing, and 2.7 % at 50 Bd against 35.6 % at 45.45 Bd. Both tones sit about 11 Hz
+above the modem's 915/1365 Hz filters, which moves the pair without touching the separation.
 
 ### Is the stream rate what it says it is?
 
@@ -761,9 +772,17 @@ which is worth knowing before quoting an absolute audio frequency - do not carry
 QRM, so it says nothing about weak or fading signals, and its 2.7 % is not a quality reading of any
 kind: both characters it charges sit in the audio at full keying, within 8 dB of the take's own
 mean level, so the number counts what the station sent - a second nine, which the decoder prints as
-`'5'`, and a line break where the pinned text has a space - and not what the take lost. What it
-does pin is that the decoder handles the DWD shifting correctly on real audio, and that any modem
-change which moves this output has to be explained.
+`'5'`, and a line break where the pinned text has a space - and not what the take lost. Which two of
+those it charges depends on the rate the file is played at: resampled to 8 or 12 kHz the count is
+still 2.7 %, but the inserted `5` goes away and a different edit replaces it - the `4` of `4583`
+missing (see the fixture manifest). What it does pin is that the decoder handles the DWD shifting
+correctly on real audio, and that any modem change which moves this output has to be explained. The
+other direction needs a take where the channel itself took a character's keying down, and the `qsb
+slow deep` row of the RTTY table is it: one 4 s cycle, 26 dB deep, at 6 dB SNR, so a dip holds still
+over several characters. The alignment of one take of that row charges seven of its 48 characters
+and puts five of them 12-20 dB under its own keying, while the text either side of each dip copies,
+and the same take with the fade switched off charges none at 0.0 %. So the 2.7 % above is an
+at-level reading because the fixture is one, not because the statistic cannot see a faded character.
 
 ### The second on-air case, DDK9 on 10100.8 kHz, is not pinned
 
@@ -851,12 +870,13 @@ The same 45.45 Bd transmission with a second path: ten delays from 0 to 20 ms an
 at -3, -6 and -10 dB below the direct signal, thirty cells of character error rate. It is the only
 channel here that puts the same bit in two places in the audio.
 
-With a live noise generator **no cell of that sweep costs the text**: the only one above zero is
-7 ms at -3 dB (4.2 %, two characters of forty eight), and 7 ms at -6 dB reads 0.0 %. The 100 % notch
-this table once recorded at 7 ms and -6 dB was not the echo. Restoring the old noise generator, where
-every sample received the same Gaussian value, reproduces 20.8 % at -3 dB and 100 % at -6 dB; with
-the noise removed entirely both cells read 0.0 %. A constant offset is not a noise floor - it is a
-bias on the receiver's input - and that cell's failure belongs to the bias, not to the second path.
+With a live noise generator **no cell of that sweep costs the text**: the only one
+above zero is 7 ms at -3 dB (4.2 %, two characters of forty eight), and 7 ms at -6 dB
+reads 0.0 %. The 100 % notch this table once recorded at 7 ms and -6 dB was not the
+echo. Restoring the old noise generator, where every sample received the same Gaussian
+value, reproduces 20.8 % at -3 dB and 100 % at -6 dB; with the noise removed entirely
+both cells read 0.0 %. A constant offset is not a noise floor - it is a bias on the
+receiver's input - and that cell's failure belongs to the bias, not to the second path.
 
 The echo failure is real, just later. At 18 ms - four fifths of a bit - the delayed copy's tone is
 still arriving while the receiver decides the next bit, and a -3 dB path costs **64.6 %** (31/48) at
@@ -883,27 +903,27 @@ cannot see a keyer that sends a half stop bit, because the firmware's setting is
 The first mode in this bench that is not the radio's. `navtex.c` is a reference modulator and
 demodulator that exist only here, the way `wefax.c` does, and they are graded the same way: a
 synthesised transmission, a channel, and the text that comes back. What that establishes is the mode
-and its failure modes. What it does not establish is that a real station was copied - no NAVTEX take
-has been made here, and the receiver fits its bit clock over a +-2 % window (118..122 samples a bit),
-which is enough for the rate this bench generates and not for an arbitrary recording.
+and its failure modes. What it does not establish is that a real station was copied - no NAVTEX
+take has been made here, and the receiver fits its bit clock over a +-2 % window (118..122 samples
+a bit), which is enough for the rate this bench generates and not for an arbitrary recording.
 
 The mode is 100 Bd FSK with a 170 Hz shift, carrying the CCIR 476 seven bit alphabet. Two properties
 do all the work:
 
 * **every valid character has exactly four marks and three spaces.** That is detection for free - a
-  single wrong bit leaves a word that is not in the alphabet - and it is also the synchroniser, since
-  seven bits taken across a character boundary land on a constant ratio word by accident about a
-  fifth of the time and seven bits taken inside one always do. The receiver searches the bit phase,
-  the bit length and the group boundary together and keeps the alignment that maximises the share of
-  words in the alphabet: 1.000 on a clean take, 0.967 with one block's direct copy erased, 0.492 once
-  the tuning error walks the tones off their bins.
+  single wrong bit leaves a word that is not in the alphabet - and it is also the synchroniser,
+  since seven bits taken across a character boundary land on a constant ratio word by accident
+  about a fifth of the time and seven bits taken inside one always do. The receiver searches
+  the bit phase, the bit length and the group boundary together and keeps the alignment
+  that maximises the share of words in the alphabet: 1.000 on a clean take, 0.967 with one
+  block's direct copy erased, 0.492 once the tuning error walks the tones off their bins.
 * **there is no return path, so the correction is time diversity.** Each character is sent twice, the
-  direct (DX) copy and a repeat (RX) copy five character slots - 350 ms - later, in blocks of five. A
-  copy that is not a constant ratio word has already been detected as broken and is dropped, and the
-  other copy is taken; only when neither copy is a word does the receiver correct against the pair.
-  That order matters and the self check is what found it: a copy erased to silence reads as `0x00`,
-  which is four bits from every word, so scoring the pair together rejected characters whose repeat
-  was sitting there intact. A character with no surviving copy is lost and counted.
+  direct (DX) copy and a repeat (RX) copy five character slots - 350 ms - later, in blocks of five.
+  A copy that is not a constant ratio word has already been detected as broken and is dropped, and
+  the other copy is taken; only when neither copy is a word does the receiver correct against the
+  pair. That order matters and the self check is what found it: a copy erased to silence reads as
+  `0x00`, which is four bits from every word, so scoring the pair together rejected characters
+  whose repeat was sitting there intact. A character with no surviving copy is lost and counted.
 
 The bit order is the one thing a loopback cannot catch on its own: CCIR 476 is written most
 significant bit first and SITOR sends each character least significant bit first, but a reversed
@@ -938,45 +958,46 @@ character error rate still at zero. Erasing both copies instead loses exactly th
 characters of forty six - and is pinned from below, so a receiver that started inventing text where
 there was none would fail here rather than read as an improvement.
 
-The tuning rows are the two-bin geometry, not a filter skirt: the demodulator decides each bit by
-comparing the energy at 1615 and 1785 Hz, so a tone that has moved stays on its own side of the
-midpoint until the error passes half the shift. +50 Hz is inside that and decodes clean; +100 Hz moves
-the space tone closer to the mark bin than to its own, so the words stop being words rather than
-inverting cleanly into other valid ones - the constant ratio share falls to 0.492 and 87.0 % of the
-message is wrong on average over five seeds (82.6..95.7; 39 of 46 on the first seed). There is no AFC here either, so this is the same cliff the RTTY section
-describes, at the one place it can be computed: half the shift, 85 Hz.
+The tuning rows are the two-bin geometry, not a filter skirt: the demodulator decides each
+bit by comparing the energy at 1615 and 1785 Hz, so a tone that has moved stays on its
+own side of the midpoint until the error passes half the shift. +50 Hz is inside that and
+decodes clean; +100 Hz moves the space tone closer to the mark bin than to its own, so the
+words stop being words rather than inverting cleanly into other valid ones - the constant
+ratio share falls to 0.492 and 87.0 % of the message is wrong on average over five seeds
+(82.6..95.7; 39 of 46 on the first seed). There is no AFC here either, so this is the same
+cliff the RTTY section describes, at the one place it can be computed: half the shift, 85 Hz.
 
-The last two rows are the bit order. Reversal is not damage - every reversed 4-of-7 word is another
-member of the alphabet - so the reversed take keeps its 1.000 share and decodes exactly, which is the
-detection and nothing else: the ratio that finds the group boundary is blind to the order. The
-wrong-order row is what happens when that detection is told the wrong thing: the phasing says the
-table's order and the text is reversed, so every character the receiver reports is the reversal of the
-one sent. Both copies are reversed the same way, so the repeat has nothing to disagree about - `fix`
-is 0 and `lost` is 0 - and the 4-of-7 share is still 1.000, because every word really is a word. Time
-diversity cannot repair an error both copies share, which is why the row is pinned from below: a
-receiver that hedged by trying both orders would decode this, and would then also be inventing text
-out of noise.
+The last two rows are the bit order. Reversal is not damage - every reversed 4-of-7 word
+is another member of the alphabet - so the reversed take keeps its 1.000 share and decodes
+exactly, which is the detection and nothing else: the ratio that finds the group boundary
+is blind to the order. The wrong-order row is what happens when that detection is told the
+wrong thing: the phasing says the table's order and the text is reversed, so every character
+the receiver reports is the reversal of the one sent. Both copies are reversed the same way,
+so the repeat has nothing to disagree about - `fix` is 0 and `lost` is 0 - and the 4-of-7
+share is still 1.000, because every word really is a word. Time diversity cannot repair an
+error both copies share, which is why the row is pinned from below: a receiver that hedged
+by trying both orders would decode this, and would then also be inventing text out of noise.
 
 ## Hellschreiber, `make -C support/digi hell`
 
-The mode with no alphabet, no framing and no error control. A Hell transmitter keys a single tone on
-and off and the receiver prints what it hears as a raster: 122.5 baud, one pixel every 8.16 ms, a 5x7
-glyph followed by a blank column. Everything a synchronous mode gets from its framing, Hell gets from
-the operator's eye, which has two consequences for the bench.
+The mode with no alphabet, no framing and no error control. A Hell transmitter keys a single
+tone on and off and the receiver prints what it hears as a raster: 122.5 baud, one pixel every
+8.16 ms, a 5x7 glyph followed by a blank column. Everything a synchronous mode gets from
+its framing, Hell gets from the operator's eye, which has two consequences for the bench.
 
-The first is that there is no character error rate to report. A cell that comes out exactly as drawn is
-a character a reader would have read; a cell with one wrong pixel is a character a reader would have
-guessed at. The table therefore counts exact cells and the share of pixels wrong over the whole
-picture, and it allows the paper position to be chosen freely - a whole pixel of roll and up to two
-characters of horizontal offset - because where the picture lands on the page is not a decoding
-result.
+The first is that there is no character error rate to report. A cell that comes out
+exactly as drawn is a character a reader would have read; a cell with one wrong pixel
+is a character a reader would have guessed at. The table therefore counts exact cells
+and the share of pixels wrong over the whole picture, and it allows the paper position
+to be chosen freely - a whole pixel of roll and up to two characters of horizontal
+offset - because where the picture lands on the page is not a decoding result.
 
-The second is that the receiver has to find the raster in the keying alone: the pixel phase by the
-bimodality of the envelope (there is nothing but ink and paper, so the right sampling phase makes the
-histogram two spikes), and then the column grouping and the character phase together, by requiring
-one column in six to be blank. Those two are the same question asked twice, and they have to be
-searched together: a grouping that straddles two columns shreds the gaps, and a character phase that
-is one column out puts the gap in the middle of a glyph.
+The second is that the receiver has to find the raster in the keying alone: the pixel phase
+by the bimodality of the envelope (there is nothing but ink and paper, so the right sampling
+phase makes the histogram two spikes), and then the column grouping and the character phase
+together, by requiring one column in six to be blank. Those two are the same question asked
+twice, and they have to be searched together: a grouping that straddles two columns shreds
+the gaps, and a character phase that is one column out puts the gap in the middle of a glyph.
 
 Measured on a 31 character line at 12 kHz, scored over the 30 or 31 cells the take contains. A noise
 row is the mean of five noise seeds, with the seed range beside the pixel share, and the cell limit
@@ -994,27 +1015,27 @@ seed is not damage.
 | keying tone +700 Hz | **14.82** (14.7..14.9) | 4/30 | 0.50 |
 | pixel clock +2 % | **36.84** (36.7..37.0) | 4/30 | 0.28 |
 
-The noise rows are not a surprise once the geometry is written down: a pixel is 8.16 ms of a 1 kHz
-tone, so the receiver's envelope integrates about fifty cycles per decision and the noise is averaged
-away before the threshold. 0 dB in the audio band is still a clean picture. The last two rows are the
-real limits. The envelope reaches about +-60 Hz (a 98 sample sliding correlation), so a 200 Hz tuning
-error has lost most of the amplitude but not the on/off contrast - the threshold is set from the take's
-own percentiles, and the picture survives on the contrast that is left. At 700 Hz there is no contrast
-left and the raster is half found and mostly wrong.
+The noise rows are not a surprise once the geometry is written down: a pixel is 8.16 ms of a 1
+kHz tone, so the receiver's envelope integrates about fifty cycles per decision and the noise is
+averaged away before the threshold. 0 dB in the audio band is still a clean picture. The last two
+rows are the real limits. The envelope reaches about +-60 Hz (a 98 sample sliding correlation),
+so a 200 Hz tuning error has lost most of the amplitude but not the on/off contrast - the
+threshold is set from the take's own percentiles, and the picture survives on the contrast that
+is left. At 700 Hz there is no contrast left and the raster is half found and mostly wrong.
 
-The clock row is the failure a raster mode has instead of a bit slip. The receiver's pixel period is
-fixed at 97.96 samples; a transmitter 2 % fast is a sixth of a pixel out after one glyph and two
-columns out by the end of the line, so the columns lean and the gap columns stop being empty (0.28 of
-them blank). Both failing rows are pinned from below in the table, and the self check additionally
-holds the 2 % case, so a receiver that started following the clock slowly would fail rather than read
-as an improvement.
+The clock row is the failure a raster mode has instead of a bit slip. The receiver's
+pixel period is fixed at 97.96 samples; a transmitter 2 % fast is a sixth of a pixel out
+after one glyph and two columns out by the end of the line, so the columns lean and the
+gap columns stop being empty (0.28 of them blank). Both failing rows are pinned from
+below in the table, and the self check additionally holds the 2 % case, so a receiver
+that started following the clock slowly would fail rather than read as an improvement.
 
 ## MFSK16, `make -C support/digi mfsk16`
 
-Sixteen tones 15.625 Hz apart, one tone per symbol at 15.625 baud: four bits a symbol, 64 ms of
-signal per decision, 234 Hz wide. A symbol that the receiver reads correctly is worth four bits and a
-symbol lost to the channel is worth nothing, which is why the mode is built around a code and an
-interleaver rather than around the tones.
+Sixteen tones 15.625 Hz apart, one tone per symbol at 15.625 baud: four bits a symbol,
+64 ms of signal per decision, 234 Hz wide. A symbol that the receiver reads correctly
+is worth four bits and a symbol lost to the channel is worth nothing, which is why
+the mode is built around a code and an interleaver rather than around the tones.
 
 Which parts of this reference modem are the mode's and which are the bench's matters, and the table
 only means something if that is said plainly:
@@ -1045,22 +1066,21 @@ row is the mean of five seeds, with the seed range in parentheses:
 | tuning error +16 Hz (a whole spacing) | **111.5** (100.0-119.2) | 29.0/26 | 93.4 |
 | noise only, nothing transmitted | **100.0** (100.0-100.0) | 26/26 | 0.0 |
 
-The matched filter is why the ladder goes this deep. A symbol is 64 ms of one tone, so the correlation
-is only about 15.6 Hz wide against noise spread over 12 kHz: roughly 29 dB of processing gain, before
-the rate 1/2 code adds its own. **The floor is -18 dB over the 12 kHz band**: 36.9 % mean over five
-seeds, range 0.0-103.8, so the 0.0 % this row used to show was one lucky draw - and it is the one
-row whose spread is too wide to pin from below, so its floor is 0.0 (see *Where the failure rows'
-limits come from*). The 2.5 kHz
-equivalent is not 12 kHz + 6.8 dB: with noise shaped to 500-3000 Hz (`make -C support/digi
-floors-2k5`), twelve noise seeds a point, the same take is exact on every draw through -12.0 dB and
-still exact on the median draw at -12.5 and -13.0 dB, where the worst draws reach 38.5 and 42.3 %.
-The coast is bimodal rather than smooth: at -13.5 dB the median draw costs 7.7 % and the worst draw
-costs the whole message (0.0..103.8, mean 32.4), and by -14.5 dB the median is 100 % (23.1..111.5).
-At -13.2 dB, where the arithmetic maps the 12 kHz -20 dB row, the median draw is exact and the
-mean over twelve is 14.1 % across 0.0..100.0, not 86.9 %; at -15.2 dB, where it maps the 12 kHz
--22 dB row, the median is 96.2 % (50.0..103.8). The arithmetic gives the onset, not the curve - the
-12 kHz figure includes out-of-band noise the receiver does not fully reject, so confining the noise
-to the channel is worth about 2 dB at the same median severity.
+The matched filter is why the ladder goes this deep. A symbol is 64 ms of one tone, so the
+correlation is only about 15.6 Hz wide against noise spread over 12 kHz: roughly 29 dB of processing
+gain, before the rate 1/2 code adds its own. **The floor is -18 dB over the 12 kHz band**: 36.9 %
+mean over five seeds, range 0.0-103.8, so the 0.0 % this row used to show was one lucky draw - and
+it is the one row whose spread is too wide to pin from below, so its floor is 0.0 (see *Where the
+failure rows' limits come from*). The 2.5 kHz equivalent is not 12 kHz + 6.8 dB: with noise shaped
+to 500-3000 Hz (`make -C support/digi floors-2k5`), twelve noise seeds a point, the same take is
+exact on every draw through -12.0 dB and still exact on the median draw at -12.5 and -13.0 dB, where
+the worst draws reach 38.5 and 42.3 %. The coast is bimodal rather than smooth: at -13.5 dB the
+median draw costs 7.7 % and the worst draw costs the whole message (0.0..103.8, mean 32.4), and by
+-14.5 dB the median is 100 % (23.1..111.5). At -13.2 dB, where the arithmetic maps the 12 kHz -20 dB
+row, the median draw is exact and the mean over twelve is 14.1 % across 0.0..100.0, not 86.9 %; at
+-15.2 dB, where it maps the 12 kHz -22 dB row, the median is 96.2 % (50.0..103.8). The arithmetic
+gives the onset, not the curve - the 12 kHz figure includes out-of-band noise the receiver does not
+fully reject, so confining the noise to the channel is worth about 2 dB at the same median severity.
 
 A single run of this measurement is worth almost nothing here, which is why it is quoted as a
 median with its range: past -13 dB the first seed can land anywhere between a clean decode and none
@@ -1076,16 +1096,16 @@ than two (7.7 %). CI runs it, so a receiver change that moved this coast has to 
 paragraph rewritten instead of leaving the numbers above quietly false. The full 0.5 dB curve is
 still `floors-2k5`, which the job does not run.
 
-Every noise row in this file was re-measured after a bench bug was found and fixed: `rng_next()` never
-wrote its new state back, so each take received one Gaussian sample repeated - a DC offset, which the
-tone correlators reject. No row below 0 dB had ever really been tested against noise, and the WEFAX
-numbers moved when it was repaired too.
+Every noise row in this file was re-measured after a bench bug was found and fixed:
+`rng_next()` never wrote its new state back, so each take received one Gaussian sample
+repeated - a DC offset, which the tone correlators reject. No row below 0 dB had ever
+really been tested against noise, and the WEFAX numbers moved when it was repaired too.
 
-The burst rows are the interleaver: two symbols erased is eight bits spread over
-eight symbols, which the rate 1/2 code repairs completely, and eight symbols erased is thirty two bits
-over eight symbols, four in each of them, which it does not. The mean is 26.9 % (7.0 characters of
-26, range 11.5-53.8 over five seeds): with Varicode a character is about ten bits rather than six,
-so the same thirty two damaged bits reach about a third of the message instead of an eighth of it.
+The burst rows are the interleaver: two symbols erased is eight bits spread over eight symbols,
+which the rate 1/2 code repairs completely, and eight symbols erased is thirty two bits over
+eight symbols, four in each of them, which it does not. The mean is 26.9 % (7.0 characters of 26,
+range 11.5-53.8 over five seeds): with Varicode a character is about ten bits rather than six, so
+the same thirty two damaged bits reach about a third of the message instead of an eighth of it.
 The row is pinned from below so that a receiver which started hiding the damage would fail here.
 
 The tuning rows are the tone spacing. The tones are exactly one cycle apart per symbol, so a 16 Hz
@@ -1096,19 +1116,19 @@ splits between two tones, the winning tone no longer holds half of it (17.9 % he
 decisions scatter (93.1 %, range 88.5-100.0). There is no tuning search in the receiver; this is the
 same cliff the RTTY and NAVTEX sections measure, at the width this mode's tones give it.
 
-The noise-only row is the one that must never read as text. With nothing transmitted the receiver
-still frames characters out of the noise, and the row pins that text at a character error rate of
-100 %, so a receiver that began inventing spaces where the signal was silent would show up as a
-regression.
+The noise-only row is the one that must never read as text. With nothing
+transmitted the receiver still frames characters out of the noise, and the row
+pins that text at a character error rate of 100 %, so a receiver that began
+inventing spaces where the signal was silent would show up as a regression.
 
 ### Where the failure rows' limits come from
 
 Seven rows here have to keep failing, and each one's floor is derived from the five draws it was
-measured with rather than typed in. The rule is the lower one sided 95 % confidence bound of the mean
-of five draws, `mean - 2.132 * s.e.`, with t = 2.132 for four degrees of freedom. A build is only
-better on such a row when its mean falls below what the five draws support, so that is where the row
-fails. The five draws themselves are in the case table (`floor_seeds`), so re-measuring a row means
-editing its draws and the limit follows; nothing else has to be kept in step.
+measured with rather than typed in. The rule is the lower one sided 95 % confidence bound of the
+mean of five draws, `mean - 2.132 * s.e.`, with t = 2.132 for four degrees of freedom. A build is
+only better on such a row when its mean falls below what the five draws support, so that is where
+the row fails. The five draws themselves are in the case table (`floor_seeds`), so re-measuring
+a row means editing its draws and the limit follows; nothing else has to be kept in step.
 
 | row | five draws, CER % | mean | s.e. | floor |
 |---|---|---|---|---|
@@ -1137,26 +1157,26 @@ draw), so a row that gets *worse* fails before it can pass as noise.
 
 ## Olivia, `make -C support/digi olivia`
 
-Thirty-two tones 31.25 Hz apart - 1000 Hz of signal, which is what the `32/1000` in the mode's name
-counts - at 31.25 baud, one tone per symbol. A tone is five bits and sixty-four tones are a block, so
-a block carries five seven bit characters: the mode's two layers are the MFSK across the frequency
-axis and a Walsh function along the time axis.
+Thirty-two tones 31.25 Hz apart - 1000 Hz of signal, which is what the `32/1000` in
+the mode's name counts - at 31.25 baud, one tone per symbol. A tone is five bits and
+sixty-four tones are a block, so a block carries five seven bit characters: the mode's two
+layers are the MFSK across the frequency axis and a Walsh function along the time axis.
 
-This modem uses Olivia's own mapping, and there is no tone pair table in Olivia to use. Each character
-is one of 128 Walsh sequences - sixty-four rows of the 64 x 64 Hadamard matrix and their complements,
-so the character's seven bits are six for the row and one for the sign - scrambled with
-`0xE257E6D0291574EC` rotated thirteen bits per character, and spread diagonally over the block:
-character `b` puts its bit `t` into symbol `t`, bit position `(b + t) mod 5`. The five bit symbols go
-to tones through the mode's Gray code. That is the ARRL draft specification and fldigi's MFSK codec,
-and it is what this section measures.
+This modem uses Olivia's own mapping, and there is no tone pair table in Olivia to use. Each
+character is one of 128 Walsh sequences - sixty-four rows of the 64 x 64 Hadamard matrix
+and their complements, so the character's seven bits are six for the row and one for the
+sign - scrambled with `0xE257E6D0291574EC` rotated thirteen bits per character, and spread
+diagonally over the block: character `b` puts its bit `t` into symbol `t`, bit position
+`(b + t) mod 5`. The five bit symbols go to tones through the mode's Gray code. That is the
+ARRL draft specification and fldigi's MFSK codec, and it is what this section measures.
 
 Which parts are the bench's:
 
 * **the bench's**: the stream starts with the length in its first two characters, because Olivia is a
-  continuous stream with no framing of its own; the receiver decides each symbol from one whole 32 ms
-  window rather than fldigi's overlapped FFT and separate symbol clock; and the phase is continuous
-  rather than shifted at random by +-90 degrees per symbol, which the specification does only so that
-  a repeated tone is not a pure tone.
+  continuous stream with no framing of its own; the receiver decides each symbol from
+  one whole 32 ms window rather than fldigi's overlapped FFT and separate symbol
+  clock; and the phase is continuous rather than shifted at random by +-90 degrees per
+  symbol, which the specification does only so that a repeated tone is not a pure tone.
 * **the mode's**: the tone grid, the rate, one tone a symbol, the Walsh/Hadamard codewords, the
   scrambler, the diagonal spread, the Gray code, and five characters in a block.
 
@@ -1178,30 +1198,30 @@ is the mean of five seeds, with the seed range in parentheses:
 | noise only, nothing transmitted | **100.0** (100.0-100.0) | 26/26 | 0.0 |
 
 **The floor is -18 dB over the 12 kHz band**: 20.8 % mean over five seeds, range 11.5-34.6, and a
-derived floor of 12.3 % (see *Where its floors come from*). The
-arithmetic 2.5 kHz equivalent, -11.2 dB, is about 1.8 dB too high: with noise shaped to 500-3000 Hz
-(`make -C support/digi floors-2k5`), twelve noise seeds a point, every draw is exact through
--11.0 dB and the median draw is still exact through -12.5 dB, where the worst draws cost up to
-11.5 %. The first point whose median draw loses a character is -13.0 dB (3.8 %, range 0.0..88.5,
-mean 13.1), and at -13.2 dB - where the arithmetic maps the 12 kHz -20 dB row - the median is 3.8 %
-across 0.0..92.3, where that row's own mean is 73.1 %. At -11.2 dB, where it maps the 12 kHz -18 dB
-row, every draw of the shaped channel is exact rather than 20.8 %. The Walsh layer is why it goes that deep. A symbol error is one bit in each of five codewords of sixty-four bits, and the rows of the
-matrix are 32 apart, so the
-transform reads the right one through a great deal of damage, and the soft decisions keep working long
-after no symbol has a winning tone: at -16 dB the heard column is 0.0 % and the text is still exact.
+derived floor of 12.3 % (see *Where its floors come from*). The arithmetic 2.5 kHz equivalent, -11.2
+dB, is about 1.8 dB too high: with noise shaped to 500-3000 Hz (`make -C support/digi floors-2k5`),
+twelve noise seeds a point, every draw is exact through -11.0 dB and the median draw is still exact
+through -12.5 dB, where the worst draws cost up to 11.5 %. The first point whose median draw loses
+a character is -13.0 dB (3.8 %, range 0.0..88.5, mean 13.1), and at -13.2 dB - where the arithmetic
+maps the 12 kHz -20 dB row - the median is 3.8 % across 0.0..92.3, where that row's own mean is
+73.1 %. At -11.2 dB, where it maps the 12 kHz -18 dB row, every draw of the shaped channel is exact
+rather than 20.8 %. The Walsh layer is why it goes that deep. A symbol error is one bit in each
+of five codewords of sixty-four bits, and the rows of the matrix are 32 apart, so the transform
+reads the right one through a great deal of damage, and the soft decisions keep working long after
+no symbol has a winning tone: at -16 dB the heard column is 0.0 % and the text is still exact.
 
 Above the floor the soft bits carry it. At -12 dB only 1.1 % of symbols look heard and not one
 character is wrong. That is the opposite of the old pair based stand-in, where 68.8 % of symbols
 looked heard and sixteen characters of twenty-six came back wrong.
 
-The burst rows still cost nothing, which is the measurement rather than a missing case: two erased
-symbols is ten bit errors over ten codewords and eight erased symbols is forty, both well inside what
-a 64 bit code with distance 32 repairs. The tuning row is the more interesting one: at half a tone
-spacing only 6.8 % of symbols have a winning tone that holds half the energy, the energy is split
-between two neighbours, and every character still comes back.
+The burst rows still cost nothing, which is the measurement rather than a missing case: two
+erased symbols is ten bit errors over ten codewords and eight erased symbols is forty, both
+well inside what a 64 bit code with distance 32 repairs. The tuning row is the more interesting
+one: at half a tone spacing only 6.8 % of symbols have a winning tone that holds half the
+energy, the energy is split between two neighbours, and every character still comes back.
 
-The noise-only row is the one that must never read as text: 100 % of the message wrong, no symbol
-heard.
+The noise-only row is the one that must never read as
+text: 100 % of the message wrong, no symbol heard.
 
 ### Where its floors come from
 
@@ -1232,14 +1252,14 @@ since digi parameters are front-panel only in this radio (PSK speed works the sa
    14466.160 kHz, putting the tones at 915 and 1365 Hz. On live radio the shift matters a great deal
    (table above), so tuning is not optional here.
 
-Both settings persist: `EEPROM_RTTY_SHIFT_IDX` = word 387 and `EEPROM_RTTY_SPEED_IDX` = word 388,
-each with min/max limits, added in commit `979cfdf6`. Boot order re-applies them instead of leaving
-the compile-time 170 Hz / 45 Bd initialisers in the modem:
-`TransceiverStateInit` -> `UiDriver_Init` (which runs `UiDriver_LoadSavedConfigurationAtStartup` ->
-`UiConfiguration_LoadEepromValues`) -> `AudioDriver_Init` (which calls `Rtty_Modem_Init`). If that
-ordering ever changes, the symptom is a radio that shows the right setting on screen but demodulates
-at 170 Hz / 45 Bd until an encoder is touched - which is the same species of fault as the EEPROM
-address collision that destroyed 22 settings.
+Both settings persist: `EEPROM_RTTY_SHIFT_IDX` = word 387 and `EEPROM_RTTY_SPEED_IDX` =
+word 388, each with min/max limits, added in commit `979cfdf6`. Boot order re-applies
+them instead of leaving the compile-time 170 Hz / 45 Bd initialisers in the modem:
+`TransceiverStateInit` -> `UiDriver_Init` (which runs `UiDriver_LoadSavedConfigurationAtStartup`
+-> `UiConfiguration_LoadEepromValues`) -> `AudioDriver_Init` (which calls `Rtty_Modem_Init`).
+If that ordering ever changes, the symptom is a radio that shows the right setting
+on screen but demodulates at 170 Hz / 45 Bd until an encoder is touched - which is
+the same species of fault as the EEPROM address collision that destroyed 22 settings.
 
 Two things to keep in mind when picking a sample: NAVTEX is **512 kHz in the United States** and
 518 kHz internationally, so the receiver has to be in range of the service being tested; and for

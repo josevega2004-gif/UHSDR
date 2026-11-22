@@ -120,9 +120,11 @@ typedef struct
     uint32_t    noise_seed;  // 0 keeps the bench's default draw; a table row sets it per seed
 } rtty_case_t;
 
-// The demodulator emits one or two characters of junk while it locks on, which is a property of
-// the modem but not what the CER is meant to measure, so the score is taken from the best
-// alignment of the received text against the expected one and the skipped lead-in is reported.
+// A take does not begin where its message begins, and the score is meant to measure the modem on
+// the message, not on the bulletin around it: a receiver switched on part way through a DWD
+// transmission opens inside a long RYRY run, and an operator stops recording some time after the
+// message ends, so more of it follows. So the score
+// searches the whole take for the message and reports where it found it as the lead.
 static int lead_in_junk;
 // what the last score was measured on: the length of the expected text and how many of its
 // characters the decoder got wrong. One character is 2.1 % of the 48 character message, so 0.0 %
@@ -213,21 +215,72 @@ static void radio_agc(float32_t* x, size_t n)
     }
 }
 
-static float score_aligned(const char* expected, const char* got){
-    float best = 100.0f;
-    const size_t need = strlen(expected);
-    size_t best_wrong = need;               // a total failure counts every character, not none
-    int best_skip = 0;
-    for (int skip = 0; skip < 12 && got[skip]; skip++)
+// The characters before the message are not the modem's errors, and neither are the ones after it,
+// so the alignment that scores a take is free at both ends: every character of the expected text
+// still has to be matched - that is what the CER counts - while anything before the message and
+// anything after it costs nothing. Skipping a fixed number of leading characters cannot do this,
+// whatever the number is picked as: a 60 character RYRY run is a normal opening for a live take,
+// and charging it as insertions turns a copy that is a character or two wrong into 91-100 %.
+//
+// This is the Levenshtein recurrence with its first row zeroed, which makes the prefix free, and
+// its answer taken from the cheapest cell of the last row, which makes the suffix free. It also
+// returns where in the take the message started, which is what the lead column reports. Ties go
+// the same way Bench_Levenshtein breaks them, so a take that starts on its message scores exactly
+// what it scored before.
+static size_t message_errors(const char* expected, const char* got, size_t* start)
+{
+    const size_t need = strlen(expected), have = strlen(got);
+    size_t* prev    = malloc((have + 1) * sizeof *prev);
+    size_t* cur     = malloc((have + 1) * sizeof *cur);
+    size_t* prev_at = malloc((have + 1) * sizeof *prev_at);
+    size_t* cur_at  = malloc((have + 1) * sizeof *cur_at);
+    if (!prev || !cur || !prev_at || !cur_at)
     {
-        size_t wrong = Bench_Levenshtein(expected, got + skip);
-        float cer = need ? 100.0f * (float) wrong / (float) need : 0.0f;
-        if (cer < best) { best = cer; best_skip = skip; best_wrong = wrong; }
+        free(prev); free(cur); free(prev_at); free(cur_at);
+        *start = 0;
+        return Bench_Levenshtein(expected, got);
     }
-    lead_in_junk = best_skip;
-    cer_chars = (int) need;
-    cer_wrong = (int) best_wrong;
+
+    // row 0: nothing of the expected text matched yet, at no cost wherever the message starts
+    for (size_t j = 0; j <= have; j++) { prev[j] = 0; prev_at[j] = j; }
+
+    for (size_t i = 1; i <= need; i++)
+    {
+        cur[0] = i;                     // the take ended first: the rest is missing, not free
+        cur_at[0] = 0;
+        for (size_t j = 1; j <= have; j++)
+        {
+            const size_t cost = (expected[i - 1] == got[j - 1]) ? 0 : 1;
+            size_t best = cur[j - 1] + 1;               // a character of the take the text lacks
+            size_t at   = cur_at[j - 1];
+            if (prev[j - 1] + cost < best) { best = prev[j - 1] + cost; at = prev_at[j - 1]; }
+            if (prev[j] + 1 < best)        { best = prev[j] + 1;        at = prev_at[j]; }
+            cur[j] = best;
+            cur_at[j] = at;
+        }
+        size_t* tr = prev;    prev = cur;    cur = tr;
+        size_t* ta = prev_at; prev_at = cur_at; cur_at = ta;
+    }
+
+    // the message may end anywhere in the take: the cheapest cell of the last row is the answer
+    size_t best = prev[0], at = prev_at[0];
+    for (size_t j = 1; j <= have; j++)
+    {
+        if (prev[j] < best) { best = prev[j]; at = prev_at[j]; }
+    }
+    free(prev); free(cur); free(prev_at); free(cur_at);
+    *start = at;
     return best;
+}
+
+static float score_aligned(const char* expected, const char* got){
+    const size_t need = strlen(expected);
+    size_t at = 0;
+    const size_t wrong = message_errors(expected, got, &at);
+    lead_in_junk = (int) at;
+    cer_chars = (int) need;
+    cer_wrong = (int) wrong;
+    return need ? 100.0f * (float) wrong / (float) need : 0.0f;
 }
 
 // until_eot says how the transmission is bounded: false runs for 13.3 s, room for the 48 character
@@ -464,10 +517,27 @@ static int rtty_table(const char* msg, bool long_mode)
         // take and the rest of the message never comes out. That is pinned as a failure, not hidden:
         // the earlier 6.2 % / 2.3 % was measured while the bench's noise generator never advanced its
         // state, so the row had no noise on it at all. Over five seeds the fade catches the modem on
-        // some draws and not on others (4.2-47.9 %, mean 24.6 %), so the floor is set well below the
-        // mean: losing lock is what the row is for, and a draw that survives it is not a fix.
+        // some draws and not on others (0.0-47.9 %, mean 21.2 %; the bottom was 4.2 % while the
+        // scorer still charged the junk the decoder emits after it has lost lock), so the floor is
+        // set well below the mean: losing lock is what the row is for, and a draw that survives it
+        // is not a fix.
         { .label = "qsb fast 10",  .shift = 170, .snr_db = 10.0f, .qsb_rate = 2.0f,
           .qsb_depth = 10.0f, .max_cer = 100.0f, .min_cer = 10.0f },
+        // a slow deep fade, so a character is read while its keying is down rather than after the
+        // dip. The row above loses the text by losing lock: 2 Hz is one dip every 500 ms, and the
+        // receiver comes out of it with the rest of the message missing. This one is one cycle
+        // every 4 s and 26 dB deep with the signal at 6 dB SNR, so the fade holds still over
+        // several characters and then lets go - the text either side of a dip is copied and the
+        // characters inside it are not. Measured: 21.7 % over the five seeds (12.5..35.4). The
+        // alignment of one seed's take charges seven characters, five of them 12 to 20 dB under
+        // that take's own keying and two at its level, and the very same take with qsb_depth 0
+        // charges none at 0.0 %, so the dip is what takes those characters down. That is the one
+        // case in the table where a wrong character can be shown to sit on keying the channel
+        // took down, which is what makes the at-level claim about the fixture testable the other
+        // way. The floor keeps it that way: a clean run would mean the fade had stopped reaching
+        // a character, and every charged character in the corpus would be an at-level one again.
+        { .label = "qsb slow deep", .shift = 170, .snr_db = 6.0f, .qsb_rate = 0.25f,
+          .qsb_depth = 26.0f, .max_cer = 100.0f, .min_cer = 10.0f },
         // the real services: DWD DDH/DDK are F1B 50 Baud with +/-225 Hz (450 Hz total) on
         // 4583/7646/10100.8/11039/14467.3 kHz and +/-42.5 Hz (85 Hz) on 147.3 kHz, per the DWD
         // table on http://weather.mailasail.com/franks-weather/radio-teletype-weather-broadcasts.
@@ -2935,19 +3005,22 @@ static void gate_dropouts(const cap_t* c, gate_drop_t* d)
 // stretched by 1, 2 and 3 % either way 19.400 to 20.600 ms with 6.4 to 7.4 % while still decoding at
 // 2.7 to 6.8 %, a 45.45 baud take 22.000 ms with 2.2 %, and a 40 baud take 25.000 ms with 0.9 %.
 //
-// The scatter limit is 12 % of a bit on the median absolute deviation - the statistic a single stray
-// crossing cannot move - and so sits well above the 7.4 % the worst take that still decodes reads;
-// the rms printed beside it reaches 8.8 % on the same audio. The period window is 5 %, which passes
-// both reference takes at their nominal period and refuses a 45.45 baud take at 10 % long even
-// though its pair and its scatter look perfect. Scatter is what carries a take damaged in a way the
-// pair cannot see - a keyed signal whose edges have been smeared or clipped - while the pair and the
-// bimodality carry a stretch of noise or hash. A take that cannot clear these is not evidence about
-// the modem either way.
+// The period window is 5 %, which passes both reference takes at their nominal period and refuses a
+// 45.45 baud take at 10 % long even though its pair and its scatter look perfect. The pair and the
+// bimodality are what carry a stretch of noise or hash.
+//
+// The scatter is printed and refuses nothing. It was a 12 % limit on the median absolute deviation,
+// picked because that sits above the 7.4 % the worst stretched fixture read, but it refuses takes
+// whose text is there: the fixture re-read with 4 ms of wow - the clock wandering by 0.2 of a bit,
+// which a receiver's DPLL follows - decodes at 9.6 % CER while its transitions read 13.3 % MAD, and
+// at 3 ms of wow 11.0 % at 12.1 %. A recording that decodes is evidence about the modem, so how
+// scattered its clock is says how much the take has been through, not whether it may be graded: the
+// gate reports the number and the character error rate is what the take is judged on.
 #define GATE_SINGLE_MIN   0.55   // windows holding one tone
 #define GATE_BOTH_MAX     0.35   // windows holding both: straddled bits plus noise
 #define GATE_PAIR_SLACK   30.0   // Hz between the measured pair and the declared shift
 #define GATE_PERIOD_TOL   0.05   // fraction of a bit
-#define GATE_MAD          12.0   // percent of a bit, median absolute deviation
+#define GATE_SCATTER_NOTE 12.0   // percent of a bit: the scatter the gate calls wide, as a note
 #define GATE_GAP_MS        5.0   // longest hole a take may carry
 
 static int capture_check(const char* path, uint16_t shift, uint16_t baud)
@@ -3010,8 +3083,7 @@ static int capture_check(const char* path, uint16_t shift, uint16_t baud)
                pair.f_low + pair.f_high, pair.f_both);
         bad = 1;
     }
-    if (!clock.transitions || fabs(clock.period_ms - nominal) > nominal * GATE_PERIOD_TOL
-        || clock.mad_pct > GATE_MAD)
+    if (!clock.transitions || fabs(clock.period_ms - nominal) > nominal * GATE_PERIOD_TOL)
     {
         // the rate the take actually carries, so a wrong time base reads as the baud rate it is and
         // not only as a period in milliseconds
@@ -3021,6 +3093,13 @@ static int capture_check(const char* path, uint16_t shift, uint16_t baud)
                clock.period_ms > 0.0 ? 1000.0 / clock.period_ms : 0.0, clock.dispersion_pct,
                clock.mad_pct);
         bad = 1;
+    }
+    else if (clock.mad_pct > GATE_SCATTER_NOTE)
+    {
+        // reported, not refused: a take whose clock wanders still carries its message, and the gate
+        // is not the thing that decides whether text came back - rtty-wav is
+        printf("note      : scatter %.1f %% MAD of a bit is wide; that is reported, not refused -\n"
+               "            run rtty-wav for the take's CER and grade it on that\n", clock.mad_pct);
     }
     if (drop.longest_ms > GATE_GAP_MS)
     {
@@ -4008,6 +4087,26 @@ static int selftest(void)
         check(cer_file == 0.0f, "a recorded WAV comes back through the file input with zero errors");
     }
     {
+        // The score has to describe the message, not the bulletin around it. A live take opens inside
+        // whatever the station was sending - the DWD stations open with long RYRY runs, and a receiver
+        // switched on mid-bulletin lands in the middle of one - and the operator keeps recording for
+        // a while after the message ends. A fixed skip cannot cover that, however many characters it
+        // is widened to: the RYRY before the message is only free if it never has to be matched.
+        const char* want = norm_baudot("DE UHSDR SCORE TEST", 0);
+        char take[256];
+        memset(take, 0, sizeof(take));
+        for (int i = 0; i < 60; i++) take[i] = (i % 2) ? 'Y' : 'R';
+        strcat(take, want);
+        strcat(take, "RYRYRYRYRYRYRYRYRYRY");
+        const float behind = score_aligned(want, take);
+        check(behind == 0.0f && lead_in_junk == 60,
+              "the message is found behind a long RYRY run and scored on its own characters");
+        // and the freedom must not become a way to score noise: with nothing to find, a take of
+        // junk still costs every character of the message
+        const float junk = score_aligned(want, "QWEASDZXCVBNMQWEASDZXCVBNM");
+        check(junk > 50.0f, "junk in the take is not scored as a message");
+    }
+    {
         // the receive filter bank has to be tuned to the frequency its own label claims and the
         // modulator sends. rtty_bp_12khz_1765 was an 1865 Hz design and the loopback never noticed,
         // because the ATC decides from the mark channel on a clean two-tone signal; this measures
@@ -4123,11 +4222,16 @@ static int selftest(void)
         // every 40 ms, so 40 ms explains the transitions exactly as well as 20 does and 10 ms fits
         // their phases too. The reported period has to be the bit the modem will key at, which is
         // the fundamental of that grid, and not the coarser lattice the crossings alone allow.
-        // What holds the lattice out is the search window as much as the fit, so the window is
-        // asserted as a rule before the take goes through it: 30 % either side of the declared bit
-        // leaves 14..26 ms here, clear of the 10 ms whose phases fit the same transitions and of the
-        // 40 ms that explains them. The window is a fraction of the bit, so the same two bounds hold
-        // at every declared rate; the case after them pins what the fit reports.
+        // The fit alone cannot choose between those three periods, so the search window is what
+        // does, and it is asserted here as a rule before any take goes through it. For a declared
+        // 50 Bd the window is 30 % either side of 20 ms, that is 14..26 ms, and it excludes both
+        // 10 ms - the two bit harmonic, whose phases fit the same transitions - and 40 ms, the half
+        // rate spacing that explains them. Both are outside the window, not merely less favoured
+        // inside it, so there is no harmonic in the search for the fit to prefer. Nothing of that
+        // kind should be added back: a preference inside the window would make the reported period
+        // depend on which lattice scored highest on one take, not on the rate the modem keys. The
+        // window is a fraction of the bit, so the same two bounds hold at every declared rate; the
+        // case after them pins what the fit reports.
         const double bit_ms = 1000.0 / 50.0;
         check(bit_ms * GATE_CLOCK_LO > 0.5 * bit_ms,
               "clock: the search window starts above half a bit, where a two bit take's phases fit");
@@ -4396,7 +4500,7 @@ int main(int argc, char** argv)
         printf("decoding with %u Hz shift, %u baud\n", (unsigned)shift, (unsigned)baud);
         float cer = decode_wav(argv[2], expect, got, sizeof(got), shift, baud, false, NULL, 0);
         if (cer < 0.0f) return 0;
-        printf("CER       : %.1f%% (after aligning the lead in)\n", cer);
+        printf("CER       : %.1f%% (after finding the message in the take)\n", cer);
         // the optional limit turns a recording into a graded case: a fixture whose text is pinned has
         // to keep decoding to that text, otherwise the mode accepts any change to the modem's output
         if (argc > 6 && cer > (float) atof(argv[6]))
