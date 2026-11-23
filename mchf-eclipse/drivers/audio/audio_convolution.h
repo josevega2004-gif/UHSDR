@@ -79,6 +79,15 @@ typedef struct
 
 extern ConvolutionBuffersShared cbs;
 
+// The four counters the diagnostic build prints on the debug overlay, and why they are there: the
+// convolution path can end up with no audio in four distinguishable ways and the operator cannot tell
+// them apart by ear.  See audio_convolution.c.
+extern volatile uint32_t conv_stat_slices_in;
+extern volatile uint32_t conv_stat_blocks_in;
+extern volatile uint32_t conv_stat_blocks_out;
+extern volatile uint32_t conv_stat_dropped;
+extern volatile uint32_t conv_stat_nosetup;
+
 void AudioDriver_CalcConvolutionFilterCoeffs (int N, float32_t f_low, float32_t f_high, float32_t samplerate, int wintype, int rtype, float32_t scale);
 void AudioDriver_SetConvolutionFilter (int nc, float32_t f_low, float32_t f_high, float32_t samplerate, int wintype, float32_t gain);
 void convolution_handle(void);

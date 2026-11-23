@@ -7949,6 +7949,21 @@ void UiDriver_TaskHandler_MainTasks()
 							UiLcdHy28_PrintText(0,(uint16_t)(ts.Layout->LOADANDDEBUG_Y + 9 * (enc + 1)),str,White,Black,0);
 						}
 					}
+#ifdef USE_CONVOLUTION
+					// the convolution pipeline, one line under the encoders: blocks in and out of the
+					// worker, blocks dropped for want of a free one, and slices refused because the
+					// chain was never sized.  A radio with no audio and in==out==0 and nosetup growing
+					// is a setup that never ran; in climbing while out stays at 0 is a worker that is
+					// not running; out climbing while the operator hears nothing is downstream of all
+					// of this.  sz is cbs.size, the block the masks were designed against.
+					{
+						snprintf(str,20,"C %u/%u d%u n%u s%u",
+								(unsigned int)conv_stat_blocks_in, (unsigned int)conv_stat_blocks_out,
+								(unsigned int)conv_stat_dropped, (unsigned int)conv_stat_nosetup,
+								(unsigned int)cbs.size);
+						UiLcdHy28_PrintText(0,(uint16_t)(ts.Layout->LOADANDDEBUG_Y + 9 * (ENC_MAX + 1)),str,White,Black,0);
+					}
+#endif
 				}
 #endif
 			}

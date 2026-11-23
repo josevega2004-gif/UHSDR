@@ -186,6 +186,17 @@ int32_t Sample_out_has_room()
 
 // ---------------- the blocks the two queues carry, and who owns them ----------------
 
+// Counters for the diagnostic build.  The convolution path can go silent in at least four different
+// ways - the chain was never set up so cbs.size is still 0, the free ring is empty so slices are
+// dropped, the worker is not running so nothing is queued, or the interrupt is not reading so nothing
+// comes back - and from the operator's chair all four look the same: a radio that tunes, displays and
+// hears nothing.  These four numbers tell them apart on the screen.
+volatile uint32_t conv_stat_slices_in;      // slices handed in by the audio interrupt
+volatile uint32_t conv_stat_blocks_in;      // whole blocks that reached the worker's queue
+volatile uint32_t conv_stat_blocks_out;     // finished blocks the interrupt took back
+volatile uint32_t conv_stat_dropped;        // blocks thrown away because nothing was free
+volatile uint32_t conv_stat_nosetup;        // slices refused because cbs.size was still 0
+
 static Sample_Buffer conv_blocks[SAMPLE_BUFFER_NUM];
 // The worker writes one whole block into a buffer it is handed back and forth, so the block type has
 // to be at least as long as the FFT's idea of a block.  Before the queues owned their buffers this
@@ -264,8 +275,10 @@ uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, ui
 
     if (cbs.size == 0)
     {   // AudioDriver_SetProcessingChain() has not sized the blocks yet
+        conv_stat_nosetup++;
         return 0;
     }
+    conv_stat_slices_in++;
 
     while (done < count)
     {
@@ -297,6 +310,11 @@ uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, ui
             if (Sample_in_buffer_add(conv_stage) == 0)
             {
                 conv_block_give(conv_stage);        // the worker is behind; drop this block, cleanly
+                conv_stat_dropped++;
+            }
+            else
+            {
+                conv_stat_blocks_in++;
             }
             conv_stage = NULL;
             conv_stage_count = 0;
@@ -327,6 +345,7 @@ uint16_t AudioDriver_ConvolutionOutput(float32_t* i, float32_t* q, uint16_t coun
                 conv_play = NULL;
                 break;
             }
+            conv_stat_blocks_out++;
             conv_play_count = 0;
         }
 
