@@ -306,6 +306,7 @@ const char* const digimodes[DigitalMode_Num_Modes] =
     [DigitalMode_None] = "NONE",
     [DigitalMode_RTTY] = "RTTY",
     [DigitalMode_BPSK] = "BPSK",
+    [DigitalMode_NAVTEX] = "NAVX",
 };
 
 static void RadioManagement_SetCouplingForFrequency(uint32_t freq);

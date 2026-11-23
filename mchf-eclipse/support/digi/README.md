@@ -1821,9 +1821,60 @@ convolution geometry and fits in the headroom the stock build leaves. It must ru
 audio path: at 48 kHz the same percentage span would need 15,840 candidates, so the grid narrows
 itself to ±0.2% and says so in the source, which is another way of saying the mode belongs at 12 kHz.
 
-Not yet done, in the order I would do them: fractional clock recovery or resampling so a rate error
-between 1 and 3% is followed instead of refused (that is what turns the two pinned ceilings into
-zeros); faster acquisition, since the head loss is a lock-latency cost and not a decode cost; and
-then the actual integration - a mode in `demod_modes[]`, the decoder wired to the block seam, and
-some way to show text on a 160x100 screen, which is the part of "usable in the radio" that is not a
-DSP problem.
+## NAVTEX in the radio, `USE_NAVTEX`
+
+The streaming receiver described above is now a mode of the radio rather than only a host program.
+It is selectable as `NAVX` in the digital-mode list alongside `RTTY` and `BPSK`, is fed from the same
+12 kHz decimated stream the RTTY modem uses (inside the same `sampleRateDecim == 12000` guard), and
+prints received characters through the same routine RTTY and BPSK use.  Nothing in the audio or UI
+path is new, which is why the change is small; what is new is that it is a build option, off by
+default, because of where its RAM goes.
+
+`sizeof(SitorRx)` is 32,316 bytes and it is almost all the grid of candidate bit clocks - the thing
+that lets the receiver lock down to 10 dB of noise without being told the text.  That grid lives in
+the same 128 KB as the convolution filter's buffers, and the two together do not fit.  Stack
+headroom, read from the linker's own `_ebss` against `_estack`:
+
+| build | headroom | verdict |
+|---|---|---|
+| as it ships today, neither option | 96,408 bytes | - |
+| `USE_NAVTEX` alone, grid at its default width | 63,768 | fits |
+| convolution at `FFT_CONVOLUTION_SIZE=128`, no NAVTEX | 60,448 | fits |
+| convolution at 128 **plus** `USE_NAVTEX` | **136 bytes** | will crash |
+| convolution at 128 plus `USE_NAVTEX -DSITOR_GRID_SPAN=1` | 39,328 | fits |
+| convolution at **256** plus `USE_NAVTEX -DSITOR_GRID_SPAN=1` | **184 bytes** | will crash |
+
+That last row is the one worth remembering, and it was a wrong prediction before it was measured: the
+estimate for 256 plus the narrow grid was around 20 KB.  It is not that the narrow grid fails to help -
+it is that the 256-point geometry spends so much on its own buffers that there is nothing left for
+anything else.  Of the two combinations that do fit, `NAVX` with the stock filter keeps 63,768 bytes
+and `NAVX` at convolution 128 keeps 39,328.
+
+`SITOR_GRID_SPAN` is the knob that decides it: span 4 covers +-3.3 % of rate error for 32,316 bytes,
+span 1 covers +-0.8 % for 10,796, and a radio locked to its own crystal is inside tens of ppm.  A
+span-1 run of the table above decodes identically - 0 wrong characters on every row except the two
+rate rows that are pinned - so the narrow grid is not a worse receiver under the conditions measured,
+only a narrower one, and the CI table stays at the wide span so that what is graded is what the
+default build ships.
+
+With neither convolution nor NAVTEX the image grows by 8 bytes of flash, the `NAVX` label and the
+enum entry, and no RAM.  The enum entry is appended rather than inserted because `ts.digital_mode`
+is stored in the EEPROM image.
+
+### What it still lacks, in order of how much it matters when actually copying a station
+
+1. **The text line is shared.**  Received characters go into the one 44-character strip that system
+   messages also use, so changing a menu item or a mode erases the middle of a transmission.  The
+   radio has no second text area: `UiDriver_TextMsgPutChar` writes a scrolling buffer whose size comes
+   from the layout, and on the 160x100 board that strip is a single row at y=92.  Anything better is a
+   UI decision, not a DSP one - retain the message in its own buffer and page it, or give NAVTEX a
+   block of screen and accept that it borrows the spectrum's space.
+2. **No lock or confidence indication.**  The receiver knows, and prints it in the bench table, and
+   none of it reaches the screen.  This is the number that separates a station from noise, and without
+   it the operator learns to wait for letters to appear.
+3. **The encoders still say RTTY.**  `DEMOD_DIGI`'s tuning and shift knobs are labelled and stored for
+   RTTY; NAVTEX ignores them, since its tone pair and rate are fixed by the mode.
+4. **Nothing is saved.**  A NAVTEX message that scrolls off the strip is gone; there is no log.
+5. Rate error between 1 and 3 % is refused rather than followed, which the wide grid narrows but does
+   not close: fractional clock recovery or resampling is the fix, and the two pinned ceiling rows in
+   the table above are the measurement of that gap.

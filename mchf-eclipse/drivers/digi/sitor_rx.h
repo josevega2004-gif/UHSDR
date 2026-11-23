@@ -58,7 +58,17 @@ extern const char SitorFigures[128];
  * history is a 14 bit window per candidate, and once locked the receiver stops searching and only
  * feeds its own candidate, so the search is paid during acquisition instead of forever. */
 
+/* How far the grid of candidate clocks reaches either side of the nominal bit period, in whole
+ * periods per bit.  It is the entire cost of the receiver: the table holds (2*SPAN+1) * period * (2*
+ * SPAN+1) candidates, so SPAN=4 buys +-3.3 % of rate error for 32,316 bytes and SPAN=1 buys +-0.8 %
+ * for about a tenth of that.  A radio locked to its own crystal is inside tens of ppm, so the narrow
+ * grid is the one that belongs in a build which also wants the convolution filter - the two features
+ * live in the same 128 KB, and the wide grid at FFT_CONVOLUTION_SIZE=128 left 136 bytes of stack.
+ * The CI table is measured at the default wide span, so a narrowed build runs a different receiver
+ * from the one that was graded: narrower is cheaper, not proven better. */
+#ifndef SITOR_GRID_SPAN
 #define SITOR_GRID_SPAN        4      // integer periods tried: nominal +- this, i.e. +-3.3 % at 12 kHz
+#endif
 #define SITOR_MAX_GRID          1300  // candidates in the grid, with room for the widest nominal
 #define SITOR_BITS_TO_DECIDE   150    // bits a candidate must have seen before it may win on alphabet: 26 words,
 #define SITOR_DECIDE_EVERY     120     // bits between decisions while acquiring

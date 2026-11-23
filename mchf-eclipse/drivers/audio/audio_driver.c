@@ -47,6 +47,18 @@
 #include "audio_convolution.h"
 #endif
 
+#ifdef USE_NAVTEX
+#include "../digi/sitor_rx.h"   // relative, like the other cross-directory includes in this file
+
+/* One receiver instance, file static: sizeof(SitorRx) = 32,316 bytes, almost all of it the grid of
+ * candidate bit clocks, which is what makes NAVTEX lock down to 10 dB of noise and what makes it
+ * expensive.  The grid is only as wide as the rate error it has to follow - SITOR_GRID_SPAN - and a
+ * radio on its own crystal is within tens of ppm, so a build that never has to chase a foreign
+ * sample rate can narrow it and take the RAM back; the span the CI table is measured at is left as
+ * the default so that what is measured is what ships. */
+static SitorRx navtex_rx;
+#endif
+
 #include "fm_subaudible_tone_table.h" // hm.
 #include "uhsdr_math.h"
 #include "tx_processor.h"
@@ -607,6 +619,14 @@ void AudioDriver_Init()
     // Codecs/Demod init
     Rtty_Modem_Init(ts.samp_rate); // RX/TX
     Psk_Modem_Init(ts.samp_rate);  // RX/TX
+#ifdef USE_NAVTEX
+    // The demodulator is initialized for 12 kHz because that is the only rate its input block is
+    // ever run at - see the `sampleRateDecim == 12000` guard around the modem seam below, which the
+    // RTTY modem has always depended on for the same reason.  Asking for the NAVTEX tone pair at
+    // 1615/1785 Hz of the receiver's audio is the ordinary FSK expectation: the operator tunes so
+    // the pair lands there, and the filter has to be wide enough to pass both tones.
+    SitorRx_Init(&navtex_rx, 12000.0f, 1615.0f, 1785.0f);
+#endif
 
     RxProcessor_Init();
     TxProcessor_Init();
@@ -1305,6 +1325,19 @@ static void AudioDriver_RxProcessor_Rtty(float32_t * const src, int16_t blockSiz
     for (uint16_t idx = 0; idx < blockSize; idx++)
     {
         Rtty_Demodulator_ProcessSample(src[idx]);
+    }
+}
+#endif
+
+#ifdef USE_NAVTEX
+static void AudioDriver_RxProcessor_Navtex(float32_t * const src, int16_t blockSize)
+{
+    for (uint16_t idx = 0; idx < blockSize; idx++)
+    {
+        if (SitorRx_Sample(&navtex_rx, src[idx]))
+        {
+            UiDriver_TextMsgPutChar(navtex_rx.out_char);
+        }
     }
 }
 #endif
@@ -2502,6 +2535,17 @@ static void RxProcessor_DemodAudioPostprocessing(float32_t (*a_buffer)[AUDIO_BLO
         {
             AudioDriver_RxProcessor_Bpsk(a_buffer[0], blockSizeDecim);
         }
+#ifdef USE_NAVTEX
+        // NAVTEX is 100 Bd FSK with its tone pair at 1615/1785 Hz of the receiver's audio, so it is
+        // fed from exactly the same 12 kHz stream the RTTY modem is, inside the same guard: this
+        // block only runs when sampleRateDecim is 12000, which is what the receiver is initialized
+        // with.  The operator's job is the ordinary one for FSK: tune so the pair lands where the
+        // demodulator expects it, with a filter wide enough to pass both tones.
+        if (is_demod_navtex())
+        {
+            AudioDriver_RxProcessor_Navtex(a_buffer[0], blockSizeDecim);
+        }
+#endif
 
         if((dmod_mode == DEMOD_CW || dmod_mode == DEMOD_AM || dmod_mode == DEMOD_SAM))
             // switch to use TUNE HELPER in AM/SAM

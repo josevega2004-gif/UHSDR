@@ -149,6 +149,15 @@
 #define USE_RTTY_PROCESSOR
 
 // OPTION
+// Streaming NAVTEX / SITOR-B reception, drivers/digi/sitor_rx.c, selected as a digital mode ("NAVX")
+// alongside RTTY and BPSK and fed from the same 12 kHz decimated audio the RTTY modem uses; received
+// characters go to the same one-line text strip.  It is off by default because one receiver instance
+// costs 32,316 bytes of .bss - the grid of candidate bit clocks, which is what makes the mode lock
+// down to 10 dB of noise and also what makes it expensive.  See support/digi/README.md for the
+// measurement table and for what is still missing before this is a comfortable way to receive NAVTEX.
+// #define USE_NAVTEX
+
+// OPTION
 #define USE_USBHOST
 #ifdef USE_USBHOST
     // define additional USBHOST related "switches" only here!

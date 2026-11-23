@@ -294,6 +294,7 @@ typedef enum
     DigitalMode_None = 0,       // idle state, no digital modulation, the transceiver works analog
     DigitalMode_RTTY,
     DigitalMode_BPSK,
+    DigitalMode_NAVTEX,       // appended, not inserted: digital_mode is stored in the EEPROM image
     DigitalMode_Num_Modes
 } digital_modes_t;
 
@@ -385,6 +386,11 @@ inline bool is_demod_rtty()
 inline bool is_demod_psk()
 {
 	return ts.dmod_mode == DEMOD_DIGI && ts.digital_mode == DigitalMode_BPSK;
+}
+
+inline bool is_demod_navtex()
+{
+	return ts.dmod_mode == DEMOD_DIGI && ts.digital_mode == DigitalMode_NAVTEX;
 }
 
 inline void RadioManagement_TxRxSwitching_Disable()
