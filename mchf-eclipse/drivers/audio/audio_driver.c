@@ -1117,11 +1117,23 @@ void AudioDriver_SetProcessingChain(uint8_t dmod_mode, bool reset_dsp_nr)
 
     AudioDriver_Spectrum_Set();
 
-#ifdef USE_CONVOLUTION
-// TODO: insert interpolation filter settings for convolution filter HERE
-#else
     // Set up RX interpolation/filter
     // NOTE:  Phase Length MUST be an INTEGER and is the number of taps divided by the decimation rate, and it must be greater than 1.
+    //
+    // This runs for every configuration, including the convolution ones, and that used to be the
+    // opposite: a 2018 `#ifdef USE_CONVOLUTION` with a TODO in place of the body compiled this whole
+    // setup out whenever the feature was built in, for every mode. The convolution filter replaces the
+    // sideband-selecting FIR, not the output interpolation, so the filtered audio still has to be
+    // raised to the DAC rate here - and with the stage never initialized, the runtime guard
+    // `if (INTERPOLATE_RX[0].phaseLength > 0)` at line 2503 simply skipped it, the buffer the DAC
+    // reads was only partly written, and USB/LSB/CW came out silent while FM, the waterfall and the
+    // S-meter carried on, because none of those three needs this stage.
+    //
+    // It also explains the part of the report that was never consistent: phaseLength is static state
+    // that survives a mode change, so a radio that had been sitting on a path which did initialize it
+    // would hand SSB working audio until the next reboot, and a radio flashed and powered up cold
+    // would not. That is why the same image could be described as silent and as merely quiet by different
+    // listening sessions, and why geometry appeared to be the variable when it was not.
     for (int chan = 0; chan < NUM_AUDIO_CHANNELS; chan++)
     {
         if (filters_p->interpolate != NULL)
@@ -1138,7 +1150,6 @@ void AudioDriver_SetProcessingChain(uint8_t dmod_mode, bool reset_dsp_nr)
             INTERPOLATE_RX[chan].pCoeffs = NULL;
         }
     }
-#endif
 
 #ifdef USE_CONVOLUTION
     // Partitioned convolution RX filtering, DD4WH 2018_08_18.
