@@ -26,6 +26,14 @@
  *
  * Correctness is graded by fsck.vfat on the image afterwards, not by this module agreeing with
  * itself: a writer that reads back its own output proves only that it is self-consistent.
+ *
+ * Deliberately not wired up, and this is a decision rather than an oversight: nothing on the F407
+ * boards uses this yet.  They would need the USB mass-storage class in the application (drivers/usb/host
+ * currently carries only HID), and they would need the picture to be assembled as it is written, because
+ * 480 KB of image does not exist next to 192 KB of RAM that is already spoken for by the demodulators and
+ * the convolution buffers.  The board where both halves of that are available is the H7, so this waits for
+ * that project instead of spending a port and a filesystem writer on a radio that has neither to show for
+ * it.  The code is here, tested, and 4,417 bytes that the linker discards until something calls it.
  */
 
 #ifndef UHD_FAT32_H
