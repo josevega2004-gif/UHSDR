@@ -251,3 +251,19 @@ jobs:
       - name: Measure the convolution RX filter against the SSB stage in use
         working-directory: mchf-eclipse
         run: make -C support/digi convolution-check
+
+      # The radio has never been able to write a file: the only code that reads a thumb drive is in the
+      # bootloader, and it does not stay resident.  drivers/fs/fat32.c is the writer, and it is graded
+      # by implementations that are not its own - mkfs.vfat makes the volume, fsck.vfat inspects what
+      # fat32.c did to it, and where the machine allows it the kernel's vfat driver reads the bytes back
+      # through a loop mount, which is the path a stick takes when it leaves the radio and meets a PC.
+      # Two real bugs came out of that: sectors-per-FAT was parsed but never stored, so writing both FAT
+      # copies wrote the same sector twice; and the FSINFO patch was applied to whichever FAT sector the
+      # free-cluster walk had last loaded, so the free count was never updated.  Neither one shows up if
+      # you only ask the writer to read its own output.
+      - name: Write a file into a FAT32 volume and have dosfstools judge it
+        working-directory: mchf-eclipse
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dosfstools
+          ./support/fs/run-fs-check.sh

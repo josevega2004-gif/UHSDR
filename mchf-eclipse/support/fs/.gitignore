@@ -1,0 +1,5 @@
+fat32_test
+fat32_test_dbg
+fs-check.img
+fs-check-ref.bin
+fsck.out

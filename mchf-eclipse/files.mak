@@ -99,6 +99,7 @@ drivers/audio/audio_management.c \
 drivers/audio/freq_shift.c \
 drivers/audio/rtty.c \
 drivers/digi/sitor_rx.c \
+drivers/fs/fat32.c \
 drivers/audio/psk.c \
 drivers/audio/rb.c \
 drivers/audio/tx_processor.c \
