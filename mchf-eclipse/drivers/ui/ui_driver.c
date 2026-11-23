@@ -7930,11 +7930,29 @@ void UiDriver_TaskHandler_MainTasks()
 					UiLcdHy28_PrintText(DSP_TIMING_X,ts.Layout->LOADANDDEBUG_Y,str,White,Black,0);
 
 					// encoder diagnostics: raw phase line levels, per phase edge counters and
-					// net steps the timer decoder produced, one line per encoder (E1 audio gain,
-					// E2 RF gain, E3 AF gain, EF tuning). Turn a knob slowly: if one phase stops
+					// net steps the timer decoder produced, one line per encoder. Turn a knob slowly: if one
+					// phase stops
 					// counting while the other and the steps keep moving, that phase is dead -
 					// the timer reads every edge of the living phase as the same direction, the
-					// "cold encoder only turns down" failure
+					// "cold encoder only turns down" failure.
+					//
+					// The names below are not what the knobs do, which is worth saying where the
+					// names are, because a wrong word here sent someone hunting a dead encoder across
+					// three firmware images.  Only ENCFREQ has one job.  The other three change
+					// function with the mode and with TX/RX, from demod_modes[] further up this file:
+					// receiving in USB/LSB/(S)AM/FM, E1 is audio gain, E2 is RF gain and E3 is RIT;
+					// in CW, E1 is sidetone gain, E2 is unused and E3 is keyer speed;  in RTTY, E1 is
+					// symbol rate and E2 is shift;  transmitting on the other modes, E1 is the
+					// compressor level and E3 is the microphone/input gain.  So a line that counts
+					// nothing while you receive is a knob with no reason to have been turned, not a
+					// broken one - and an earlier version of this comment called E3 "AF gain", which
+					// is what E1 has always been.
+					//
+					// Read the signed number, and read it after turning the knob you mean.  a and b
+					// change only when this 64 ms refresh happens to catch a different level, so a
+					// quick turn reports a1 b1 for nine steps of real movement;  the signed number is
+					// the hardware quadrature decoder and is the one that says whether the knob
+					// reaches the CPU at all.
 					{
 						UiRotaryDiag_t enc_diag[ENC_MAX];
 						static const char* const enc_diag_names[ENC_MAX] = { "E1","E2","E3","EF" };
