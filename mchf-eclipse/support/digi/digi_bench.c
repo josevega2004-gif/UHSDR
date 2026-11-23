@@ -20,6 +20,7 @@
 #include "mfsk16.h"
 #include "navtex.h"
 #include "olivia.h"
+#include "sitor_rx.h"
 #include "rtty.h"
 #include "softdds.h"
 #include "audio_agc.h"
@@ -1101,6 +1102,201 @@ typedef struct
     float max_cer;
     float min_cer;          // a floor for the rows that have to keep failing
 } navtex_case_t;
+
+// Time-scale a take, which is how this makes a recording whose bit rate is not the transmitter's.
+// A capture through a sound card whose clock is a fraction of a percent off is exactly this, and the
+// reference decoder could only follow ±1.7 % because it searched 118 to 122 samples a bit; the
+// streaming demodulator measures the rate instead, so the rows that break one are the point of the
+// other.  Linear interpolation is enough: the effect being tested is the bit period, not the audio.
+static size_t bench_timescale(const float32_t* x, size_t n, double factor, float32_t* out, size_t cap)
+{
+    if (factor <= 0.0) return 0;
+    size_t m = (size_t)((double)n / factor);
+    if (m > cap) m = cap;
+    for (size_t i = 0; i < m; i++)
+    {
+        const double src = (double)i * factor;
+        size_t k = (size_t)src;
+        if (k + 1 >= n) k = n > 1 ? n - 2 : 0;
+        const double f = src - (double)k;
+        out[i] = (float32_t)((1.0 - f) * (double)x[k] + f * (double)x[k + 1]);
+    }
+    return m;
+}
+
+typedef struct
+{
+    const char* name;
+    float snr_db, qsb_rate, qsb_depth;
+    float tune_hz;
+    float erase_ms, erase_len_ms;
+    float rate_pct;         // the take's bit rate moved this far off 100 Bd
+    int   order;
+    float max_cer;
+    float min_cer;
+    int   expect_nothing;   // a row that must not decode at all
+} sitor_case_t;
+
+// The streaming SITOR-B demodulator, on the same takes the reference modem is graded with, and on the
+// ones it cannot be: a bit rate that is not exactly 100 Bd.  The reference column is printed beside it
+// because the difference between the two is the reason the streaming one exists, and a claim that this
+// receiver follows a rate error is worth nothing unless the old one demonstrably did not.
+static int sitor_stream(void)
+{
+    static const char* msg = "NAVTEX TEST MESSAGE DE UHSDR BENCH 12345 CQ CQ";
+    static const sitor_case_t cases[] =
+    {
+        { .name = "clean", .snr_db = 100.0f, .max_cer = 0.0f },
+        { .name = "snr 20", .snr_db = 20.0f, .max_cer = 5.0f },
+        { .name = "snr 10", .snr_db = 10.0f, .max_cer = 10.0f },
+        { .name = "snr 10 qsb", .snr_db = 10.0f, .qsb_rate = 0.5f, .qsb_depth = 6.0f, .max_cer = 10.0f },
+        { .name = "burst on DX", .snr_db = 20.0f, .erase_ms = 1400.0f, .erase_len_ms = 280.0f,
+          .max_cer = 5.0f },
+        { .name = "burst both", .snr_db = 20.0f, .erase_ms = 1400.0f, .erase_len_ms = 700.0f,
+          .max_cer = 100.0f, .min_cer = 10.0f },
+        { .name = "tune +50 Hz", .snr_db = 20.0f, .tune_hz = 50.0f, .max_cer = 5.0f },
+        { .name = "tune +100 Hz", .snr_db = 20.0f, .tune_hz = 100.0f, .max_cer = 100.0f, .min_cer = 50.0f },
+        { .name = "reversed bits", .snr_db = 20.0f, .order = NAVTEX_ORDER_REVERSED, .max_cer = 5.0f },
+        { .name = "wrong order", .snr_db = 20.0f, .order = NAVTEX_ORDER_MIXED, .max_cer = 95.0f,
+          .min_cer = 75.0f },
+        // The rows the reference decoder was never able to do, because it searched 118 to 122
+        // samples a bit and stopped.  Time scaling a take moves its bit rate *and* its tones - an
+        // 8 % rate error carries the pair 130 Hz away, which is past the 85 Hz the two fixed bins
+        // can follow - so these rows are kept inside that, and the pair search that a bigger error
+        // needs is written up as the remaining work rather than quietly passed by.
+        { .name = "rate -3 %", .snr_db = 20.0f, .rate_pct = -3.0f, .max_cer = 5.0f },
+        { .name = "rate +3 %", .snr_db = 20.0f, .rate_pct = 3.0f, .max_cer = 5.0f },
+        { .name = "rate -1.5 %", .snr_db = 20.0f, .rate_pct = -1.5f, .max_cer = 5.0f },
+        { .name = "rate +1.5 %", .snr_db = 20.0f, .rate_pct = 1.5f, .max_cer = 5.0f },
+        // nothing transmitted: a receiver that prints text out of noise is worse than one that
+        // prints nothing, because the second one can be noticed
+        { .name = "noise only", .snr_db = 0.0f, .max_cer = 100.0f, .expect_nothing = 1 },
+    };
+    const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
+    int failures = 0;
+
+    printf("SITOR-B / NAVTEX through the streaming demodulator (drivers/digi/sitor_rx.c), the file the\n"
+           "radio would compile: one sample in, one character out, the bit period measured from the\n"
+           "transitions rather than assumed, and the same 4-of-7 and time diversity rules the reference\n"
+           "modem is graded with.  Text is %zu characters.\n\n", strlen(msg));
+    printf("%-14s %6s %11s %8s %8s %7s %6s %6s %3s  %s\n", "case", "CER %", "min-max", "err/len",
+           "conf", "bit ms", "fix", "lost", "rev", "reference CER");
+    for (size_t i = 0; i < n_cases; i++)
+    {
+        const sitor_case_t* c = &cases[i];
+        const size_t cap = 400000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        float32_t* work = malloc(cap * sizeof(float32_t));
+        float32_t* scaled = malloc(cap * sizeof(float32_t));
+        char* got = malloc(8192);
+        if (!x || !work || !scaled || !got)
+        {
+            free(x); free(work); free(scaled); free(got);
+            printf("out of memory\n");
+            return 1;
+        }
+        size_t n = Bench_NavtexGenerate(x, cap, msg, c->tune_hz, c->order);
+        if (c->expect_nothing)
+        {
+            // the same length of take with the signal gone: noise, and nothing else
+            n = strlen(msg) * 120u + 4000u;
+            if (n > cap) n = cap;
+            memset(x, 0, n * sizeof(float32_t));
+        }
+        const int nseeds = c->snr_db < 90.0f ? TABLE_SEEDS : 1;
+        spread_t cs = { 0 };
+        float conf_sum = 0.0f, period_sum = 0.0f;
+        unsigned fix = 0, lost = 0, rev = 0, chars = 0;
+        int locked = 1, nothing_ok = 1;
+        float ref_cer = -1.0f;
+        for (int k = 0; k < nseeds; k++)
+        {
+            memcpy(work, x, n * sizeof(float32_t));
+            if (nseeds > 1)
+            {
+                Bench_RngSeed(0x510513u + (uint32_t) k);
+                Bench_AddNoise(work, n, c->snr_db, 0.0f);
+            }
+            Bench_AddQsb(work, n, c->qsb_rate, c->qsb_depth);
+            if (c->erase_len_ms > 0.0f)
+            {
+                const size_t a = (size_t)(c->erase_ms * 12.0);
+                const size_t b = a + (size_t)(c->erase_len_ms * 12.0);
+                for (size_t j = a; j < b && j < n; j++) work[j] = 0.0f;
+            }
+            size_t m = n;
+            if (c->rate_pct != 0.0f)
+            {
+                m = bench_timescale(work, n, 1.0 + (double)c->rate_pct / 100.0, scaled, cap);
+            }
+            else
+            {
+                memcpy(scaled, work, n * sizeof(float32_t));
+            }
+
+            SitorRx rx;
+            SitorRx_Init(&rx, 12000.0f, 1615.0f, 1785.0f);
+            size_t used = 0;
+            for (size_t j = 0; j < m; j++)
+            {
+                if (SitorRx_Sample(&rx, scaled[j]))
+                {
+                    if (used + 1 < 8192) got[used++] = rx.out_char;
+                }
+            }
+            got[used] = '\0';
+            if (getenv("SITOR_DEBUG")) fprintf(stderr, "[%s] m=%zu used=%u state=%d align=%d rev=%d norm=%d r=%d\n [%s]", c->name, m, (unsigned)used, rx.state, rx.align, rx.reversed, rx.best_norm, rx.best_rev, got);
+            const int skip_dummy = 0;
+            (void)skip_dummy;
+            int sk = 0;
+            const float cer = used ? navtex_score(msg, got, &sk) : 100.0f;
+            spread_add(&cs, cer);
+            conf_sum += SitorRx_Confidence(&rx);
+            period_sum += rx.period;
+            fix += rx.repaired;
+            lost += rx.lost;
+            rev = (unsigned)rx.reversed;
+            chars += (unsigned)used;
+            if (rx.state != SITOR_LOCKED) locked = 0;
+            if (used > 40) nothing_ok = 0;
+
+            if (!k && !c->expect_nothing)
+            {
+                // what the reference decoder makes of the very same take, for the column beside it
+                char ref[8192];
+                navtex_result_t rr;
+                if (Bench_NavtexDecode(scaled, m, ref, sizeof(ref), &rr))
+                {
+                    int rsk = 0;
+                    ref_cer = navtex_score(msg, ref, &rsk);
+                }
+                else
+                {
+                    ref_cer = 100.0f;
+                }
+            }
+        }
+        free(x); free(work); free(scaled); free(got);
+
+        const float cer = (float)spread_mean(&cs);
+        const int ok_cer = cer <= c->max_cer && (c->min_cer <= 0.0f || cer >= c->min_cer);
+        const int ok_nothing = !c->expect_nothing || (nothing_ok && cer >= 99.0f);
+        const int ok = ok_cer && ok_nothing && (c->expect_nothing || locked);
+        if (!ok) failures++;
+        printf("%-14s %6.1f %4.1f-%5.1f %8.1f %7.2f %6.1f %6u %6u %3u  %8.1f  %s%s\n", c->name, cer,
+               cs.lo, cs.hi, cer * (double)strlen(msg) / 100.0,
+               conf_sum / (float)nseeds, period_sum / (12.0f * (float)nseeds), fix / (unsigned)nseeds,
+               lost / (unsigned)nseeds, rev, ref_cer, ok ? "" : "FAIL",
+               c->expect_nothing ? " (nothing decoded)" : "");
+    }
+    printf("\n`conf` is the share of recent words that are valid 4-of-7 characters, which the receiver\n"
+           "knows without being told the text: it is 1.00 when the mode has been copied and near zero\n"
+           "on a take that is not SITOR at all, which is the number a capture hunt needs.  `bit ms` is\n"
+           "the period the receiver measured, 10.0 ms being exactly 100 Bd.  `reference CER` is the\n"
+           "offline modem in navtex.c on the same take, and the rate rows are where the two differ.\n");
+    return failures ? 1 : 0;
+}
+
 
 static int navtex_table(void)
 {
@@ -2265,11 +2461,15 @@ static size_t rec_crop(const char* mode, size_t take, size_t holds)
     return holds;
 }
 
+// defined with the rest of the shape gate below, where cap_t and the bands live
+static int gate_shape_gate(const float* x, size_t n, const char* mode);
+
 static int navtex_wav(const char* path, const char* expected, float limit)
 {
     size_t n; double secs; uint32_t rate, ch;
     float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
     if (!x) return 1;
+    if (gate_shape_gate(x, n, "NAVTEX")) { free(x); return 1; }
     const size_t onset = rec_onset(x, n);
     int found = 0; double best_rank = 1e30;
     size_t best_st = onset;
@@ -2326,6 +2526,7 @@ static int mfsk16_wav(const char* path, const char* expected, float limit)
     size_t n; double secs; uint32_t rate, ch;
     float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
     if (!x) return 1;
+    if (gate_shape_gate(x, n, "MFSK16")) { free(x); return 1; }
     const size_t onset = rec_onset(x, n);
     const size_t S = 768;                 // 12 kHz / 15.625 Bd
     int found = 0; double best_rank = 1e30;
@@ -2386,6 +2587,7 @@ static int olivia_wav(const char* path, const char* expected, float limit)
     size_t n; double secs; uint32_t rate, ch;
     float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
     if (!x) return 1;
+    if (gate_shape_gate(x, n, "Olivia")) { free(x); return 1; }
     const size_t onset = rec_onset(x, n);
     const size_t S = 384;                 // 12 kHz / 31.25 Bd
     int found = 0; double best_rank = 1e30;
@@ -2446,6 +2648,7 @@ static int hell_wav(const char* path, const char* out_pgm)
     size_t n; double secs; uint32_t rate, ch;
     float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
     if (!x) return 1;
+    if (gate_shape_gate(x, n, "Hell")) { free(x); return 1; }
     const size_t onset = rec_onset(x, n);
     const size_t S = 98;                  // 12 kHz / 122.5 Bd, rounded
     const int MAXC = 2000;
@@ -3044,6 +3247,472 @@ static void gate_dropouts(const cap_t* c, gate_drop_t* d)
 #define GATE_PERIOD_TOL   0.05   // fraction of a bit
 #define GATE_SCATTER_NOTE 12.0   // percent of a bit: the scatter the gate calls wide, as a note
 #define GATE_GAP_MS        5.0   // longest hole a take may carry
+
+// ---- the shape of a take, measured from the file and not from any modem -------------------------
+//
+// Every one of the four non-RTTY decoders prints text for a signal that is not its mode: the bench's
+// own RTTY fixture, run through them, comes back as "ZAUU WBMNM Z ZAVI" from NAVTEX at 0.212 of its
+// words being valid, and as "lrnrtl9t dediG f G]rxwatk nRip" from MFSK16 while reporting 0.0 % of its
+// symbols heard.  A capture hunt cannot live with that, because a wall of confident garbage is
+// indistinguishable from a schedule.  So the gate in front of them measures the spectrum of the file
+// and never calls a modem, which is the same reason RTTY's own gate does not call rtty.c: a modem
+// that agrees with itself is not evidence.
+//
+// Three numbers tell these five shapes apart, and they are all widths rather than levels, so a take
+// that is quiet, loud, or trimmed to its peak still reads the same:
+//
+//   bw95   the narrowest band holding 95 % of the energy between 250 and 3000 Hz
+//   bw50   the same at 50 %, which is how flat the top of that band is
+//   centre where that band sits
+//
+// MFSK16 is 234 Hz of flat-topped comb, Olivia is 1000 Hz of it, NAVTEX is a 170 Hz pair, Hell is one
+// keyed tone, and RTTY is two tones further apart than NAVTEX.  bw95 separates Olivia from everything
+// else; fill = bw50/bw95 separates the comb modes from the two-tone and single-tone ones; centre
+// separates NAVTEX from MFSK16, whose band is 500 Hz lower.
+
+typedef struct
+{
+    double bw95, bw50, fill;         // Hz, Hz, dimensionless
+    double lo_hz, hi_hz, centre_hz;  // the 95 % band and its middle
+    double peak_hz[8];               // local maxima above 12 % of the loudest, 25 Hz apart
+    double peak_db[8];               // and their level relative to the loudest
+    int peaks;
+    int windows;                     // one second windows averaged, so a short take says so
+} gate_shape_t;
+
+#define SHAPE_F_LO     250.0
+#define SHAPE_F_HI    3000.0
+#define SHAPE_STEP       1.0   // one second windows, so a bin is 1 Hz
+#define SHAPE_MAX_WIN    24    // seconds averaged: enough for a comb, not enough to cost a minute
+#define SHAPE_PEAK_DB   -18.0  // a maximum this far under the loudest is not a tone of the mode
+
+// The median bin of the spectrum, which is the noise floor: these modes put their energy into a few
+// bins, so most bins are whatever the receiver brought with them.  It sorts a copy - the caller's
+// array is the spectrum itself, and a median that rearranged it would leave the band search walking a
+// sorted list instead of a frequency axis.  The first version of this did exactly that, and every mode
+// read a centre of 2900 Hz because the loudest bins had moved to the end of the array.
+static double gate_median(const double* src, int n)
+{
+    double* v = calloc(n, sizeof(double));
+    if (!v) return 0.0;
+    memcpy(v, src, n * sizeof(double));
+    // A median of a couple of thousand doubles does not need a library, and insertion sort over 2751
+    // of them is 3.8 M swaps: nothing next to the Goertzel pass that produced them.
+    for (int i = 1; i < n; i++)
+    {
+        const double x = v[i];
+        int j = i - 1;
+        while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; }
+        v[j + 1] = x;
+    }
+    const double m = n & 1 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+    free(v);
+    return m;
+}
+
+static void gate_shape(const cap_t* c, gate_shape_t* s)
+{
+    memset(s, 0, sizeof(*s));
+    const int win = (int)lround((double)c->rate);
+    if (win < 32 || c->n < (size_t)win)
+    {
+        return;                      // shorter than one bin of resolution: nothing to say
+    }
+    const int nb = (int)lround((SHAPE_F_HI - SHAPE_F_LO) / SHAPE_STEP) + 1;
+    double* acc = calloc(nb, sizeof(double));
+    double* en = calloc(nb, sizeof(double));
+    if (!acc || !en) { free(acc); free(en); return; }
+
+    int used = 0;
+    for (int b = 0; b < nb; b++)
+    {
+        const double f = SHAPE_F_LO + SHAPE_STEP * b;
+        const double w = 2.0 * GATE_PI * f / (double)c->rate;
+        const double coeff = 2.0 * cos(w);
+        double sum = 0.0;
+        int frames = 0;
+        for (size_t st = 0; st + win <= c->n && frames < SHAPE_MAX_WIN; st += win)
+        {
+            // Goertzel: two multiplies a sample, and no table of sines the size of the file
+            double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+            for (int k = 0; k < win; k++)
+            {
+                s0 = (double)c->x[st + k] + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            const double re = s1 - s2 * cos(w);
+            const double im = s2 * sin(w);
+            sum += sqrt(re * re + im * im) / (double)win;
+            frames++;
+        }
+        acc[b] = frames ? sum / frames : 0.0;
+        if (frames > used) used = frames;
+    }
+    s->windows = used;
+    if (!used) { free(acc); free(en); return; }
+
+    // Subtract the noise floor before measuring any width.  A band holding 95 % of the *total* energy
+    // is a statement about the hiss, not about the mode: at +3 dB over 12 kHz the noise spans the
+    // passband on its own, and NAVTEX read 2001 Hz wide while its decoder was copying the text
+    // exactly.  The median bin is the floor - these modes put their energy into a few bins, so most
+    // bins are whatever the receiver brought - and what sits above it is the signal's width, which is
+    // the thing the bands in kGateExpect are about.
+    for (int b = 0; b < nb; b++) en[b] = acc[b] * acc[b];
+    const double floor_e = gate_median(en, nb);
+    double total = 0.0;
+    for (int b = 0; b < nb; b++)
+    {
+        en[b] = en[b] > floor_e ? en[b] - floor_e : 0.0;
+        total += en[b];
+    }
+    if (total <= 0.0)
+    {
+        // nothing above the floor anywhere: a take that is only noise, or only silence
+        free(acc); free(en);
+        return;
+    }
+
+    // Narrowest band holding `share` of the energy above the floor, for both shares at once: walk the
+    // right edge out and pull the left edge in while what is left still holds the share.
+    int b_lo[2] = { 0, 0 }, b_hi[2] = { 0, 0 };
+    double width[2] = { 1e30, 1e30 };
+    for (int which = 0; which < 2; which++)
+    {
+        const double want = (which == 0 ? 0.95 : 0.50) * total;
+        int l = 0;
+        double e = 0.0;
+        for (int r = 0; r < nb; r++)
+        {
+            e += en[r];
+            while (l < r && e - en[l] >= want) { e -= en[l]; l++; }
+            if (e >= want && r - l < width[which]) { width[which] = r - l; b_lo[which] = l; b_hi[which] = r; }
+        }
+    }
+    s->bw95 = width[0] < 1e29 ? width[0] * SHAPE_STEP : 0.0;
+    s->bw50 = width[1] < 1e29 ? width[1] * SHAPE_STEP : 0.0;
+    s->lo_hz = SHAPE_F_LO + SHAPE_STEP * b_lo[0];
+    s->hi_hz = SHAPE_F_LO + SHAPE_STEP * b_hi[0];
+    s->centre_hz = 0.5 * (s->lo_hz + s->hi_hz);
+    s->fill = s->bw95 > 0.0 ? s->bw50 / s->bw95 : 0.0;
+
+    double mx = 0.0;
+    for (int b = 0; b < nb; b++) if (acc[b] > mx) mx = acc[b];
+    if (mx > 0.0)
+    {
+        for (int b = 2; b + 2 < nb; b++)
+        {
+            if (acc[b] < 0.12 * mx) continue;
+            if (!(acc[b] >= acc[b - 1] && acc[b] >= acc[b + 1] && acc[b] > acc[b - 2] && acc[b] > acc[b + 2])) continue;
+            const double f = SHAPE_F_LO + SHAPE_STEP * b;
+            const double db = 20.0 * log10(acc[b] / mx + 1e-30);
+            if (db < SHAPE_PEAK_DB) continue;
+            int at = -1;
+            for (int k = 0; k < s->peaks; k++) if (fabs(s->peak_hz[k] - f) < 25.0) at = k;
+            if (at < 0 && s->peaks < 8) { at = s->peaks++; s->peak_hz[at] = f; s->peak_db[at] = db; }
+            else if (at >= 0 && db > s->peak_db[at]) s->peak_db[at] = db;
+        }
+        for (int i = 1; i < s->peaks; i++)      // loudest first, so the printed list is the short one
+            for (int j = i; j > 0 && s->peak_db[j] > s->peak_db[j - 1]; j--)
+            {
+                double t = s->peak_db[j]; s->peak_db[j] = s->peak_db[j - 1]; s->peak_db[j - 1] = t;
+                t = s->peak_hz[j]; s->peak_hz[j] = s->peak_hz[j - 1]; s->peak_hz[j - 1] = t;
+            }
+    }
+    free(acc);
+    free(en);
+}
+
+// What each of these modes occupies, as a band, a flatness and a place.  The ranges are the measured
+// spread of the takes this bench can make - see gate-check, which prints the matrix these came from -
+// widened to the nearest ten, and they are a gate rather than a description: a take outside them is
+// not this mode, or is this mode under conditions the bench has not measured.
+typedef struct
+{
+    const char* mode;
+    double bw95_lo, bw95_hi;
+    double fill_lo, fill_hi;
+    double ctr_lo, ctr_hi;
+} gate_expect_t;
+
+// RTTY is deliberately not in this table.  Its shape is two tones at a shift nobody but the operator
+// knows, at a baud rate that is a menu of five, so a band that contains real RTTY - the DWD take in
+// fixtures/ is 1951 Hz of it, because a live recording carries its hiss and its neighbours - also
+// contains NAVTEX, and the first version of this table had exactly that false positive.  RTTY already
+// has a gate, and a better one: capture-check measures the pair, the bimodality of the windows and the
+// transition grid, and it never calls rtty.c either.  What is left here is the four modes that had no
+// gate at all.
+static const gate_expect_t kGateExpect[] =
+{
+    { "NAVTEX",  120.0, 320.0, 0.08, 0.45, 1450.0, 1950.0 },
+    { "MFSK16",  170.0, 330.0, 0.25, 0.65,  900.0, 1350.0 },
+    { "Olivia",  700.0, 1300.0, 0.30, 0.70, 1100.0, 1750.0 },
+    { "Hell",     60.0, 300.0, 0.01, 0.20,  650.0, 1650.0 },
+};
+
+static void gate_shape_report(const gate_shape_t* s)
+{
+    printf("shape     : bw95 %.0f Hz (%.0f..%.0f), bw50 %.0f Hz, fill %.2f, centre %.0f Hz, %d s averaged\n",
+           s->bw95, s->lo_hz, s->hi_hz, s->bw50, s->fill, s->centre_hz, s->windows);
+    if (s->peaks)
+    {
+        printf("tones     :");
+        for (int k = 0; k < s->peaks; k++) printf(" %.0f (%+.0f dB)", s->peak_hz[k], s->peak_db[k]);
+        printf("\n");
+    }
+}
+
+// The gate's answer for one mode: 1 if the take's shape is inside that mode's band, and the margin of
+// the tightest of the three tests, so a caller can rank modes instead of only accepting one.
+static int gate_shape_is(const gate_shape_t* s, const gate_expect_t* e, double* margin)
+{
+    if (s->windows <= 0) return 0;
+    const double m_bw = fmin(s->bw95 - e->bw95_lo, e->bw95_hi - s->bw95);
+    const double m_fl = fmin(s->fill - e->fill_lo, e->fill_hi - s->fill);
+    const double m_ct = fmin(s->centre_hz - e->ctr_lo, e->ctr_hi - s->centre_hz);
+    *margin = fmin(fmin(m_bw, m_fl * 400.0), m_ct);
+    return m_bw >= 0.0 && m_fl >= 0.0 && m_ct >= 0.0;
+}
+
+// The gate in front of a decoder.  Three answers, and only the middle one refuses anything:
+//   this mode's shape   -> decode
+//   another mode's      -> refuse, because the take is somebody else's signal
+//   nobody's            -> decode anyway, and say that the shape test has no answer here
+// The third case is not a hedge.  Below about +3 dB over the passband the median bin stops being the
+// noise between the tones, every width runs to the top of the range, and a gate that refused then would
+// be throwing away exactly the weak takes the modes are for.
+static int gate_shape_gate(const float* x, size_t n, const char* mode)
+{
+    cap_t c;
+    c.x = (float*)x;
+    c.n = n;
+    c.rate = 12000;
+    c.ch = 1;
+    gate_shape_t s;
+    gate_shape(&c, &s);
+    if (!s.windows)
+    {
+        printf("shape     : too short to measure (needs a second of audio)\n");
+        return 0;
+    }
+    gate_shape_report(&s);
+    const int n_exp = (int)(sizeof(kGateExpect) / sizeof(kGateExpect[0]));
+    int mine = 0, other = -1;
+    for (int i = 0; i < n_exp; i++)
+    {
+        double m = 0.0;
+        if (!gate_shape_is(&s, &kGateExpect[i], &m)) continue;
+        if (!strcmp(kGateExpect[i].mode, mode)) mine = 1;
+        else if (other < 0) other = i;
+    }
+    if (mine)
+    {
+        printf("gate      : the shape is %s's, decoding\n", mode);
+        return 0;
+    }
+    if (other >= 0)
+    {
+        printf("gate      : the shape is %s's, not %s's: %.0f Hz at %.0f Hz, fill %.2f.  Refusing, "
+               "because %s will read this as text that was never sent\n",
+               kGateExpect[other].mode, mode, s.bw95, s.centre_hz, s.fill, mode);
+        return 1;
+    }
+    printf("gate      : the shape is none of the four (%.0f Hz at %.0f Hz, fill %.2f) - below about "
+           "+3 dB this test has no answer, so decoding on the modem's own terms\n",
+           s.bw95, s.centre_hz, s.fill);
+    return 0;
+}
+
+static int mode_id(const char* path)
+{
+    cap_t c;
+    if (!cap_load(path, &c))
+    {
+        printf("NO FILE   : mode-id never opened %s\n", path);
+        return 2;
+    }
+    gate_shape_t s;
+    gate_shape(&c, &s);
+    printf("capture   : %s\naudio     : %u Hz, %.2f s\n", path, c.rate, (double)c.n / (double)c.rate);
+    gate_shape_report(&s);
+    const int n = (int)(sizeof(kGateExpect) / sizeof(kGateExpect[0]));
+    int best = -1;
+    double best_m = -1e30;
+    printf("modes     :");
+    for (int i = 0; i < n; i++)
+    {
+        double m = 0.0;
+        const int in = gate_shape_is(&s, &kGateExpect[i], &m);
+        if (in && m > best_m) { best_m = m; best = i; }
+        printf(" %s%s", kGateExpect[i].mode, in ? "" : "-");
+    }
+    printf("\n");
+    if (best >= 0)
+    {
+        printf("verdict   : %s, by %.0f of the margin on its tightest test\n", kGateExpect[best].mode, best_m);
+    }
+    else
+    {
+        printf("verdict   : none of the five: the shape is outside every band this bench has measured\n");
+    }
+    free(c.x);
+    return best >= 0 ? 0 : 1;
+}
+
+// ---- calibrating the shape gate -----------------------------------------------------------------
+//
+// The bands in kGateExpect are a claim about real audio, and the only real audio in this tree is one
+// DWD teletype take, which the first version of this gate refused outright: the bench's own RTTY
+// signals are 250 to 900 Hz wide and the station is 1955 Hz, because a live recording carries its own
+// hiss, its neighbours and the shape of whatever filter the receiver left in.  So the bands are
+// measured here, over a ladder of noise, and printed before they are asserted: what it costs to widen
+// one is visible as a control row starting to pass.
+
+static void gate_row(const char* label, const float* x, size_t n, uint32_t rate, int* failures,
+                     const char* must_pass, int expect_pass)
+{
+    cap_t c;
+    c.x = (float*)x;
+    c.n = n;
+    c.rate = rate;
+    c.ch = 1;
+    gate_shape_t s;
+    gate_shape(&c, &s);
+    const int n_exp = (int)(sizeof(kGateExpect) / sizeof(kGateExpect[0]));
+    char accepts[64] = "";
+    int mine_ok = 1;
+    for (int i = 0; i < n_exp; i++)
+    {
+        double m = 0.0;
+        const int in = gate_shape_is(&s, &kGateExpect[i], &m);
+        if (in)
+        {
+            strncat(accepts, accepts[0] ? " " : "", sizeof(accepts) - 1);
+            strncat(accepts, kGateExpect[i].mode, sizeof(accepts) - 1);
+        }
+        if (must_pass && !strcmp(kGateExpect[i].mode, must_pass)) mine_ok = in;
+    }
+    printf("  %-22s bw95 %5.0f  fill %.2f  centre %5.0f  accepted by: %-24s", label, s.bw95, s.fill,
+           s.centre_hz, accepts[0] ? accepts : "nothing");
+    if (must_pass)
+    {
+        const int good = expect_pass ? mine_ok : !accepts[0];
+        printf("  %s\n", good ? "ok" : "FAIL");
+        if (!good) (*failures)++;
+    }
+    else
+    {
+        printf("\n");
+    }
+}
+
+static int gate_check(void)
+{
+    int failures = 0;
+    const size_t cap = 400000;
+    float* x = malloc(cap * sizeof(float));
+    float* work = malloc(cap * sizeof(float));
+    if (!x || !work) { printf("out of memory\n"); free(x); free(work); return 1; }
+
+    printf("Shape gate: what each mode's take looks like as noise is added, and what the bands in\n"
+           "kGateExpect let through.  Nothing here calls a modem: the numbers are the file's spectrum\n"
+           "over 250..3000 Hz, one second windows, and the bands are widths, so trimming the gain of a\n"
+           "take cannot move it.  `accepted by` is every mode whose band the shape is inside.\n\n");
+
+    printf("own takes, over the noise ladder\n");
+    static const float snrs[] = { 100.0f, 10.0f, 3.0f, -6.0f, -12.0f, -18.0f };
+    const size_t nsnr = sizeof(snrs) / sizeof(snrs[0]);
+
+    struct { const char* name; const char* msg; int kind; } modes[] =
+    {
+        { "NAVTEX", "NAVTEX TEST MESSAGE DE UHSDR BENCH 12345 CQ CQ", 0 },
+        { "MFSK16", "MFSK16 TEST DE UHSDR 12345", 1 },
+        { "Olivia", "OLIVIA TEST DE UHSDR 12345", 2 },
+        { "Hell",   "HELLSCHREIBER TEST DE UHSDR 123", 3 },
+    };
+    const size_t nmodes = sizeof(modes) / sizeof(modes[0]);
+
+    for (size_t m = 0; m < nmodes; m++)
+    {
+        size_t n = 0;
+        uint8_t truth[40000];
+        int cols = 0;
+        switch (modes[m].kind)
+        {
+            case 0: n = Bench_NavtexGenerate((float32_t*)x, cap, modes[m].msg, 0.0f, NAVTEX_ORDER_TABLE); break;
+            case 1: n = Bench_Mfsk16Generate((float32_t*)x, cap, modes[m].msg, 0.0f); break;
+            case 2: n = Bench_OliviaGenerate((float32_t*)x, cap, modes[m].msg, 0.0f); break;
+            default: n = Bench_HellGenerate((float32_t*)x, cap, modes[m].msg, truth, 4000, &cols, 1000.0f, 0.0f); break;
+        }
+        if (!n) { printf("  %-6s nothing generated\n", modes[m].name); failures++; continue; }
+        for (size_t k = 0; k < nsnr; k++)
+        {
+            memcpy(work, x, n * sizeof(float));
+            char label[64];
+            if (snrs[k] > 90.0f)
+            {
+                snprintf(label, sizeof(label), "%s clean", modes[m].name);
+            }
+            else
+            {
+                snprintf(label, sizeof(label), "%s snr %+.0f", modes[m].name, (double)snrs[k]);
+                Bench_RngSeed(0x51A7E5u + (uint32_t)(k * 7 + m));
+                Bench_AddNoise(work, n, snrs[k], 0.0f);
+            }
+            // the modes that decode cleanly at these points is the README's business; here every row
+            // down to the one where the shape stops being recognisable has to be its own mode's
+            gate_row(label, work, n, 12000, &failures, modes[m].name, snrs[k] >= 3.0f);
+        }
+        printf("\n");
+    }
+
+    printf("controls: shapes that are not any of the four\n");
+    {
+        const size_t n = 60000;
+        Bench_RngSeed(0xC0FFEEu);
+        for (size_t k = 0; k < n; k++) work[k] = 0.0f;
+        gate_row("silence", work, n, 12000, &failures, NULL, 0);
+
+        Bench_RngSeed(0xC0FFEEu);
+        for (size_t k = 0; k < n; k++) work[k] = 0.0f;
+        Bench_AddNoise(work, n, -20.0f, 0.2f);          // noise alone, no signal at all
+        gate_row("noise only", work, n, 12000, &failures, NULL, 0);
+
+        for (size_t k = 0; k < n; k++) work[k] = 0.4f * sinf(2.0f * GATE_PI * 1100.0f * k / 12000.0f);
+        gate_row("single tone 1100", work, n, 12000, &failures, NULL, 0);
+
+        // a wide band of noise 900..1300 Hz: MFSK16's own band, with none of its structure
+        Bench_RngSeed(0xB0BA7Cu);
+        for (size_t k = 0; k < n; k++) work[k] = 0.0f;
+        Bench_AddNoise(work, n, -20.0f, 0.2f);
+        Bench_AddNoiseBand(work, n, 0.0f, 0.25f, 900.0f, 1300.0f);
+        gate_row("band noise 900..1300", work, n, 12000, &failures, NULL, 0);
+    }
+
+    printf("\nthe one real take in this tree\n");
+    {
+        cap_t c;
+        if (cap_load("fixtures/ddk2-4583.wav", &c))
+        {
+            gate_row("ddk2 4583 kHz (RTTY)", c.x, c.n, c.rate, &failures, NULL, 0);
+            free(c.x);
+        }
+        else
+        {
+            printf("  fixtures/ddk2-4583.wav would not open\n");
+            failures++;
+        }
+    }
+
+    free(x);
+    free(work);
+    if (failures)
+    {
+        printf("\ngate: %d row(s) outside what the bands claim - read them against the table above\n", failures);
+    }
+    return failures ? 1 : 0;
+}
+
 
 static int capture_check(const char* path, uint16_t shift, uint16_t baud)
 {
@@ -4469,7 +5138,7 @@ int main(int argc, char** argv)
     // every mode that feeds the modem goes through the receiver's AGC, so it is set up once, before
     // any case. The *-wav verbs are left out on purpose: they decode a recording that already went
     // through a receiver's AGC, and running it through a second one would not be the radio's path.
-    if (strcmp(what, "rtty-wav") && strcmp(what, "rtty-align") && strcmp(what, "align-check")
+    if (strcmp(what, "mode-id") && strcmp(what, "rtty-wav") && strcmp(what, "rtty-align") && strcmp(what, "align-check")
         && strcmp(what, "rtty-trace") && strcmp(what, "tx-check") && strcmp(what, "wefax")
         && strcmp(what, "navtex") && strcmp(what, "hell") && strcmp(what, "mfsk16")
         && strcmp(what, "olivia") && strcmp(what, "capture-check")
@@ -4498,11 +5167,15 @@ int main(int argc, char** argv)
     if (!strcmp(what, "rtty-tune")) { return rtty_tune(); }
     if (!strcmp(what, "wefax")) return wefax_table();
     if (!strcmp(what, "navtex")) return navtex_table();
+    if (!strcmp(what, "sitor-stream")) return sitor_stream();
     if (!strcmp(what, "hell")) return hell_table();
     if (!strcmp(what, "mfsk16")) return mfsk16_table();
     if (!strcmp(what, "olivia")) return olivia_table();
     if (!strcmp(what, "floors-2k5")) return floors_2k5();
     if (!strcmp(what, "floors-2k5-check")) return floors_2k5_check();
+    // name the mode from the shape of the file, before any decoder is asked to like it
+    if (!strcmp(what, "mode-id") && argc > 2) return mode_id(argv[2]);
+    if (!strcmp(what, "gate-check")) return gate_check();
     // the gate a take has to clear before it is worth decoding, let alone pinning: it measures the
     // file and never touches the modem, so it cannot be fooled by the modem agreeing with itself
     if (!strcmp(what, "capture-check") && argc > 2)

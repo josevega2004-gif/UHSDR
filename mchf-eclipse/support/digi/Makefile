@@ -31,12 +31,13 @@ SHIM     = shim
 
 BENCH_OBJS = digi_bench.o modem_host.o wefax.o navtex.o hellschreiber.o mfsk16.o olivia.o \
              softdds_host.o
-FW_OBJS    = rtty.o audio_agc.o uhsdr_math.o
+DIRDIR   = ../../drivers/digi
+FW_OBJS    = rtty.o audio_agc.o uhsdr_math.o sitor_rx.o
 
 CC       ?= gcc
 CFLAGS   ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11
 DEFINES   = -DUSE_RTTY_PROCESSOR -DHOST_BENCH
-INCLUDES  = -I. -I$(SHIM) -I$(LIBDIR) -I$(LIBDIR)/cw -I$(LIBDIR)/softdds -I../../hardware -I../../misc
+INCLUDES  = -I. -I$(SHIM) -I$(LIBDIR) -I$(LIBDIR)/cw -I$(LIBDIR)/softdds -I$(DIRDIR) -I../../hardware -I../../misc
 
 # The firmware's own build passes -Wno-sign-compare (see the target Makefile): the shipping sources
 # compare signed block sizes with unsigned sample indices in a few places, and the bench compiles
@@ -60,6 +61,11 @@ audio_agc.o: $(LIBDIR)/audio_agc.c
 	$(CC) $(CFLAGS) $(FWCFLAGS) $(DEFINES) $(INCLUDES) -c -o $@ $<
 
 uhsdr_math.o: ../../misc/uhsdr_math.c
+	$(CC) $(CFLAGS) $(FWCFLAGS) $(DEFINES) $(INCLUDES) -c -o $@ $<
+
+# the streaming SITOR-B demodulator, compiled as the radio compiles it: this is the firmware file,
+# and the reference modem in navtex.c reads the same alphabet tables it does
+sitor_rx.o: ../../drivers/digi/sitor_rx.c ../../drivers/digi/sitor_rx.h
 	$(CC) $(CFLAGS) $(FWCFLAGS) $(DEFINES) $(INCLUDES) -c -o $@ $<
 
 test: digi_bench
@@ -148,6 +154,12 @@ floors-2k5-check: digi_bench
 
 # the recording paths for the four non RTTY modes: the modems' own takes with a long lead, written
 # through the WAV reader a real capture goes through
+# The mode-identification gate, calibrated against modulated test audio: each mode's own takes have
+# to pass with margins, controls (silence, noise, a single tone, band noise) have to be refused or
+# pass through, and no mode may be able to claim another's signal.
+gate-check: digi_bench
+	./digi_bench gate-check
+
 record-check: digi_bench
 	@./digi_bench record-check
 

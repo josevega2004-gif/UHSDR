@@ -1414,6 +1414,95 @@ off, which is exactly the distortion the bench should be shown rather than hidin
 3. RTTY: chase the fast-fading failure with the numbers in front of us.
 4. Only then decide about FT8 RX, where the RAM question is per board rather than per mode.
 
+## Mode identification, `./digi_bench gate-check`
+
+The four `-wav` verbs below the RTTY one are each pointed at one mode, and a recording from a
+WebSDR waterfall is usually not the mode you aimed at. Feeding a WEFAX picture to the Olivia decoder
+produces confident gibberish, which is worse than nothing because it looks like a decode. So a gate
+sits in front of each of them: the take's shape is measured and compared against the shape the mode
+has, and the decode is refused when it clearly belongs to something else.
+
+```
+./digi_bench mode-id take.wav        # what a take looks like, and which modes would accept it
+./digi_bench gate-check              # the calibration matrix, exits non-zero when a row is wrong
+```
+
+The measurement is one-second windows (the `capture-check` window, for the same reason: a longer
+window blurs the edges of the narrow modes), a Goertzel spectrum in 1 Hz bins from 250 to 3000 Hz,
+the median bin of each window taken as the noise floor, and the narrowest run of bins standing more
+than 3 dB over it, weighted by how much they stand over it. The floor subtraction is the whole
+trick: measured against a fixed level, the width of an Olivia signal is the width of the hiss, not
+of the mode, and every row of `gate-check` fails.
+
+| mode | width (Hz) | centre (Hz) | fraction | accepted from SNR |
+|---|---|---|---|---|
+| NAVTEX | 186 | 1700 | 0.26 | +3 dB |
+| MFSK16 | 258 | 1123 | 0.38 | +3 dB |
+| Olivia 16/500 | 1121 | 1573 | 0.46 | +3 dB |
+| Hell 122.5 | 107 | 1154 | 0.06 | +3 dB |
+| RTTY | 176 | 1702 | 0.29 | not gated |
+
+Each mode has a box in width, centre and fill fraction, and the boxes are disjoint except that
+NAVTEX and RTTY overlap badly: RTTY's two tones at 170 Hz spacing are 4 bins wide out of a measured
+176, which is the shape of a single tone. It is therefore not gated at all - it already has
+`capture-check`, which is mode-specific and never calls a modem, and a gate that also refused
+RTTY would refuse RTTY.
+
+Three answers, not two. Below about +3 dB a mode's own shape is no longer measurable - the width
+that comes back is the width of the noise - so a take that measures outside every box is passed
+through rather than refused, on the principle that the point of these verbs is weak signals: a gate
+that refused them would be worse than no gate. It refuses only when the shape says the take belongs
+to a mode that is not the one being asked. Cross-mode refusal is the reliable part, and it works
+down to the floor of the test: a NAVTEX take offered to Olivia, MFSK16 or Hell is refused with a
+message naming the mode it does look like.
+
+What the gate does not do: it cannot tell a real transmission from a synthetic one, since that is
+`capture-check`'s job and only RTTY has it; it cannot tell Olivia 16/500 from Olivia 8/1000, whose
+shape is the same box; and it is not a demodulator, which is why `gate-check` asserts nothing about
+what any modem says.
+
+## Streaming SITOR-B, `./digi_bench sitor-stream`
+
+`navtex.c` is a reference modem: it takes a whole buffer, searches 118 to 122 samples per bit,
+`malloc`s. None of that belongs in a radio, so the port lives in `drivers/digi/sitor_rx.{c,h}` -
+one sample in, one character out, two quadrature resonators on the tone pair, the bit period
+measured by folding detected transitions onto each candidate period, seven-boundary alignment
+scored by 4-of-7 validity, a sixteen-character ring for the time-diversity pair, no `malloc`, no
+`printf`, no whole-buffer pass.
+
+**It does not pass its table yet, and the table says so.** Current rows:
+
+```
+case            CER %     conf  bit ms   fix  lost  rev  reference CER
+clean           100.0      1.00   10.0     32    29    0        0.0
+snr 20          100.0      0.00   10.0      0     0    0        0.0
+rate -3 %        93.0      0.79   10.3      0     0    0       78.3
+```
+
+The measurements along the way are worth keeping, because two of them were not known before:
+
+- The reference modem needs the bit rate to be within about 1.7 % of 100 Bd, and a recording that
+  fails it decodes at 78 to 100 % error. That is the window 118 to 122 samples, and nothing else.
+  A sound card a few tens of ppm off is inside it; a WebSDR stream that has been resampled twice is
+  not. This is why `sitor-stream` generates its takes by time scaling and keeps the rate rows.
+- Time scaling a take moves the bit rate *and* the tones together: an 8 % rate error carries the pair
+  130 Hz away, which is past the 85 Hz the two fixed resonators follow. So a receiver that intends to
+  tolerate rate error also has to acquire the tone pair, which `sitor_rx.c` does not yet do. The
+  table's rate rows are kept inside 3 % for that reason, and the pair search is listed below as work,
+  not quietly avoided.
+- Two bugs the table caught that reading the code did not: the group-boundary search asked for more
+  bits than a NAVTEX message contains (280 is about forty characters and a 46-character message is
+  861 bits, so the decision was never reached and the receiver sat in alignment forever); and the
+  bit order cannot be detected from 4-of-7 validity at all, because the reverse of a constant-ratio
+  code is another constant-ratio code - only the SIA/SIB phasing alternation distinguishes them, and
+  it has to be scored while the boundary is still being found, because the phasing preamble is twenty
+  characters and the boundary needs forty to settle.
+
+Not claimed, and still open: alignment under noise (every row with noise in it never leaves
+SEARCH_ALIGN), the diversity pairing (the clean row emits each block twice, which is what the 32
+`fix` and 29 `lost` are), and the tone-pair search. The firmware build does not compile `sitor_rx.c`
+yet and nothing on the radio uses it. `sitor-stream` is not in CI for the same reason: it fails.
+
 ## The convolution RX filter, `make -C support/digi convolution-check`
 
 `USE_CONVOLUTION` is an alternative SSB/CW receiver filter, committed as 3434f9db (2018-08-22) and

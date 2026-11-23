@@ -187,6 +187,14 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi record-check
 
+      # The gate in front of the -wav verbs is a decision, not a decoder, so it gets its own ladder:
+      # each mode's takes have to pass it with margin, the controls (silence, noise, one tone, band
+      # noise) have to be refused or passed through as "nothing", and no mode may be able to claim
+      # another's signal. It calls no modem, for the same reason capture-check does not.
+      - name: Run the mode-identification gate
+        working-directory: mchf-eclipse
+        run: ./support/digi/digi_bench gate-check
+
       # The two halves of the capture path grade themselves, so the piece that decides whether a take
       # is worth pinning is checked too.  The decoder: a stream built element by element in the script
       # has to pass the framing walk with the counts it was built from and stay recordable to the rules
