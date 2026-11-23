@@ -78,7 +78,20 @@ typedef struct {
 // one rate and blocks handed over at another shifts the passband instead of failing in any way you
 // would notice while tuning.  support/digi/convolution_probe.c checks the table itself.
 #ifdef USE_CONVOLUTION
+#ifndef CONVOLUTION_OFF_FOR_TEST
+// The three modes the partitioned convolution filter takes over. See the note above on the rates.
 #define CONVOLUTION_USED_FOR(mode)  ((mode) == DEMOD_USB || (mode) == DEMOD_LSB || (mode) == DEMOD_CW)
+#else
+// Diagnostic build switch: compile the whole feature in - the sample rate, the block geometry, the
+// queue, the counters and the debug line all exactly as a shipping convolution image has them - and
+// route USB, LSB and CW back to the Hilbert pair the stock firmware runs. A radio that is silent on a
+// convolution image is then measured against an image identical in every respect except this one
+// branch, so audio here with silence there puts the fault inside the filter rather than in the gain,
+// the AGC, the mute logic or the build. The debug line checks itself: it reads C 0/0 d0 n0, because
+// nothing is handed to a filter that is not in use. Written as a named switch rather than an override
+// of the macro above, because a function-like macro does not survive the Makefile's shell quoting.
+#define CONVOLUTION_USED_FOR(mode)  false
+#endif
 #else
 #define CONVOLUTION_USED_FOR(mode)  false
 #endif
