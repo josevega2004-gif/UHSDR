@@ -1534,6 +1534,18 @@ yet and nothing on the radio uses it. `sitor-stream` is not in CI for the same r
 
 ## The convolution RX filter, `make -C support/digi convolution-check`
 
+
+One limit on what this section measures, and it bit here once. `convolution_probe` compiles the shipped
+`audio_convolution.c`, but it substitutes its **own** complex FFT for the CMSIS `arm_cfft_f32` the radio
+links. So every figure below - the passband ripple, the skirt, the image rejection, the cost per sample -
+is a statement about the arithmetic and the geometry, and none of them is a statement about the ARM
+library's twiddle tables or its staged radix path. When a radio image came back silent while the host
+said the filter worked, the honest reading was that the host had never tested the thing in question, and
+that is why "measured off the radio" should never be quoted as clearing a transform instance. (The
+silence itself turned out to be RF gain and AGC on the radio, with both geometries reporting `in == out`,
+nothing dropped, and real signal on both sides of the filter - which is also worth recording: the counters
+said the firmware was healthy while it was being blamed.)
+
 `USE_CONVOLUTION` is an alternative SSB/CW receiver filter, committed as 3434f9db (2018-08-22) and
 commented out in every board configuration since. Instead of the two 199-tap Hilbert FIRs and the
 `i+q` / `i-q` sum that make the sideband decision today, it convolves the decimated I/Q with a
