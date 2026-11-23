@@ -175,6 +175,35 @@ mark and space at 2125/2295 Hz, so a live ham RTTY recording has to be tuned (or
 translated) so the pair lands at 915/1085 Hz audio. NAVTEX style pairs at 1615/1785 Hz are
 outside the filter bank as well, which is a real limit on reusing this modem for that service.
 
+### WEFAX, `./digi_bench wefax-wav take.wav`
+
+WEFAX had no recording path at all until now: its table hands the decoder a buffer that begins on a
+line boundary and already knows the picture. The verb loads a take, trims to its onset the same way
+the other four do, decodes, and writes two PGMs - one each way round, because the table's own
+`invert` row shows the decoder does not choose polarity, so the eye decides.
+
+It reports lines captured, the grey mean, the black/mid/white shares, and the row statistics, and
+then refuses to give a verdict: a capture of another mode can decode into full-length lines of
+plausible-looking grey. The first version of this did judge, from "rows that vary" and "rows that
+start dark", and got it exactly backwards - the real chart has empty sky rows and a sync tip outside
+the picture area, while an RTTY take decoded as fax produces rows that swing from end to end and
+begin black. So the numbers are printed and the picture is the check.
+
+**The gap, measured and pinned in `record-check`:** the sync capture does not hold on a take that
+does not begin on a line boundary. A lead of 30 samples - 2.5 ms, the smallest this harness can
+write without being no lead at all - collapses a 12-line chart from a correct decode to 32 % of
+pixels matching, a mean of 93 and 82 % of the picture at one flat grey. 120, 600, 3000 and 6000
+sample leads give the same numbers to four significant figures, which says the receiver is not
+starting where the cut is: it is starting wherever the waveform tells it to, and the 1900 Hz phasing
+tone that closes every HF facsimile line is 43 Hz from the 1857 Hz sync tip and lands inside the same
+bin. Reading a line from its end is exactly what flat grey with a dark tick at each row looks like.
+A tip search that also asked whether picture tones followed the candidate was tried here and broke
+the clean decode instead (0 of 12 lines found), so that is not the fix. `record-check` pins the
+damage behind a ceiling that will fail when someone makes the capture hold.
+
+Until then WEFAX is the one mode of the five whose recording path cannot be aimed at a capture
+off a waterfall, which is the situation it exists for.
+
 ## What is real and what is scaffolding
 
 `drivers/audio/rtty.c` is compiled from this Makefile, together with its own `rtty.h`

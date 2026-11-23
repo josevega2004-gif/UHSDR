@@ -2582,6 +2582,100 @@ static int mfsk16_wav(const char* path, const char* expected, float limit)
     return 0;
 }
 
+// WEFAX had no path from a recording at all: the table hands the decoder a buffer that begins on a
+// line boundary and already knows the picture it is meant to find. A capture begins somewhere inside
+// a line, its sync tips wander, and there is no ground truth - so this reports only what a receiver
+// can know on its own: how many lines it captured, how the grey is spread, and the picture. The
+// correlation the table scores with is simply not available here, and the run says so instead of
+// printing something that looks like it.
+static int wefax_wav(const char* path)
+{
+    size_t n; double secs; uint32_t rate, ch;
+    float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
+    if (!x) return 1;
+    // Start where the signal starts, the way the other recording verbs do. Without this the line
+    // spacing is set by the first two sync tips the decoder meets and one of them is a silence, so
+    // every line after it is sampled from the wrong place: a take with a 0.75 s lead came back as 159
+    // grey with a black tick at the start of each row, which is exactly what a fax line looks like
+    // when the only thing you are reading is its sync tip.
+    const size_t onset = rec_onset(x, n);
+    printf("onset     : %zu samples (%.1f ms), %.3f line times\n", onset, 1000.0*(double)onset/12000.0, (double)onset/6000.0);
+    if (onset)
+    {
+        memmove(x, x + onset, (n - onset) * sizeof(float));
+        n -= onset;
+    }
+    const size_t possible = n / WEFAX_SAMPLES_PER_LINE;
+    uint8_t* grey = malloc((possible + 2) * WEFAX_IMG_COLS);
+    if (!grey) { free(x); return 1; }
+    wefax_result_t res;
+    memset(&res, 0, sizeof(res));
+    const int ok = Bench_WefaxDecode(x, n, grey, &res);
+    printf("file      : %s\n", path);
+    printf("format    : %u Hz, %u channel(s), %.2f s\n", rate, ch, secs);
+    printf("lines     : %u captured, %zu line times in the recording\n", res.lines_found, possible);
+    if (!ok || res.lines_found == 0)
+    {
+        printf("verdict   : nothing captured. A fax transmission is 4 kHz wide and this harness reads\n"
+               "            it as everything else does; there is no WEFAX entry in the shape gate,\n"
+               "            because its tone pair sits where RTTY's does. Aim by the waterfall.\n");
+        free(grey); free(x);
+        return 1;
+    }
+    size_t dark = 0, mid = 0, light = 0;
+    const size_t px = (size_t)res.lines_found * WEFAX_IMG_COLS;
+    for (size_t i = 0; i < px; i++)
+    {
+        if (grey[i] < 64) dark++;
+        else if (grey[i] > 192) light++;
+        else mid++;
+    }
+    printf("grey      : mean %.1f, %5.1f%% black, %5.1f%% mid, %5.1f%% white\n", res.mean_level,
+           100.0 * (double)dark / (double)px, 100.0 * (double)mid / (double)px,
+           100.0 * (double)light / (double)px);
+    // Reported, not judged. The first version of this turned those two numbers into a verdict and
+    // got it exactly backwards: it called the real capture "not a fax picture", because six of its
+    // twelve rows are empty sky and none of them starts dark - the sync tip is outside the picture
+    // area this generator draws - and it called the RTTY take a fax capture, because noise from a
+    // demodulator that cannot track anything produces rows that vary wildly and begin black. So the
+    // numbers stay, since they are what to look at, and the judgement does not: nothing in this
+    // harness can tell a fax capture from a wrong-mode one without knowing the picture. WEFAX is the
+    // one mode with no entry in the shape gate for the same reason, and the eye is the check.
+    size_t contrast = 0, tip = 0;
+    for (uint32_t r = 0; r < res.lines_found; r++)
+    {
+        const uint8_t* row = grey + (size_t)r * WEFAX_IMG_COLS;
+        uint8_t lo = 255, hi = 0;
+        for (int c = 0; c < WEFAX_IMG_COLS; c++)
+        {
+            if (row[c] < lo) lo = row[c];
+            if (row[c] > hi) hi = row[c];
+        }
+        if (hi - lo > 60) contrast++;
+        if (row[0] < 96) tip++;
+    }
+    printf("rows      : %u of %u span more than 60 levels, %u start dark\n",
+           (unsigned)contrast, res.lines_found, (unsigned)tip);
+    printf("verdict   : none. Open the picture. A capture of another mode can decode into full-length\n"
+           "            lines of plausible-looking grey, and this harness cannot tell that without the\n"
+           "            picture it expects; if the sky is black and the land white, open the other file,\n"
+           "            because the table's own invert row shows the decoder does not choose polarity.\n");
+
+    char base[512];
+    const char* slash = strrchr(path, '/');
+    snprintf(base, sizeof(base), "%s", slash ? slash + 1 : path);
+    char* dot = strrchr(base, '.');
+    if (dot) *dot = '\0';
+    char out[600];
+    snprintf(out, sizeof(out), "wefax-%s.pgm", base);
+    if (pgm_write(out, grey, WEFAX_IMG_COLS, res.lines_found)) printf("picture   : %s\n", out);
+    snprintf(out, sizeof(out), "wefax-%s-inverted.pgm", base);
+    for (size_t i = 0; i < px; i++) grey[i] = (uint8_t)(255 - grey[i]);
+    if (pgm_write(out, grey, WEFAX_IMG_COLS, res.lines_found)) printf("inverted  : %s\n", out);
+    free(grey); free(x);
+    return 0;
+}
+
 static int olivia_wav(const char* path, const char* expected, float limit)
 {
     size_t n; double secs; uint32_t rate, ch;
@@ -2790,6 +2884,70 @@ static int record_check(void)
             if (w2) failures += navtex_wav("/tmp/rec-navtex-phase.wav", msg, 0.0f) != 0;
         }
         free(x); free(y);
+    }
+    {
+        // WEFAX arrives from a file as a picture and nothing else, so this is the only check that
+        // means anything for it: generate a chart, add the same 0.75 s lead the other modes get -
+        // one and a half line times, which is not a line boundary and not a symbol boundary either -
+        // run the recording verb, and read the PGM back off the disk it wrote. Truth-free judgement
+        // of a fax capture is not possible in this harness (see wefax_wav), but here the truth is
+        // known, which is the point of a recording check rather than a capture.
+        static const wefax_cfg_t cfg = { .name = "record", .snr_db = 20.0f, .rows = 12 };
+        const size_t cap = (size_t)cfg.rows * WEFAX_SAMPLES_PER_LINE;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        uint8_t* truth = x ? malloc(cap / WEFAX_SAMPLES_PER_LINE * WEFAX_IMG_COLS) : NULL;
+        if (x && truth)
+        {
+            Bench_WefaxGenerate(x, truth, &cfg);
+            float32_t* y = calloc(cap + lead, sizeof(float32_t));
+            if (y) memcpy(y + lead, x, cap * sizeof(float32_t));
+            const bool wrote = y && Bench_WavWrite("/tmp/rec-wefax.wav", y, cap + lead, 12000);
+            check(wrote, "record: a WEFAX chart with a lead can be written as a WAV");
+            if (wrote)
+            {
+                failures += wefax_wav("/tmp/rec-wefax.wav") != 0;
+                uint8_t* got = NULL;
+                int gw = 0, gh = 0;
+                const int read_back = pgm_read("wefax-rec-wefax.pgm", &got, &gw, &gh);
+                check(read_back && gw == WEFAX_IMG_COLS && gh > 0,
+                      "record: the verb left a picture on disk to read back");
+                if (read_back && gw == WEFAX_IMG_COLS && gh > 0)
+                {
+                    // the lead is a line and a half, so the first line the capture holds is wherever
+                    // the first sync tip after it is: compare at the offset that agrees best rather
+                    // than assuming the file starts where the generator did
+                    int best = 0;
+                    for (int off = 0; off <= 4; off++)
+                    {
+                        int same = 0, cmp = 0;
+                        for (int r = 0; r < gh; r++)
+                        {
+                            if (r + off >= (int)cfg.rows) break;
+                            for (int c = 0; c < gw; c++)
+                            {
+                                cmp++;
+                                if (abs((int)got[(size_t)r * gw + c] - (int)truth[(size_t)(r + off) * WEFAX_IMG_COLS + c]) <= 40) same++;
+                            }
+                        }
+                        if (cmp && 100 * same / cmp > best) best = 100 * same / cmp;
+                    }
+                    // Pinned as broken, in the style of the table's two "(gap)" rows: the picture
+                    // does not come back. Any lead of 30 samples or more - 30, 120, 600, 3000, 6000
+                    // all tried - produces the same mean of 93.1 and the same 82 % of pixels at mid
+                    // grey, which is what a line looks like when it is read from its end: the anchor
+                    // does not move with the cut, so the receiver is not starting where the cut is,
+                    // it is starting wherever the waveform tells it to, and the 1900 Hz phasing tone
+                    // at the end of each line is 43 Hz from the 1857 Hz sync tip and inside the same
+                    // bin. A tip search that also asked what followed the tip was tried here and
+                    // broke the clean decode instead (0 of 12 lines), so that is not the fix. This
+                    // ceiling will fail when someone makes the capture hold, and that is the point.
+                    printf("      %d%% of pixels match the chart sent\n", best);
+                    check(best <= 45, "record: WEFAX from a take not starting on a line boundary is a known gap");
+                }
+                free(got);
+            }
+        }
+        free(x); free(truth);
     }
     {
         static const char* msg = "MFSK16 TEST DE UHSDR 12345";
@@ -5186,6 +5344,7 @@ int main(int argc, char** argv)
     }
     // the non RTTY modes read a recording the same way: load it, trim the lead, and try the
     // starts one symbol apart that a recorder could have handed the decoder
+    if (!strcmp(what, "wefax-wav") && argc > 2) { return wefax_wav(argv[2]); }
     if (!strcmp(what, "navtex-wav") && argc > 2)
         return navtex_wav(argv[2], argc > 3 ? argv[3] : "", argc > 4 ? (float)atof(argv[4]) : -1.0f);
     if (!strcmp(what, "mfsk16-wav") && argc > 2)
