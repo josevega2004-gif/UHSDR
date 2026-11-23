@@ -35,7 +35,14 @@ DIRDIR   = ../../drivers/digi
 FW_OBJS    = rtty.o audio_agc.o uhsdr_math.o sitor_rx.o
 
 CC       ?= gcc
-CFLAGS   ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11
+# -MMD -MP: the bench allocates the firmware's structs on its own stack, so a stale object compiled
+# against an old sitor_rx.h does not merely re-run differently, it writes past the frame it was given
+# and dies in memset with nothing to say but a signal. That happened once while this file was being
+# written, and an explicit header list is the sort of thing that is forgotten the second time someone
+# adds an include, so dependency files are generated instead.
+CFLAGS   ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11 -MMD -MP
+# the link line takes the warning flags but not the dependency ones
+LINKFLAGS = $(filter-out -MMD -MP,$(CFLAGS))
 DEFINES   = -DUSE_RTTY_PROCESSOR -DHOST_BENCH
 INCLUDES  = -I. -I$(SHIM) -I$(LIBDIR) -I$(LIBDIR)/cw -I$(LIBDIR)/softdds -I$(DIRDIR) -I../../hardware -I../../misc
 
@@ -47,7 +54,7 @@ INCLUDES  = -I. -I$(SHIM) -I$(LIBDIR) -I$(LIBDIR)/cw -I$(LIBDIR)/softdds -I$(DIR
 FWCFLAGS  = -Wno-sign-compare
 
 digi_bench: $(BENCH_OBJS) $(FW_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(LINKFLAGS) -o $@ $^ -lm
 
 # the bench's own sources
 %.o: %.c bench.h
@@ -77,7 +84,7 @@ test: digi_bench
 # broken receiver is not a table, and the noise rows are exactly where a receiver that is not being
 # tested looks better.
 digi_bench-break-rx: digi_bench.break-rx.o $(filter-out digi_bench.o,$(BENCH_OBJS)) $(FW_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(LINKFLAGS) -o $@ $^ -lm
 
 digi_bench.break-rx.o: digi_bench.c bench.h
 	$(CC) $(CFLAGS) $(DEFINES) -DBENCH_BREAK_RX $(INCLUDES) -c -o $@ $<
@@ -128,6 +135,13 @@ wefax: digi_bench
 # NAVTEX / SITOR-B: 100 Bd, 170 Hz shift, CCIR 476 constant ratio alphabet, DX/RX time diversity
 navtex: digi_bench
 	@./digi_bench navtex
+
+# The same takes through the streaming demodulator in drivers/digi/sitor_rx.c, the one written to be
+# compiled into the radio: one sample in, one character out, no whole-transmission buffer. Graded on
+# two numbers rather than one, because CER cannot tell a character printed wrong from a character the
+# receiver never got to - see the table's own text for what each row is pinning.
+sitor-stream: digi_bench
+	@./digi_bench sitor-stream
 
 # Hellschreiber: on/off keyed raster at 122.5 Bd, scored as a picture rather than as characters
 hell: digi_bench
@@ -252,7 +266,7 @@ fixture-check:
 	@python3 fixture_check.py
 
 clean:
-	rm -f digi_bench digi_bench-break-rx convolution_probe *.o *.wav *.pgm .convolution_defs
+	rm -f digi_bench digi_bench-break-rx convolution_probe *.o *.d *.wav *.pgm .convolution_defs
 # fixtures/ is untouched on purpose: the on air recording is tracked, not a build product
 
 # The convolution probe compiles drivers/audio/audio_convolution.c as *text*, because the arrays that
@@ -276,10 +290,18 @@ _conv_have := $(strip $(file < $(CONV_STAMP)))
 ifneq ($(_conv_want),$(_conv_have))
 $(file >$(CONV_STAMP),$(_conv_want))
 endif
+
+# and it must also exist as a target.  With no EXTRA_DEFS the two strings above are both empty, so
+# nothing is written, and on a tree that has never been built - a fresh checkout, or any `make clean` -
+# convolution_probe.o then depends on a file that does not exist and has no rule, which stops the step
+# outright.  That is what `make clean` followed by `make convolution-check` did in CI and locally: the
+# measurement was fine, the harness could not start.
+$(CONV_STAMP):
+	@printf '%s\n' '$(_conv_want)' > $@
 CONV_INC    = -I$(SHIM) -I$(LIBDIR) -I$(LIBDIR)/filters -I../../hardware -I../../misc
 
 convolution_probe: convolution_probe.o convolution_fft.o iq_rx_filter.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(LINKFLAGS) -o $@ $^ -lm
 
 # Everything the probe compiles in as text or includes, spelled out: it evaluates CONVOLUTION_USED_FOR,
 # which lives in audio_driver.h, and the mode values behind it, so a header change that is not listed
@@ -301,3 +323,11 @@ iq_rx_filter.o: $(LIBDIR)/filters/iq_rx_filter.c $(LIBDIR)/filters/filters.h $(C
 # separation it measures has to be at least the one the 199-tap Hilbert pair gives today.
 convolution-check: convolution_probe
 	@./convolution_probe
+
+# Generated dependency files.  Every rule above compiles with -MMD, so a header change rebuilds what
+# includes it without anyone maintaining a list; the explicit lists that are still written down (the
+# probe's, and sitor_rx.o's) stay, because they also say which files are compiled as text and which
+# switches have to be re-run.
+ALL_DEPS = $(BENCH_OBJS:.o=.d) $(FW_OBJS:.o=.d) digi_bench.break-rx.d \
+           convolution_probe.d convolution_fft.d iq_rx_filter.d
+-include $(ALL_DEPS)

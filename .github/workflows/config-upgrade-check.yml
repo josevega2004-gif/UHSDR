@@ -161,6 +161,17 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi navtex
 
+      # The same takes through the streaming receiver that is written to fit in the radio, and graded
+      # on two numbers: the characters it printed that were not what was sent, and the share of the
+      # message it never printed because it was still finding the clock. The first is a defect and is
+      # pinned at zero; the second is the price of streaming and is pinned as a ceiling. The rows
+      # where the bit rate is not 100 Bd are the two known failures, kept in CI as ceilings on damage
+      # rather than as results, because a receiver that starts printing confident garbage across a
+      # drifted clock is exactly the regression this step exists to catch.
+      - name: Run the streaming SITOR-B demodulator the radio would compile
+        working-directory: mchf-eclipse
+        run: make -C support/digi sitor-stream
+
       # Hellschreiber has no alphabet, so this step grades a picture: exact glyph cells and the share
       # of pixels wrong, with the paper position free and a pixel clock error that has to fail.
       - name: Run the Hellschreiber reference modem

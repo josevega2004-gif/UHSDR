@@ -27,140 +27,131 @@ extern const char SitorFigures[128];
 #define SITOR_SIB    0x33u   // phasing signal 2
 #define SITOR_REV_SIA 0x78u  // the same two as a transmitter that keys the other way round sends them
 #define SITOR_REV_SIB 0x66u
-#define SITOR_ORDER_LIMIT 40 // characters to wait for the phasing before falling back to the convention
 #define SITOR_FIGS   0x36u
 #define SITOR_LTRS   0x5Au
 #define SITOR_SP     0x5Cu
 #define SITOR_RPT    0x66u
 #define SITOR_BLK    0x6Au
 
-// Window and search sizes.  The rate search looks at 2048 samples - 17 bits at the slowest rate it
-// will accept - and tries bit periods from 96 to 144 samples at 12 kHz, which is 83 to 125 Bd: wide
-// enough for a capture whose sample rate is not exactly the transmitter's, narrow enough that the
-// search costs 100k multiplies once rather than continuously.  A 5 % error is what the old reference
-// decoder could not follow; this covers ±20 % and then tracks.
-#define SITOR_EDGE_WINDOW   4096
-#define SITOR_LAG_MIN         96
-#define SITOR_LAG_MAX        144
-#define SITOR_RING            16   // characters held for the time diversity: two blocks of five, spare
-// Bits spent deciding the group boundary.  It has to be shorter than a transmission, not just
-// statistically comfortable: the first version asked for 1400 bits and a NAVTEX message of 46
-// characters is 861 bits long, so the decision was never reached and the receiver sat in alignment
-// forever on every take this bench can generate.
-#define SITOR_ALIGN_BITS     280
-#define SITOR_WIN_CHARS      60    // characters the confidence number is a share of
-#ifndef SITOR_LOCK_SHARE
-#define SITOR_LOCK_SHARE    0.85f  // 4-of-7 share that settles the boundary and holds the lock
-#endif
-#define SITOR_DROP_SHARE    0.55f  // below this for SITOR_DROP_CHARS characters, search again
-#define SITOR_DROP_CHARS      40
+/* What the mode gives for free, and what this receiver uses.  It is written down here because the
+ * first version of this file used none of it, and the difference is the whole difference between a
+ * receiver that works at 10 dB and one that will not lock at 20 dB:
+ *
+ *   1. every valid character is exactly four marks and three spaces, so the SHARE of words that are
+ *      4-of-7 is a synchronisation objective and a confidence number at the same time.  It ranks
+ *      candidate bit clocks.  A random 7 bit word is 4-of-7 35/128 = 27 % of the time, so noise
+ *      cannot score well, which is also the end of the need for a separate mode test;
+ *   2. the bit period is what is being ranked, so it is measured rather than assumed - but measured
+ *      by trying the few integer periods around the nominal and letting the objective function pick,
+ *      not by autocorrelating transitions, which is the dead end the first version went down;
+ *   3. the transmission opens with an alternation of SIA and SIB.  Read as a fifteen-bit window that
+ *      is four specific bit patterns and nothing else, so an exact match gives the clock, the phase,
+ *      the seven-bit group boundary AND the bit order in one test, and it does it while the preamble
+ *      is still running.  The alphabet test cannot do that: SIA and SIB are both 4-of-7, so during
+ *      the preamble every one of the seven boundaries scores perfectly and none can be told from
+ *      another.  That degeneracy is why this file now has two lock paths instead of one;
+ *   4. each character is sent twice, five character slots (350 ms) later.  Pair slot k with slot k+5
+ *      and every character is emitted exactly once, on its repeat copy.  Emitting on both is how the
+ *      first version printed its text twice.
+ *
+ * Costs, for a radio rather than for a bench: the grid is 1200 candidates of a handful of bytes, the
+ * history is a 14 bit window per candidate, and once locked the receiver stops searching and only
+ * feeds its own candidate, so the search is paid during acquisition instead of forever. */
 
-/* A streaming SITOR-B receiver: one sample in, and a character out when there is one.  It is written
- * this way because that is the shape the radio has - there is no whole transmission to look back over,
- * and the buffer between the audio interrupt and this is one block long.
- *
- * The reference implementation in support/digi/navtex.c cannot be used on the radio for the same
- * reason: it finds its bit clock by trying every phase and every group boundary in a window of the
- * file, which is a search over the whole take, and it only ever tried bit periods from 118 to 122
- * samples, which is ±1.7 % of 100 Bd and is a statement about what this bench can generate rather
- * than about what a recording can be.  Here the rate is *measured* from the transitions in the
- * signal, over a range, and then tracked.
- *
- * What the mode gives for free, and what this uses:
- *   - every valid character has exactly four marks and three spaces, so a word that is not 4-of-7 is
- *     a word the receiver knows it got wrong, and the share of words that are valid is a confidence
- *     number that does not need the text;
- *   - each character is sent twice, five character slots apart, so one damaged copy can be taken
- *     from the other;
- *   - the transmission opens with an alternation of SIA and SIB, which is how the bit order is told.
- */
+#define SITOR_GRID_SPAN        4      // integer periods tried: nominal +- this, i.e. +-3.3 % at 12 kHz
+#define SITOR_MAX_GRID          1300  // candidates in the grid, with room for the widest nominal
+#define SITOR_BITS_TO_DECIDE   150    // bits a candidate must have seen before it may win on alphabet: 26 words,
+#define SITOR_DECIDE_EVERY     120     // bits between decisions while acquiring
+#define SITOR_ALPHA_LOCK       109     // aged 4-of-7 share that locks: 128 is 100 %, so this is 85 %
+#define SITOR_ALPHA_DROP        70     // below this the lock is given up and the grid is searched again
+#define SITOR_MARGIN_NUM         3     // the winner must beat the runner up by 3x, integer math for 1.5x
+#define SITOR_RATE_TOLERANCE     1     // samples of period error the integer grid can follow
+#define SITOR_PHASING_RUN        6     // alternating SIA/SIB words that make a phasing lock
+#define SITOR_ORDER_LIMIT       40     // characters before the bit order is assumed rather than known
+#define SITOR_MAX_WIN          512     // the boxcar's ring: one bit at up to 51.2 kHz
+#define SITOR_ALIGN_RING         8     // characters kept for the time diversity pairing
+
 typedef struct
 {
-    // ---- the two tones ---------------------------------------------------------------------
-    // A rotating phasor per tone, a one pole lowpass on each of its two parts, and the difference of
-    // the two energies is the discriminator.  Four state variables per tone and about ten multiplies
-    // a sample for the whole front end: a radio pays per sample, and the shape a 100 Bd signal needs
-    // is only "about fifty hertz wide", which one pole gives.
-    float32_t ph_lo_c, ph_lo_s;      // e^{-j w n} at the low tone
-    float32_t ph_hi_c, ph_hi_s;      // and at the high tone
-    float32_t rot_lo_c, rot_lo_s;    // the angle one sample advances
-    float32_t rot_hi_c, rot_hi_s;
-    float32_t lp_lo_i, lp_lo_q;      // the lowpassed baseband, i.e. the tone's complex envelope
-    float32_t lp_hi_i, lp_hi_q;
-    float32_t alpha;                 // the pole, from the bandwidth
+    // ---- the discriminator -------------------------------------------------------------------
+    // Difference of the two tone energies, each measured over exactly one nominal bit by a sliding
+    // Goertzel: X[n] = X[n-1] + (x[n] - x[n-W]) * e^{-j w n}, which is a boxcar of W samples and so
+    // the matched filter for the symbol, at four multiplies and two adds a sample for both tones.
+    // The window stays at the nominal bit length while the grid tries other periods: a few percent
+    // of window error costs a little depth, whereas a window that tracked every candidate would cost
+    // a ring buffer per candidate.
+    float32_t rot_c, rot_s;        // e^{-j w} per sample, low tone
+    float32_t rot2_c, rot2_s;      // and high tone
+    float32_t ph_c, ph_s;          // current e^{-j w n}, low tone
+    float32_t ph2_c, ph2_s;        // and high tone
+    float32_t acc_i, acc_q;        // sliding sum, low tone
+    float32_t acc2_i, acc2_q;      // and high tone
+    float32_t lag_c, lag_s;        // e^{-j w (n-W)}: the rotation the leaving sample came in with
+    float32_t lag2_c, lag2_s;      // and at the high tone
+    float32_t ring[SITOR_MAX_WIN]; // the sample W ago, for the boxcar's subtraction
+    int32_t   win;                 // W, nominal samples per bit
+    int32_t   wring;               // write index in ring
+    float32_t disc;                // high tone energy minus low tone energy
     uint32_t  sample_count;
 
-    // ---- the bit clock ---------------------------------------------------------------------
-    float32_t period;          // samples per bit, measured then tracked
-    float32_t phase;           // how far into the current bit we are
-    float32_t half;            // period / 2, where the decision is taken
-    int32_t   since_edge;      // samples since the last bit boundary
-    int       last_bit;        // the previous decision, for finding transitions
-    float32_t disc;            // the discriminator, high tone energy minus low tone energy
-    uint32_t  bit_count;       // bits decided, for the confidence window
-
-    // ---- rate acquisition ------------------------------------------------------------------
-    // The transition train, one byte per sample, and the autocorrelation of it: a FSK signal
-    // changes tone at bit boundaries, so the train repeats at exactly one bit period whatever
-    // that period is.  This is the part that replaced the 118..122 assumption.
-    uint8_t   edges[SITOR_EDGE_WINDOW];
-    int32_t   edge_fill;
-    uint32_t  edge_start;      // the receiver's sample index where this window began
-    float32_t rate_score;    // how sharply the transitions piled up: 1.0 is no structure at all
-
-    // ---- word assembly and alignment -------------------------------------------------------
-    // The last fourteen bits, newest in the low end.  Fourteen and not seven because the group
-    // boundary is one of seven possibilities and each of them has to be scored from the same bits:
-    // a character whose first bit is `a` samples back in time is the window hist[a..a+6], read with
-    // the oldest bit as the low one, which is how SITOR sends - least significant bit first.  A
-    // receiver that shifts seven bits into a register and calls the result a character has picked
-    // one of the seven alignments silently, and gets the bit order wrong besides.
-    uint32_t  hist;
-    int32_t   hist_bits;
-    int32_t   align;           // which of the seven boundaries the characters start on
-    uint32_t  ring[SITOR_RING];  // whole characters, newest at ring[head]
-    int32_t   head;
-    int32_t   have;            // how many characters the ring holds so far
-
-    // the seven possible group boundaries, counted while the clock is being settled
-    uint32_t  trial_valid[7];
-    uint32_t  trial_words[7];
-    // Phasing alternation scored per candidate boundary while the boundary is still being found.
-    // It has to be scored there and not after: the preamble is twenty characters and the alignment
-    // needs forty to decide, so a receiver that starts looking for phasing once it is locked has
-    // missed it on every take this bench can generate, and then prints text it cannot order.
-    uint32_t  trial_run[7][2];     // current run length, forward and reversed
-    uint32_t  trial_best[7][2];    // longest run seen, forward and reversed
-    uint32_t  trial_prev[7];       // previous word at that boundary, all ones if none yet
-    int32_t   trial_bits;
-    int32_t   trial_bitpos;    // which of the seven offsets this bit belongs to
-
-    // ---- lock and confidence ---------------------------------------------------------------
+    // ---- the candidate grid ------------------------------------------------------------------
+    int32_t   per_lo, per_hi;      // integer periods covered, inclusive
+    int32_t   base[SITOR_GRID_SPAN * 2 + 1];   // where each period's candidates start in the arrays
+    int32_t   nper;                // how many periods
+    int32_t   ccur[SITOR_GRID_SPAN * 2 + 1];   // running phase index within each period
+    int32_t   total;               // candidates in use
+    uint16_t  win14[SITOR_MAX_GRID];   // last 14 decisions, newest in bit 0
+    uint16_t  seen[SITOR_MAX_GRID];    // bits fed to this candidate, saturating
+    uint8_t   score[SITOR_MAX_GRID][7];// aged 4-of-7 share per group boundary, 128 = always valid
+    uint8_t   margin[SITOR_MAX_GRID];  // aged |discriminator|: tie-break between equal shares
+    uint8_t   ph_run[SITOR_MAX_GRID];  // current run of alternating SIA/SIB words
+    uint8_t   ph_best[SITOR_MAX_GRID]; // longest such run seen
+    uint8_t   ph_off[SITOR_MAX_GRID];  // group boundary the phasing implies
+    uint8_t   ph_ord[SITOR_MAX_GRID];  // bit order the phasing implies, 1 = reversed
+    uint32_t  ph_next[SITOR_MAX_GRID]; // bit count at which the next alternation is due
+    uint16_t  ph_end_word[SITOR_MAX_GRID];   // word index at which a long phasing run stopped
+    uint8_t   ph_have_end[SITOR_MAX_GRID];
+    // ---- the live receiver --------------------------------------------------------------------
     int32_t   state;
-    int32_t   letters;         // figures shift or letters shift
-    int32_t   reversed;        // the take carries the bits the other way round
-    int32_t   chars_seen;      // characters looked at while deciding the bit order
-    int32_t   slot;            // character slots since the phasing ended, for the block phase
-    uint32_t  prev_code;       // the character before this one in time, for the phasing test
-    float32_t valid_share;     // share of recent words that are 4-of-7: the confidence number
-    uint32_t  win_valid, win_words;
-    uint32_t  phasing_run;
-    int32_t   run_norm, run_rev, best_norm, best_rev;   // SIA/SIB alternation, read both ways
-    int32_t   order_locked;      // the bit order is decided once, not re-decided by later text
-    int32_t   bad_streak;      // characters in a row with neither copy surviving
+    int32_t   period;              // the winning integer period, samples per bit
+    int32_t   phase;               // its phase within the period
+    int32_t   align;               // which of the seven boundaries the characters start on
+    int32_t   reversed;            // the take carries the bits the other way round
+    int32_t   order_locked;        // the order came from phasing, not from the convention
+    int32_t   letters;             // figures shift or letters shift
+    int32_t   live[3];             // the winner and its two neighbouring phases: all of the grid a
+                                   // locked receiver keeps feeding
+    int32_t   live_n;
+    int32_t   win_idx;             // the candidate the receiver is reading characters from
+    int32_t   prev_best;           // the alphabet leader at the last decision: the same answer twice
+    uint32_t  next_decide;         // sample index of the next acquisition decision
+    uint32_t  char_slots;          // character slots since the lock, for the diversity pairing
+    uint32_t  ring_codes[SITOR_ALIGN_RING * 2 + 2];  // characters, for pairing k with k+5
+    int32_t   ring_head;
+    uint8_t   agree[10];           // per residue class, how often the two copies have matched
+    int32_t   block_phase;         // where the block of ten starts, inferred from `agree`
+    int32_t   block_locked;
+    int32_t   rate_out_of_range;
+   // the measured clock needs resampling, which this receiver does not do
 
-    // ---- output ----------------------------------------------------------------------------
-    char      out_char;        // the character the last SitorRx_Sample() produced, when it returned 1
-    uint32_t  chars_out;       // characters printed since init
-    uint32_t  repaired;        // characters whose two copies disagreed and were fixed
-    uint32_t  lost;            // characters with no surviving copy
+    // ---- confidence and the counters the bench grades ------------------------------------------
+    float32_t valid_share;         // the winner's aged 4-of-7 share, 0..1
+    uint32_t  chars_seen;          // characters looked at while deciding the bit order
+    uint32_t  chars_out;           // characters printed since init
+    uint32_t  repaired;            // characters whose two copies disagreed and were fixed
+    uint32_t  lost;                // characters with no surviving copy
+    int32_t   best_norm, best_rev; // longest phasing alternation read each way, for the debug line
+    uint32_t  locks;               // times the receiver has settled, and re-settled after a burst
+    uint32_t  phasing_locks;       // ... of which came from the preamble rather than from the alphabet
+
+    char      out_char;            // the character the last SitorRx_Sample() produced
 } SitorRx;
 
 enum
 {
-    SITOR_SEARCH_RATE = 0,   // measuring the bit period from the transitions
-    SITOR_SEARCH_ALIGN,      // period found; which of the seven boundaries the groups start on
-    SITOR_LOCKED             // characters are being assembled
+    SITOR_SEARCH_RATE = 0,   // the grid is being fed, no candidate has won yet
+    SITOR_SEARCH_ALIGN,      // kept for the bench's debug line: a winner is provisional
+    SITOR_LOCKED             // characters are being assembled from one candidate
 };
 
 // Initialise for a given audio rate and tone pair.  NAVTEX is 100 Bd with a 170 Hz shift and the pair
@@ -171,8 +162,10 @@ void SitorRx_Init(SitorRx* s, float32_t sample_rate_hz, float32_t low_hz, float3
 // One audio sample.  Returns 1 when a character is ready, 0 otherwise.
 int SitorRx_Sample(SitorRx* s, float32_t x);
 
-// The receiver's own opinion of the take, 0..1: the share of the last characters that were valid
-// 4-of-7 words.  It needs no expected text, which is the whole reason a capture hunt can use it.
+// The receiver's own opinion of the take, 0..1: the share of recent words that were valid 4-of-7
+// characters, at the clock and boundary it is using.  It needs no expected text, which is the whole
+// reason a capture hunt can use it - and noise alone caps it near 0.27, because a random 7 bit word
+// is 4-of-7 35 times in 128.
 float32_t SitorRx_Confidence(const SitorRx* s);
 
 // 1 once the clock and the group boundary are settled.

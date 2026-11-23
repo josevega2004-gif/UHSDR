@@ -1746,3 +1746,84 @@ its output directly. It never calls `AudioDriver_SetProcessingChain()` and never
 have shown this. "Measured off the radio, therefore the radio is fine" is the exact shape of mistake
 this bug rewarded, and it is the second time in one week that a host result was quoted about something
 the host does not exercise.
+
+## The streaming SITOR-B receiver, rewritten around what the mode actually gives away
+
+`drivers/digi/sitor_rx.c` is now a different receiver from the one first committed here, and the
+difference is which property of the mode it trusts. The first version *measured* the bit period from
+the autocorrelation of the tone transitions. That is a clever-sounding thing to do, and it is the
+reason the receiver would not lock at 20 dB of noise where the reference modem in `navtex.c` decodes
+without a single character error: transitions are sparse after the 50 Hz bandpass, and their spacing
+carries much less evidence than the alphabet does. The rewrite takes the clock from the objective
+function the mode itself supplies.
+
+What is now used, in the order of strength:
+
+1. **The 4-of-7 share is the synchroniser.** A grid of 1080 candidate clocks - every integer period
+   from 116 to 124 samples at 12 kHz, every phase within each - is fed one bit per its own period,
+   and each candidate keeps an aged 4-of-7 share for each of the seven group boundaries. Random bits
+   are 4-of-7 35/128 = 27% of the time, so noise cannot score well and the number is simultaneously
+   the lock criterion, the confidence figure and the mode test. It holds down to 10 dB, where the
+   transition method produced nothing at all.
+2. **The phasing preamble confirms, and does not acquire.** Twenty alternating SIA/SIB characters are
+   a 14-bit pattern repeated ten times, so a candidate sampling in the middle of a bit can chain six
+   near-matches at Hamming distance two and win everything it is asked. The first version of this let
+   the phasing pick the clock; it locked with total confidence on the wrong candidate and printed
+   garbage at 0.90. The phasing history is now consulted *only* on the candidate the alphabet picked,
+   and it answers the two questions the alphabet provably cannot: the bit order (SIA/SIB reversed are
+   0x78/0x66, which are not the phasing pair, so the order is detectable) and where the blocks of ten
+   start.
+3. **A character is emitted once, on its repeat copy, and only in the second half of a block.** Slot
+   *j* holds the same character as *j−5* only for the five residues after the block start; for the
+   five before it, *j−5* reaches into the previous block and is a different character. Pairing
+   unconditionally therefore mixes two characters and prints its neighbour's - which is what this
+   receiver did, producing `UHDDR` for `UHSDR` at a perfect 0/784 bit error rate. A receiver that
+   joined mid-message does not know where the block began, so the residues where its own two copies
+   agree are used to find out: five consecutive classes hot and five cold.
+
+Five bugs stood between the first version and a passing table, and each is worth naming because none
+of them was exotic:
+
+- `grid_reset()` cleared the counter that ties a candidate index to an absolute sample. After the
+  first unlock, "phase 119" no longer meant "the last sample of a bit", every candidate was fed at an
+  arbitrary point inside the bit, and the receiver printed deterministic garbage at 0.97 confidence.
+- "a character ends here" was tested on a bit counter that only moves once per period, so it stayed
+  true for the other 119 samples and each character was stamped about seventeen times.
+- The phasing chain was cleared by every non-matching bit. Pair matches are seven bits apart, so
+  between them there are six non-matches, and the run could therefore never exceed 1: the strongest
+  evidence in the mode was thrown away by the code that was supposed to count it.
+- The run length demanded a stride of fourteen bits when word boundaries are seven apart, so it
+  broke on every second match even before the above.
+- The shift state was zeroed, which is *figures*, so the whole message was looked up in the wrong half
+  of the alphabet.
+
+### What it measures, and what it costs
+
+`make -C support/digi sitor-stream` grades the receiver on two numbers, because character error rate
+alone conflates them: **wrong** counts characters printed that are not what was sent (a defect), and
+**CER** counts those plus the first ~14 characters it cannot print because it was still acquiring
+(the price of streaming).
+
+| | result |
+|---|---|
+| clean, 20 dB, 10 dB, 10 dB + QSB, ±50 Hz tuning | **0 wrong characters**, conf 1.00, clock 10.0 ms |
+| reversed bit order | 0 wrong, order detected from the phasing |
+| noise only, nothing transmitted | stays unlocked, conf 0.00 - it refuses rather than prints |
+| burst over one copy | 0 wrong; the repeat carries it |
+| bit rate 1.5% off | prints up to 10 / 6 wrong characters, pinned in CI as a ceiling on a known defect |
+| bit rate 3% off | refuses: the integer grid cannot follow it |
+
+For the radio: it compiles for ARM and is in `files.mak`, and because nothing instantiates it the
+linker drops it - the shipping image's `.bss` is unchanged at 93,860 bytes and its symbols do not
+appear in the map at all. A NAVTEX mode would therefore cost **32,316 bytes of RAM** for one instance
+(the grid's registers, aged scores and phasing history), which is the same order as the 128-point
+convolution geometry and fits in the headroom the stock build leaves. It must run on the decimated
+audio path: at 48 kHz the same percentage span would need 15,840 candidates, so the grid narrows
+itself to ±0.2% and says so in the source, which is another way of saying the mode belongs at 12 kHz.
+
+Not yet done, in the order I would do them: fractional clock recovery or resampling so a rate error
+between 1 and 3% is followed instead of refused (that is what turns the two pinned ceilings into
+zeros); faster acquisition, since the head loss is a lock-latency cost and not a decode cost; and
+then the actual integration - a mode in `demod_modes[]`, the decoder wired to the block seam, and
+some way to show text on a 160x100 screen, which is the part of "usable in the radio" that is not a
+DSP problem.
