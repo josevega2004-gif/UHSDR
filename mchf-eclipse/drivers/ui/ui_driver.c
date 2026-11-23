@@ -7961,19 +7961,32 @@ void UiDriver_TaskHandler_MainTasks()
 					// "C 15780/15780 d0 n0 s128" is 25, so the last field was being cut off mid-number -
 					// and a field that vanishes under truncation cannot be told from a field that reads
 					// zero. The size is known from which image is flashed.
+					// On the P line, i and o are the loudest sample seen since boot on each side of
+					// the filter, in thousandths of full scale: i812 o0 is audio a quarter of full
+					// scale going in and nothing coming out, which is what the block counts cannot
+					// show, because a queue of silence moves exactly as fast as a queue of sound.
+					// The two readings share one line and alternate, roughly two seconds each. They are
+					// not both on screen: this layout puts LOADANDDEBUG_Y at 95 and the encoders finish at
+					// 131, so a fifth line is at 140 and a sixth at 149 - and with eight pixel text on a
+					// 160 pixel screen the sixth is at the very bottom edge, where whatever else is drawn
+					// there wins. A number nobody can read is worth nothing, and one nobody can read is
+					// exactly what the peaks were.
 					{
-						snprintf(str,20,"C %u/%u d%u n%u",
-								(unsigned int)conv_stat_blocks_in, (unsigned int)conv_stat_blocks_out,
-								(unsigned int)conv_stat_dropped, (unsigned int)conv_stat_nosetup);
+						static uint8_t conv_line_phase;
+						conv_line_phase++;
+						if (conv_line_phase >= 32) conv_line_phase = 0;
+						if (conv_line_phase < 16)
+						{
+							snprintf(str,20,"C %u/%u d%u n%u",
+									(unsigned int)conv_stat_blocks_in, (unsigned int)conv_stat_blocks_out,
+									(unsigned int)conv_stat_dropped, (unsigned int)conv_stat_nosetup);
+						}
+						else
+						{
+							snprintf(str,20,"P i%u o%u",
+									(unsigned int)conv_stat_peak_in, (unsigned int)conv_stat_peak_out);
+						}
 						UiLcdHy28_PrintText(0,(uint16_t)(ts.Layout->LOADANDDEBUG_Y + 9 * (ENC_MAX + 1)),str,White,Black,0);
-						// What those blocks contain, which is the question in==out cannot answer: a filter
-						// that hands back silence moves a queue of silence just as fast and drops nothing.
-						// i and o are the loudest sample seen since boot in thousandths, so i812 means
-						// audio a quarter of full scale is reaching the filter and o0 means none of it is
-						// coming out.
-						snprintf(str,20,"P i%u o%u",
-								(unsigned int)conv_stat_peak_in, (unsigned int)conv_stat_peak_out);
-						UiLcdHy28_PrintText(0,(uint16_t)(ts.Layout->LOADANDDEBUG_Y + 9 * (ENC_MAX + 2)),str,White,Black,0);
 					}
 #endif
 				}
