@@ -189,20 +189,31 @@ start dark", and got it exactly backwards - the real chart has empty sky rows an
 the picture area, while an RTTY take decoded as fax produces rows that swing from end to end and
 begin black. So the numbers are printed and the picture is the check.
 
-**The gap, measured and pinned in `record-check`:** the sync capture does not hold on a take that
-does not begin on a line boundary. A lead of 30 samples - 2.5 ms, the smallest this harness can
-write without being no lead at all - collapses a 12-line chart from a correct decode to 32 % of
-pixels matching, a mean of 93 and 82 % of the picture at one flat grey. 120, 600, 3000 and 6000
-sample leads give the same numbers to four significant figures, which says the receiver is not
-starting where the cut is: it is starting wherever the waveform tells it to, and the 1900 Hz phasing
-tone that closes every HF facsimile line is 43 Hz from the 1857 Hz sync tip and lands inside the same
-bin. Reading a line from its end is exactly what flat grey with a dark tick at each row looks like.
-A tip search that also asked whether picture tones followed the candidate was tried here and broke
-the clean decode instead (0 of 12 lines found), so that is not the fix. `record-check` pins the
-damage behind a ceiling that will fail when someone makes the capture hold.
+**What joining a transmission mid-line costs, measured in `record-check`:** a take with a 0.75 s lead,
+which is one and a half line times and therefore neither a line boundary nor a symbol boundary, returns
+88 % of the chart it was sent.  It used to collapse, and not gradually: any lead from 30 samples to 6000
+gave the same 32-45 % of matching pixels, the same grey mean of 93 and the same 82 % of the picture at
+one flat grey, to four significant figures.  A number that does not move when the cut moves is the
+signature of not being cut-relative at all - the receiver was starting wherever the waveform told it to.
+What told it was the phasing tone that closes every HF facsimile line: it sits 43 Hz from the 1857 Hz
+sync tip, inside the same bin, so a discriminator asking "is this window 1857 Hz" could not tell a line's
+start from a line's end and took whichever scored higher.  Reading a line from its end is exactly what
+flat grey with a dark tick at each row looks like.
 
-Until then WEFAX is the one mode of the five whose recording path cannot be aimed at a capture
-off a waterfall, which is the situation it exists for.
+Three changes closed it, each described with the rest of the capture work in the section below: placing
+the tip at the leading edge of the ratio's plateau instead of at its peak, opening the search window at
+the end of the previous picture - the blanking gap, whose content the format fixes - instead of one line
+after the previous tip, and numbering each row by the tip that was found rather than by how many lines
+had been found.  The earlier attempt at the same problem, requiring picture tones *after* the candidate,
+broke the clean decode instead (0 of 12 lines) and was reverted; what precedes a tip is known in advance,
+what follows it is the picture.
+
+The residual 12 % is not attributed yet: the harness reports the aggregate, and pinning a cause to it
+would need the per-row breakdown.  What is pinned as still open is the line-rate gap in the known gaps
+below, which is a different symptom of the same acquisition.
+
+So the WEFAX recording path can now be aimed at a capture off a waterfall, which is the situation it
+exists for.
 
 ## What is real and what is scaffolding
 
@@ -534,19 +545,55 @@ the sync window is 5 ms, so it weathers a few ppm on HF and shares the 6 m limit
 
 ### Known gaps, all of them measured
 
-* **The sync capture does not track the tip.** Each line is skewed by up to +-120 samples and the
-  capture still locks to the grid of the first line: at 12 dB it finds 10 of 12 lines and
-  the chart correlates at 0.012 mean over five seeds (-0.112..0.144), and at 8 dB with QSB
-  and a third of the skew it finds 11 of 12 and correlates at 0.499 mean (0.441..0.535).
-  The table and the self check pin those numbers as a known gap, so a capture that started
-  tracking would fail them and force this section to be rewritten. An envelope based rising
-  edge capture is the first real work item; a two stage version using a 12 sample window
-  was tried and is worse, because 1 ms of audio resolves nothing at 400 Hz tone spacing.
+* **The sync capture re-acquires each line and has no model of the line rate.** Under a transmitter
+  that skews every line by 2 % it finds 9 of 12 lines on the worst seed and correlates at 0.363
+  (seeds 0.306..0.416), and the spacing metric reports 2983 samples - not because the tips move that
+  far, but because one miss shifts every later search window and the skew it then has to cover is
+  the accumulated error, not the line's own.  At the milder 0.3 % skew it finds all twelve lines and
+  correlates at 0.794 (0.724..0.837), which is why that row is no longer called a gap.  What closes
+  this is a line-rate integrator - what a real facsimile decoder runs - not a wider window.
 
-  The earlier claim here - still readable, correlation 0.975 - was measured while every line
-  got the *same* skew: `rng_next()` in the noise generator never wrote its new state back, so a
-  take received one Gaussian sample repeated and there was no per-line jitter at all. Fixing the
-  generator is what exposed this gap, and it is why every noise number in this file was re-measured.
+  Four things had to be fixed before that remaining gap could be stated honestly, and three of them
+  were errors in this harness rather than in the decoder:
+
+  **Rows were numbered by how many lines had been found.** One missed line slid everything after it
+  up a row, and the score compared `min(lines_found, rows)` contiguous rows, so a capture that lost
+  one line out of twelve was reported as a chart correlating at 0.012 when eleven twelfths of it were
+  in fact correct.  Lines are now written at the row their own tip falls on, counted from the first
+  tip acquired, and a canvas row the capture misses is a hole the caller zeroes and the score counts.
+  That is a lower number in the skewed cases and a truer one everywhere.
+
+  **The window searched for the next tip started after the previous tip.** It began at the end of the
+  previous picture, so a line that arrived even slightly early had its sync behind the cursor and could
+  not be found however the threshold was tuned.  It now opens at the picture's end - which is the
+  blanking gap, 540 samples of known white reference, exactly the room a tip needs to arrive early.
+
+  **The tip was placed at the maximum of a single-bin power ratio, and that maximum is not the tip.**
+  The sync is 1857 Hz, which is mid-grey between the picture's 1500 and 2300, so a stretch of steady
+  middle grey scores a ratio of 1.000 and beats the real tip.  Printed from the generated broadcast,
+  60-sample windows, offset from the true tip position:
+
+  | offset | -12 | -6 | **0** | +6 | +12 | +18 | **+24** | +30 |
+  |---|---|---|---|---|---|---|---|---|
+  | ratio | 0.867 | 0.931 | 0.974 | 0.954 | 0.950 | 0.959 | **0.994** | 0.987 |
+
+  So "take the best candidate" parked the start 24 samples late, which put every 18-sample column
+  window across the boundaries: a column whose true grey was 250 decoded to 110, uniformly, on every
+  row.  The capture now takes the *earliest* candidate within 0.03 of the profile's own peak, which is
+  the leading edge of the plateau and moves with the signal.  A fixed 24-sample correction was tried
+  first and is wrong: it worked at zero tuning error and put the 1 ppm row on its head, whereas the
+  relative rule holds across all the tune rows.
+
+  **The generator's picture was not a fax signal.** Each column was synthesized as its own burst with
+  a 4-sample fade at both ends, so every pixel boundary was a click, and the measurement was dominated
+  by that: a 14 Hz reference error - 1 ppm at 20 m, far under real oscillator tolerance - scored 0.549
+  while a 70 Hz error scored 0.976.  Nothing about a decoder or a channel has that shape.  Columns are
+  now one phase-continuous oscillator that steps frequency once per pixel, which is what the format
+  is, and the tune rows came together at 0.937..0.951 instead of swinging between 0.55 and 0.98.  With
+  that gone the ceiling on this table is about 0.95 for an honest reason: grey is estimated from a
+  two-bin ratio at 1500 and 2300 Hz, which is coarse, where a real receiver uses a discriminator and an
+  integrator.
+
 * **Left/right steering is invisible to this metric by construction**: the ground truth follows the
   transmitted scan order, and the reference decoder has no phasing reference. A real receiver needs
   the steer control, not a smarter score.

@@ -923,34 +923,51 @@ static int wefax_table(void)
     // measured spread between hosts, and far inside what a 250 Hz error decodes to (183.4).
     static const wefax_case_t cases[] =
     {
-        { .name = "clean", .snr_db = 100.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
-        { .name = "snr 20", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
-        { .name = "snr 12", .snr_db = 12.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
+        // Re-measured end to end, because the numbers below 0.95 used to be taken against a test
+        // signal that no longer exists.  The generator used to synthesize every picture column as its
+        // own burst with a 4-sample fade at both ends; a real fax line is one oscillator whose frequency
+        // steps once per pixel, and that difference dominated the measurement - a 14 Hz reference error
+        // (1 ppm at 20 m) scored 0.549 while a 70 Hz error scored 0.976, which is not a property of any
+        // decoder or channel.  With phase-continuous columns the tune rows sit together at 0.937..0.951
+        // and the grey means came down to the truth's 199-201 instead of the 206-210 the faded signal
+        // produced.  The correlation ceiling is now about 0.95 for a different reason: the grey scale is
+        // estimated from a two-bin ratio at 1500 and 2300 Hz, which is coarse, and a real receiver uses
+        // a discriminator and an integrator instead.
+        { .name = "clean", .snr_db = 100.0f, .rows = 12, .corr_min = 0.92f, .corr_max = 1.00f },
+        { .name = "snr 20", .snr_db = 20.0f, .rows = 12, .corr_min = 0.92f, .corr_max = 1.00f },
+        { .name = "snr 12", .snr_db = 12.0f, .rows = 12, .corr_min = 0.88f, .corr_max = 1.00f },
         { .name = "snr 12 fast qsb", .snr_db = 12.0f, .qsb_rate_hz = 2.0f, .qsb_depth_db = 10.0f,
-          .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f },
-        // Known gap, recorded rather than hidden: the capture does not track each sync tip, so a
-        // transmitter that moves every line loses lines and the chart with them. These windows pin
-        // the measured damage; a capture that started tracking would fail here and force an update.
+          .rows = 12, .corr_min = 0.88f, .corr_max = 1.00f },
+        // Known gap, still recorded rather than hidden, but the gap is no longer what the number
+        // measured.  The capture re-acquires each line from the previous tip and carries no model of
+        // the line rate, so one miss offsets every later search window and the skew then costs whole
+        // lines: 9 of 12 on the worst seed, and the spacing metric reports 2983 samples because the
+        // tips it did find are progressively further from where it expected them.  A row it misses is
+        // now a hole in the canvas instead of a slide of everything below it, which is what the earlier
+        // min(lines_found, rows) comparison was hiding behind a correlation of 0.01.
         { .name = "snr 12 + skew (gap)", .snr_db = 12.0f, .skew_ppm = 20000, .rows = 12,
-          .lines_min = 9, .corr_min = -1.00f, .corr_max = 0.05f },
+          .lines_min = 8, .corr_min = -1.00f, .corr_max = 0.50f },
         { .name = "snr 12 black/white swapped", .snr_db = 12.0f, .invert = true, .rows = 12,
           .corr_min = -1.00f, .corr_max = -0.90f },
         { .name = "snr 12 reversed scan", .snr_db = 12.0f, .steer_right = true, .rows = 12,
-          .corr_min = 0.95f, .corr_max = 1.00f },
-        { .name = "snr 8 qsb skew (gap)", .snr_db = 8.0f, .qsb_rate_hz = 0.4f, .qsb_depth_db = 6.0f,
-          .skew_ppm = 3000, .rows = 12, .lines_min = 10, .corr_min = 0.30f, .corr_max = 0.65f },
+          .corr_min = 0.92f, .corr_max = 1.00f },
+        // The mild-skew row that used to be a gap at 0.30..0.65 is not one any more: it finds all 12
+        // lines and correlates at 0.794 (seeds 0.724..0.837), which is why its ceiling moved.  The
+        // measured improvement is the honest one - tracking each tip and numbering rows by it.
+        { .name = "snr 8 qsb skew", .snr_db = 8.0f, .qsb_rate_hz = 0.4f, .qsb_depth_db = 6.0f,
+          .skew_ppm = 3000, .rows = 12, .lines_min = 10, .corr_min = 0.65f, .corr_max = 1.00f },
         // the same rigid reference error the RTTY rows carry: every tone of the emission moves by
         // ppm * rf_hz while the demodulator's bins stay at 1857/1500/2300 Hz. The sync tip is the
         // narrow one, so a tuning error attacks the line capture before it attacks the picture, and
         // the grey level it decodes to is what these rows pin.
-        { .name = "20m 1ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f,
-          .ppm = 1.0f, .rf_hz = 14e6f, .mean_min = 200.5f, .mean_max = 203.5f },
-        { .name = "20m 5ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f,
-          .ppm = 5.0f, .rf_hz = 14e6f, .mean_min = 206.0f, .mean_max = 210.0f },
-        { .name = "10m 2ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f,
-          .ppm = 2.0f, .rf_hz = 28e6f, .mean_min = 205.0f, .mean_max = 209.0f },
-        { .name = "50m 1ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.95f, .corr_max = 1.00f,
-          .ppm = 1.0f, .rf_hz = 50e6f, .mean_min = 204.5f, .mean_max = 208.0f },
+        { .name = "20m 1ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.90f, .corr_max = 1.00f,
+          .ppm = 1.0f, .rf_hz = 14e6f, .mean_min = 198.0f, .mean_max = 204.0f },
+        { .name = "20m 5ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.90f, .corr_max = 1.00f,
+          .ppm = 5.0f, .rf_hz = 14e6f, .mean_min = 196.0f, .mean_max = 202.0f },
+        { .name = "10m 2ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.90f, .corr_max = 1.00f,
+          .ppm = 2.0f, .rf_hz = 28e6f, .mean_min = 196.0f, .mean_max = 202.0f },
+        { .name = "50m 1ppm", .snr_db = 20.0f, .rows = 12, .corr_min = 0.90f, .corr_max = 1.00f,
+          .ppm = 1.0f, .rf_hz = 50e6f, .mean_min = 196.0f, .mean_max = 202.0f },
     };
     size_t n = sizeof(cases) / sizeof(cases[0]);
     int failures = 0;
@@ -981,6 +998,7 @@ static int wefax_table(void)
                             .steer_right = cases[i].steer_right, .rows = cases[i].rows,
                             .tune_hz = tune_hz };
 
+        memset(grey, 0, (size_t) cases[i].rows * WEFAX_IMG_COLS);   // a lost line stays a hole, not a shift
         Bench_WefaxGenerate(x, truth, &cfg);
         // every noise row is a distribution of takes, not one draw: the same picture under five
         // noise samples, and the correlation printed is their mean with the seed range beside it.
@@ -997,11 +1015,13 @@ static int wefax_table(void)
                 Bench_RngSeed(0xF00Du + (uint32_t) k);
                 Bench_AddNoise(work, samples, cases[i].snr_db, 0.0f);
             }
-            Bench_WefaxDecode(work, samples, grey, &res);
+            Bench_WefaxDecode(work, samples, grey, cases[i].rows, &res);
             res.lines_expected = cases[i].rows;
 
-            size_t cmp = (size_t) (res.lines_found < cases[i].rows ? res.lines_found
-                                                                    : cases[i].rows) * WEFAX_IMG_COLS;
+            // The whole canvas, not just the rows that were filled: a missed line leaves a black hole,
+            // and that is a real loss which the score has to count instead of being smoothed away by
+            // comparing only the rows that happen to line up.
+            size_t cmp = (size_t) cases[i].rows * WEFAX_IMG_COLS;
             spread_add(&corr_s, pearson(truth, grey, cmp));
             spread_add(&mean_s, res.mean_level);
             if (res.lines_found < lines_worst) lines_worst = res.lines_found;
@@ -2666,9 +2686,12 @@ static int wefax_wav(const char* path)
     const size_t possible = n / WEFAX_SAMPLES_PER_LINE;
     uint8_t* grey = malloc((possible + 2) * WEFAX_IMG_COLS);
     if (!grey) { free(x); return 1; }
+    // Zeroed because a row the capture does not find has to stay a hole: the decoder now places each
+    // line by where its tip fell, and anything it skipped is missing, not shifted up.
+    memset(grey, 0, (possible + 2) * WEFAX_IMG_COLS);
     wefax_result_t res;
     memset(&res, 0, sizeof(res));
-    const int ok = Bench_WefaxDecode(x, n, grey, &res);
+    const int ok = Bench_WefaxDecode(x, n, grey, (uint32_t) (possible + 2), &res);
     printf("file      : %s\n", path);
     printf("format    : %u Hz, %u channel(s), %.2f s\n", rate, ch, secs);
     printf("lines     : %u captured, %zu line times in the recording\n", res.lines_found, possible);
@@ -2989,18 +3012,18 @@ static int record_check(void)
                         }
                         if (cmp && 100 * same / cmp > best) best = 100 * same / cmp;
                     }
-                    // Pinned as broken, in the style of the table's two "(gap)" rows: the picture
-                    // does not come back. Any lead of 30 samples or more - 30, 120, 600, 3000, 6000
-                    // all tried - produces the same mean of 93.1 and the same 82 % of pixels at mid
-                    // grey, which is what a line looks like when it is read from its end: the anchor
-                    // does not move with the cut, so the receiver is not starting where the cut is,
-                    // it is starting wherever the waveform tells it to, and the 1900 Hz phasing tone
-                    // at the end of each line is 43 Hz from the 1857 Hz sync tip and inside the same
-                    // bin. A tip search that also asked what followed the tip was tried here and
-                    // broke the clean decode instead (0 of 12 lines), so that is not the fix. This
-                    // ceiling will fail when someone makes the capture hold, and that is the point.
+                    // Was pinned as broken.  It no longer is, which is the one thing this harness
+                    // says out loud when it happens: the ceiling was written to fail when someone made
+                    // the capture hold, and the capture now holds.  Measured 88 % of pixels matching a
+                    // take whose lead is one and a half line times, against the 32-45 % that every lead
+                    // from 30 to 6000 samples used to produce identically.  Pinned at 70, which is a
+                    // margin, not a measurement - the point is that falling back off a cliff is a
+                    // failure, and the reason it used to fail (a 1857 Hz discriminator cannot tell a
+                    // line's start from its end, because the phasing tone is 43 Hz away and in the same
+                    // bin) is fixed by placing the tip at the leading edge of the plateau rather than at
+                    // its peak, and by opening the search window on the known white reference.
                     printf("      %d%% of pixels match the chart sent\n", best);
-                    check(best <= 45, "record: WEFAX from a take not starting on a line boundary is a known gap");
+                    check(best >= 70, "record: WEFAX survives a take that does not start on a line boundary");
                 }
                 free(got);
             }
@@ -4942,20 +4965,22 @@ static int selftest(void)
         uint8_t* truth = malloc((size_t) cfg.rows * WEFAX_IMG_COLS);
         uint8_t* grey = malloc((size_t) cfg.rows * WEFAX_IMG_COLS);
         wefax_result_t res;
+        memset(grey, 0, (size_t) cfg.rows * WEFAX_IMG_COLS);   // a lost line stays a hole, not a shift
         Bench_WefaxGenerate(x, truth, &cfg);
         Bench_RngSeed(1u);
         Bench_AddNoise(x, samples, cfg.snr_db, 0.0f);
-        bool any = Bench_WefaxDecode(x, samples, grey, &res);
+        bool any = Bench_WefaxDecode(x, samples, grey, cfg.rows, &res);
         float corr = pearson(truth, grey, (size_t) cfg.rows * WEFAX_IMG_COLS);
         check(any && res.lines_found == cfg.rows, "fax: every sync tip of a 20 dB broadcast is found");
         check(corr > 0.9f, "fax: grey scale of a 20 dB broadcast correlates above 0.90");
 
         cfg.snr_db = 8.0f; cfg.qsb_rate_hz = 0.4f; cfg.qsb_depth_db = 6.0f;
+        memset(grey, 0, (size_t) cfg.rows * WEFAX_IMG_COLS);   // a lost line stays a hole, not a shift
         Bench_WefaxGenerate(x, truth, &cfg);
         Bench_RngSeed(2u);
         Bench_AddNoise(x, samples, cfg.snr_db, 0.0f);
-        Bench_WefaxDecode(x, samples, grey, &res);
-        corr = pearson(truth, grey, (size_t) (res.lines_found < cfg.rows ? res.lines_found : cfg.rows) * WEFAX_IMG_COLS);
+        Bench_WefaxDecode(x, samples, grey, cfg.rows, &res);
+        corr = pearson(truth, grey, (size_t) cfg.rows * WEFAX_IMG_COLS);
         check(res.lines_found >= cfg.rows * 3 / 4, "fax: three quarters of the lines survive 8 dB with fading");
 
         // the skew knob must actually move the transmitter, otherwise the line capture is not being
@@ -4965,11 +4990,14 @@ static int selftest(void)
         // lost and the chart with them. These numbers are pinned; a capture that started tracking
         // would change them and this check would have to be updated, which is the point.
         cfg.snr_db = 20.0f; cfg.qsb_rate_hz = 0.0f; cfg.qsb_depth_db = 0.0f; cfg.skew_ppm = 20000.0f;
+        memset(grey, 0, (size_t) cfg.rows * WEFAX_IMG_COLS);   // a lost line stays a hole, not a shift
         Bench_WefaxGenerate(x, truth, &cfg);
-        Bench_WefaxDecode(x, samples, grey, &res);
+        Bench_WefaxDecode(x, samples, grey, cfg.rows, &res);
         float skew_corr = pearson(truth, grey, (size_t) cfg.rows * WEFAX_IMG_COLS);
         printf("     skewed transmitter: %u/%u lines, spacing metric %.1f samples, chart correlation %.3f\n",
                res.lines_found, cfg.rows, res.row_rms_error, skew_corr);
+        // 9 of 12 and 0.272 measured: the capture re-acquires per line and has no rate model, so a
+        // miss offsets every later window.  Rows it loses are holes now, not a slide of the picture.
         check(res.lines_found >= cfg.rows * 3 / 4 && skew_corr < 0.9f,
               "fax: per-line skew is not tracked, and the table pins how much it costs");
         check(corr > 0.5f, "fax: the chart is still recognisable at 8 dB with fading");

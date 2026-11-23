@@ -61,12 +61,20 @@ void Bench_WefaxGenerate(float32_t* out, uint8_t* truth, const wefax_cfg_t* cfg)
 typedef struct
 {
     uint32_t lines_expected;
-    uint32_t lines_found;
+    uint32_t lines_found;     // rows actually placed and decoded
+    uint32_t lines_missed;    // nominal line positions where no sync tip was found
     float    row_rms_error;   // pixel columns
     float    grey_corr;       // Pearson correlation against the ground truth
     float    mean_level;      // decoded grey mean, 0..255
 } wefax_result_t;
 
-bool Bench_WefaxDecode(const float32_t* x, size_t n, uint8_t* grey, wefax_result_t* res);
+// grey is a rows-by-COLS canvas that the CALLER has zeroed, and the decoder writes each line at the
+// row its sync tip falls on, counted from the first tip it acquired.  It used to write the lines it
+// found in order from row 0, which meant that losing one line slid the rest of the picture up and made
+// every later row wrong: the reported correlation then measured the numbering, not the capture.
+// grey_rows bounds the canvas, so a tip found after the broadcast ended is dropped rather than
+// written past the end.
+bool Bench_WefaxDecode(const float32_t* x, size_t n, uint8_t* grey, uint32_t grey_rows,
+                       wefax_result_t* res);
 
 #endif
