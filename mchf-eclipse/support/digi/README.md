@@ -1708,3 +1708,41 @@ run on the pinned take and on the fixture that take is quoted from (`capture-che
 `make -C support/digi wefax` and `floors-2k5` are targets of their own and
 are not among the twenty. `make digi-bench` is also available on its own; it is
 one of the twenty, not the whole job.
+
+### The hole that made the convolution images silent, and what the probe could not see
+
+`USE_CONVOLUTION` used to compile the RX interpolation setup out entirely:
+
+```c
+#ifdef USE_CONVOLUTION
+// TODO: insert interpolation filter settings for convolution filter HERE
+#else
+    for (int chan = 0; chan < NUM_AUDIO_CHANNELS; chan++) { arm_fir_interpolate_init_f32(...); }
+#endif
+```
+
+Whenever the feature was built in, `INTERPOLATE_RX[]` was never initialized - for any mode. The runtime
+guard `if (INTERPOLATE_RX[0].phaseLength > 0)` then skipped the stage, and the convolution filter
+replaces the *sideband-selecting* FIR, not the output interpolation: audio filtered at the decimated
+rate still has to be raised back to the DAC rate here. It was not, so the buffer the DAC reads was only
+partly written and USB/LSB/CW were silent.
+
+The symptom set came from that one cause with no filter fault in it. FM works because its path does not
+use this stage. The waterfall and the S-meter work because they are computed before demodulation. The
+counters reported `in == out`, nothing dropped and real level on both sides of the filter, because all
+of it was true - the samples just never reached the speaker.
+
+`static` state is also why the reports disagreed with each other. `phaseLength` survives a mode change,
+so a radio that had been sitting on a path that did initialize it could give SSB working audio until the
+next reboot, while one flashed and powered up cold could not. Geometry looked like the variable because
+each geometry was tested in its own power cycle, and the throughput, queue, coefficient-count and
+transform-instance theories were all built on a difference that was really cold `.bss`.
+
+The setup now runs unconditionally. Images `fwv-2.12.2c128f` and `fwv-2.12.2c256f` carry the fix.
+
+What this says about the probe is worth keeping too: `convolution_probe` drives the filter and measures
+its output directly. It never calls `AudioDriver_SetProcessingChain()` and never touches
+`INTERPOLATE_RX`, so no figure it prints - passband, skirt, image rejection, cost per sample - could
+have shown this. "Measured off the radio, therefore the radio is fine" is the exact shape of mistake
+this bug rewarded, and it is the second time in one week that a host result was quoted about something
+the host does not exercise.
