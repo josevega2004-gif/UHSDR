@@ -7955,13 +7955,25 @@ void UiDriver_TaskHandler_MainTasks()
 					// chain was never sized.  A radio with no audio and in==out==0 and nosetup growing
 					// is a setup that never ran; in climbing while out stays at 0 is a worker that is
 					// not running; out climbing while the operator hears nothing is downstream of all
-					// of this.  sz is cbs.size, the block the masks were designed against.
+					// of this.
+					//
+					// The block size is deliberately not printed: str is 20 bytes and
+					// "C 15780/15780 d0 n0 s128" is 25, so the last field was being cut off mid-number -
+					// and a field that vanishes under truncation cannot be told from a field that reads
+					// zero. The size is known from which image is flashed.
 					{
-						snprintf(str,20,"C %u/%u d%u n%u s%u",
+						snprintf(str,20,"C %u/%u d%u n%u",
 								(unsigned int)conv_stat_blocks_in, (unsigned int)conv_stat_blocks_out,
-								(unsigned int)conv_stat_dropped, (unsigned int)conv_stat_nosetup,
-								(unsigned int)cbs.size);
+								(unsigned int)conv_stat_dropped, (unsigned int)conv_stat_nosetup);
 						UiLcdHy28_PrintText(0,(uint16_t)(ts.Layout->LOADANDDEBUG_Y + 9 * (ENC_MAX + 1)),str,White,Black,0);
+						// What those blocks contain, which is the question in==out cannot answer: a filter
+						// that hands back silence moves a queue of silence just as fast and drops nothing.
+						// i and o are the loudest sample seen since boot in thousandths, so i812 means
+						// audio a quarter of full scale is reaching the filter and o0 means none of it is
+						// coming out.
+						snprintf(str,20,"P i%u o%u",
+								(unsigned int)conv_stat_peak_in, (unsigned int)conv_stat_peak_out);
+						UiLcdHy28_PrintText(0,(uint16_t)(ts.Layout->LOADANDDEBUG_Y + 9 * (ENC_MAX + 2)),str,White,Black,0);
 					}
 #endif
 				}

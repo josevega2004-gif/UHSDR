@@ -196,6 +196,8 @@ volatile uint32_t conv_stat_blocks_in;      // whole blocks that reached the wor
 volatile uint32_t conv_stat_blocks_out;     // finished blocks the interrupt took back
 volatile uint32_t conv_stat_dropped;        // blocks thrown away because nothing was free
 volatile uint32_t conv_stat_nosetup;        // slices refused because cbs.size was still 0
+volatile uint32_t conv_stat_peak_in;        // loudest |sample| handed in since boot, times 1000
+volatile uint32_t conv_stat_peak_out;       // loudest |sample| handed back, times 1000
 
 static Sample_Buffer conv_blocks[SAMPLE_BUFFER_NUM];
 // The worker writes one whole block into a buffer it is handed back and forth, so the block type has
@@ -295,10 +297,24 @@ uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, ui
         uint16_t room = cbs.size - conv_stage_count;
         uint16_t taken = count - done < room ? count - done : room;
 
+        float32_t m = 0.0f;
         for (uint16_t k = 0; k < taken; k++)
         {
-            conv_stage->samples[conv_stage_count + k].real = i[done + k];
-            conv_stage->samples[conv_stage_count + k].imag = q[done + k];
+            const float32_t iv = i[done + k];
+            const float32_t qv = q[done + k];
+            conv_stage->samples[conv_stage_count + k].real = iv;
+            conv_stage->samples[conv_stage_count + k].imag = qv;
+            const float32_t ai = iv < 0.0f ? -iv : iv;
+            const float32_t aq = qv < 0.0f ? -qv : qv;
+            if (ai > m) m = ai;
+            if (aq > m) m = aq;
+        }
+        // What the blocks *contain* is the one thing the counters could not see: a filter can hand
+        // back every block it was given, on time, none dropped, and be silent, because a queue of
+        // zeros moves exactly as fast as a queue of sound.
+        {
+            const uint32_t pk = (uint32_t)(m * 1000.0f);
+            if (pk > conv_stat_peak_in) conv_stat_peak_in = pk;
         }
         conv_stage_count += taken;
         done += taken;
@@ -352,10 +368,21 @@ uint16_t AudioDriver_ConvolutionOutput(float32_t* i, float32_t* q, uint16_t coun
         uint16_t room = cbs.size - conv_play_count;
         uint16_t given = count - done < room ? count - done : room;
 
+        float32_t m = 0.0f;
         for (uint16_t k = 0; k < given; k++)
         {
-            i[done + k] = conv_play->samples[conv_play_count + k].real;
-            q[done + k] = conv_play->samples[conv_play_count + k].imag;
+            const float32_t rv = conv_play->samples[conv_play_count + k].real;
+            const float32_t imv = conv_play->samples[conv_play_count + k].imag;
+            i[done + k] = rv;
+            q[done + k] = imv;
+            const float32_t ar = rv < 0.0f ? -rv : rv;
+            const float32_t aa = imv < 0.0f ? -imv : imv;
+            if (ar > m) m = ar;
+            if (aa > m) m = aa;
+        }
+        {
+            const uint32_t pk = (uint32_t)(m * 1000.0f);
+            if (pk > conv_stat_peak_out) conv_stat_peak_out = pk;
         }
         conv_play_count += given;
         done += given;

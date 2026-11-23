@@ -87,6 +87,8 @@ extern volatile uint32_t conv_stat_blocks_in;
 extern volatile uint32_t conv_stat_blocks_out;
 extern volatile uint32_t conv_stat_dropped;
 extern volatile uint32_t conv_stat_nosetup;
+extern volatile uint32_t conv_stat_peak_in;      // loudest |sample| in, x1000, since boot
+extern volatile uint32_t conv_stat_peak_out;     // loudest |sample| back, x1000, since boot
 
 void AudioDriver_CalcConvolutionFilterCoeffs (int N, float32_t f_low, float32_t f_high, float32_t samplerate, int wintype, int rtype, float32_t scale);
 void AudioDriver_SetConvolutionFilter (int nc, float32_t f_low, float32_t f_high, float32_t samplerate, int wintype, float32_t gain);
