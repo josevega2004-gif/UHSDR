@@ -1250,7 +1250,16 @@ void AudioDriver_SetProcessingChain(uint8_t dmod_mode, bool reset_dsp_nr)
 
 
 
-#if USE_OBSOLETE_NOISEBLANKER
+// NOTE the two tests for this switch did not agree: the definition below was guarded with
+// `#if USE_OBSOLETE_NOISEBLANKER` and the call site in RxProcessor with `#ifdef` of the same name, so
+// `#define USE_OBSOLETE_NOISEBLANKER 0` compiled the call without the function and failed to link,
+// while any other value compiled both.  Both are `#ifdef` now.  This is inherited, not local: the same
+// mismatch is in M0NKA's current mcHF (audio_driver.c, `#if` at the function, `#ifdef` at the call).
+// The branch has never been enabled in either tree, and it is the *old* blanker - the one that hard
+// mutes to zero for the length of the impulse, which is why the DSP path in audio_nr.c and the impulse
+// suppressor in this file replaced it.  Kept because it documents what the alternatives are compared
+// against, not because it works.
+#ifdef USE_OBSOLETE_NOISEBLANKER
 //*----------------------------------------------------------------------------
 //* Function Name       : audio_rx_noise_blanker [KA7OEI]
 //* Object              : noise blanker
