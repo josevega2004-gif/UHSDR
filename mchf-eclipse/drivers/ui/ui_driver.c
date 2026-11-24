@@ -8058,7 +8058,14 @@ void UiDriver_TaskHandler_MainTasks()
 						static uint8_t conv_line_phase;
 						conv_line_phase++;
 						if (conv_line_phase >= 32) conv_line_phase = 0;
-						if (conv_line_phase < 16)
+						// With the level statistics compiled out there is nothing to show in the
+						// second phase, so the line stops rotating instead of alternating between
+						// two copies of the same numbers.
+						if (conv_line_phase < 16
+#ifndef CONVOLUTION_LEVEL_STATS
+						    || 1
+#endif
+						    )
 						{
 							snprintf(str,20,"C %u/%u d%u n%u",
 									(unsigned int)conv_stat_blocks_in, (unsigned int)conv_stat_blocks_out,
@@ -8066,6 +8073,8 @@ void UiDriver_TaskHandler_MainTasks()
 						}
 						else
 						{
+							// Only reachable with the level statistics compiled in: showing i0 o0
+							// otherwise would report a measurement that was never taken.
 							snprintf(str,20,"P i%u o%u",
 									(unsigned int)conv_stat_peak_in, (unsigned int)conv_stat_peak_out);
 						}

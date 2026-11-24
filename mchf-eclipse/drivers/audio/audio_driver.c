@@ -950,10 +950,13 @@ static void AudioDriver_SetRxTxAudioProcessingAudioFilters(uint8_t dmod_mode)
 
     AudioDriver_SetBiquadCoeffsAllInstances(IIR_biquad_1, 0, coeffs_ptr);
 
-    // this is an auto-notch-filter detected by the NR algorithm
-    // biquad 1, 4th stage
-    //    if(0) // temporarily deactivated
-    //    if((is_dsp_notch()) && (ts.filters_p->sample_rate_dec == RX_DECIMATION_RATE_12KHZ))
+    // Biquad 1, stage 15, is held in passthrough.  A biquad implementation of the auto-notch was
+    // written here and commented out as "temporarily deactivated" in December 2017; it never came
+    // back, because the notch the operator actually gets is not a biquad at all - it is the LMS
+    // autonotch in audio_nr.c, entered from this file at the DSP_NOTCH_ENABLE test below and gated
+    // off in CW.  So the setting is alive and this stage is not; do not read the dead branch here as
+    // evidence that notch is unimplemented.  Reinstating a biquad stage would mean deciding which of
+    // the two shapes the notch and measuring one against the other.
 
     AudioDriver_SetBiquadCoeffsAllInstances(IIR_biquad_1, 15, biquad_passthrough);
 

@@ -84,9 +84,29 @@
  *
  */
 
-// Fast convolution filtering
-// experimental at the moment DD4WH, 2018_08_18
+// Fast convolution filtering: the RX selectivity path replaces the Hilbert pair's shaping with a
+// partitioned FFT convolution.  DD4WH, 2018_08_18.  It sat here labelled "experimental" for years with
+// the RX interpolation compiled out underneath it, so it could not have worked; that is fixed and the
+// filter is now measured rather than described - see support/digi/README.md for the passband, latency
+// and RAM table and for the geometry knobs (FFT_CONVOLUTION_SIZE 64/128/256, which trade receive
+// latency for skirt sharpness).  Cost at geometry 128: 44,176 bytes of .bss, 52,232 of stack headroom.
 //#define USE_CONVOLUTION
+
+// OPTION - diagnostic builds of the convolution path.  Both are listed here rather than only at their
+// point of use because a switch the CI sweep cannot see is how the option above stayed broken: it
+// compiles, nobody builds it, and the file it lives in looks fine.
+//
+// CONVOLUTION_OFF_FOR_TEST: keep the sample rate, block geometry, queues, counters and debug line
+// exactly as a shipping convolution image has them, and route USB/LSB/CW back to the Hilbert pair the
+// stock firmware runs.  A radio that is silent on a convolution image and audible on this one has its
+// fault inside the filter, not in the gain, the AGC, the mute logic or the build.
+// #define CONVOLUTION_OFF_FOR_TEST
+//
+// CONVOLUTION_LEVEL_STATS: also track the loudest |sample| handed in and back.  This is the one part
+// of the counters that costs per-sample work - two absolute values and two compares for every sample
+// in the audio path - and the diagnostic it was built for (a filter moving blocks on time and outputing
+// silence) is answered, so it is off unless a build asks for it.  The variables still exist and read 0.
+// #define CONVOLUTION_LEVEL_STATS
 
 // old LMS noise reduction
 // will probably never used any more

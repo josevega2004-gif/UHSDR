@@ -297,25 +297,35 @@ uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, ui
         uint16_t room = cbs.size - conv_stage_count;
         uint16_t taken = count - done < room ? count - done : room;
 
+#ifdef CONVOLUTION_LEVEL_STATS
         float32_t m = 0.0f;
+#endif
         for (uint16_t k = 0; k < taken; k++)
         {
             const float32_t iv = i[done + k];
             const float32_t qv = q[done + k];
             conv_stage->samples[conv_stage_count + k].real = iv;
             conv_stage->samples[conv_stage_count + k].imag = qv;
+#ifdef CONVOLUTION_LEVEL_STATS
             const float32_t ai = iv < 0.0f ? -iv : iv;
             const float32_t aq = qv < 0.0f ? -qv : qv;
             if (ai > m) m = ai;
             if (aq > m) m = aq;
+#endif
         }
         // What the blocks *contain* is the one thing the counters could not see: a filter can hand
         // back every block it was given, on time, none dropped, and be silent, because a queue of
-        // zeros moves exactly as fast as a queue of sound.
+        // zeros moves exactly as fast as a queue of sound.  That question is answered, and this is the
+        // only part of the counters that costs per-sample arithmetic, so the level tracking is a build
+        // choice (see CONVOLUTION_LEVEL_STATS in uhsdr_board_config.h) and the variables read zero
+        // when it is not asked for.  The debug line says "P off" rather than "P i0 o0" for that reason:
+        // a zero that means "not measured" must not look like a zero that means "no signal".
+#ifdef CONVOLUTION_LEVEL_STATS
         {
             const uint32_t pk = (uint32_t)(m * 1000.0f);
             if (pk > conv_stat_peak_in) conv_stat_peak_in = pk;
         }
+#endif
         conv_stage_count += taken;
         done += taken;
 
@@ -368,22 +378,28 @@ uint16_t AudioDriver_ConvolutionOutput(float32_t* i, float32_t* q, uint16_t coun
         uint16_t room = cbs.size - conv_play_count;
         uint16_t given = count - done < room ? count - done : room;
 
+#ifdef CONVOLUTION_LEVEL_STATS
         float32_t m = 0.0f;
+#endif
         for (uint16_t k = 0; k < given; k++)
         {
             const float32_t rv = conv_play->samples[conv_play_count + k].real;
             const float32_t imv = conv_play->samples[conv_play_count + k].imag;
             i[done + k] = rv;
             q[done + k] = imv;
+#ifdef CONVOLUTION_LEVEL_STATS
             const float32_t ar = rv < 0.0f ? -rv : rv;
             const float32_t aa = imv < 0.0f ? -imv : imv;
             if (ar > m) m = ar;
             if (aa > m) m = aa;
+#endif
         }
+#ifdef CONVOLUTION_LEVEL_STATS
         {
             const uint32_t pk = (uint32_t)(m * 1000.0f);
             if (pk > conv_stat_peak_out) conv_stat_peak_out = pk;
         }
+#endif
         conv_play_count += given;
         done += given;
 
