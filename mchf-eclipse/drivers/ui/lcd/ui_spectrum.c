@@ -1088,6 +1088,77 @@ void UiSpectrum_WaterfallClearData()
 }
 
 
+#ifdef USE_NAVTEX
+/* The NAVTEX text page, drawn in the rectangle the waterfall would have used.
+ *
+ * Rows and columns are computed from the font and the waterfall geometry rather than written down, for
+ * the reason the debug overlay taught: a 25-character line drawn into a 20-character buffer reads as a
+ * truncated number and looks like a wrong measurement.  If that calculation ever disagrees with the
+ * page the producer keeps, the text is cut at the page's own length, not past it.
+ *
+ * This is a mode's display, not a screen: entering NAVX puts text where the waterfall was, and leaving
+ * it puts the waterfall back.  The waterfall keeps collecting while the text is up, so returning to any
+ * other mode shows the same picture as if the page had never been there - except for the rows that were
+ * drawn over, which are lost, because the waterfall is a display of the past and this harness has no
+ * second buffer to give it back.
+ */
+static void UiSpectrum_DrawNavtexText(void)
+{
+    char page[NAVTEX_PAGE_MAX + 1];
+    char line[140];
+    const uint8_t font = ts.Layout->TextMsg_font;
+    // Glyph size is measured from the font rather than written down, for the reason the debug overlay
+    // taught: a 25-character line drawn into a 20-character buffer reads as a truncated number and
+    // looks like a wrong measurement.  TextWidth of ten digits gives the advance per character, and the
+    // row pitch comes from the font's own height, so this holds for any board's layout.
+    const uint16_t char_w = UiLcdHy28_TextWidth("0000000000", font) / 10;
+    const uint16_t char_h = UiLcdHy28_TextHeight(font);
+    uint16_t cols, rows, shown;
+
+    if (!char_w || !char_h)
+    {
+        return;
+    }
+    cols = (uint16_t)(sd.Slayout->draw.w / char_w);
+    rows = (uint16_t)(sd.Slayout->wfall.h / char_h);
+    if (cols > 60) cols = 60;                 // fits line[] on the widest board this builds for
+    if (rows > 12) rows = 12;
+    if (!cols || !rows) return;
+
+    shown = UiDriver_NavtexTake(page, (uint16_t)(cols * rows));
+    // Page first, then the whole rectangle is repainted - rows that lost text have to be blanked, or a
+    // longer message that scrolled away leaves its tail behind as a ghost.
+    page[shown] = '\0';
+
+    snprintf(line, sizeof(line), "NAVX %s c%lu%s",
+             UiDriver_NavtexLocked() ? "lock" : "find",
+             (unsigned long) UiDriver_NavtexChars(),
+             UiDriver_NavtexLocked() ? "" : ".");
+    if (!UiDriver_NavtexLocked())
+    {
+        snprintf(line + strlen(line), sizeof(line) - strlen(line), " %.2f",
+                 (double) UiDriver_NavtexConfidence());
+    }
+    UiLcdHy28_PrintText(sd.Slayout->draw.x, sd.Slayout->wfall.y, line, Yellow, Black, font);
+
+    for (uint16_t r = 0; r + 1 < rows; r++)
+    {
+        uint16_t begin = (uint16_t)(r * cols);
+        uint16_t len = 0;
+        while (begin + len < shown && len < cols && page[begin + len]) len++;
+        memcpy(line, page + begin, len);
+        for (uint16_t c = len; c < cols; c++)
+        {
+            line[c] = ' ';                    // clear the row's remainder, in the same write
+        }
+        line[cols] = '\0';
+        UiLcdHy28_PrintText(sd.Slayout->draw.x,
+                            (uint16_t)(sd.Slayout->wfall.y + (r + 1) * char_h),
+                            line, White, Black, font);
+    }
+}
+#endif
+
 static void UiSpectrum_DrawWaterfall()
 {
     sd.wfall_line %= sd.wfall_size; // make sure that the circular buffer is clipped to the size of the display area
@@ -1489,7 +1560,18 @@ static void UiSpectrum_RedrawSpectrum()
 
     		if(sd.RedrawType&Redraw_WATERFALL)
     		{
-    			UiSpectrum_DrawWaterfall();
+#ifdef USE_NAVTEX
+    			// NAVX takes the waterfall's space: the text page is what a NAVTEX operator needs, the
+    			// waterfall is what everyone else needs, and the screen has room for one of them here.
+    			if (is_demod_navtex())
+    			{
+    				UiSpectrum_DrawNavtexText();
+    			}
+    			else
+#endif
+    			{
+    				UiSpectrum_DrawWaterfall();
+    			}
     		}
 
 

@@ -211,6 +211,35 @@ void UiDriver_StartupScreen_LogIfProblem(bool isError, const char* txt);
 void UiDriver_BacklightDimHandler(void);
 
 void UiDriver_TextMsgPutChar(char ch);
+
+#ifdef USE_NAVTEX
+#define NAVTEX_PAGE_MAX 512      // two pages of characters: more than any screen can show, and the
+                                 // drawer decides how many rows and columns fit from the font
+
+/* NAVTEX received text, kept in a page of its own.
+ *
+ * This exists because the radio has exactly one received-text facility - the 44-character strip that
+ * UiDriver_TextMsgPutChar writes and system messages also write - and a transmission that takes a
+ * minute to send is destroyed by a menu action in the middle of it.  The page is separate, so a
+ * message change can no longer erase a station.
+ *
+ * The producer is the audio interrupt, so it does nothing but store bytes: no drawing, no allocation,
+ * no length that could disagree with the geometry the drawer computes from the font.  When the page is
+ * full the oldest line is dropped, which is the same rule a paper printer has.
+ */
+void UiDriver_NavtexPutChar(char ch);
+void UiDriver_NavtexClear(void);
+uint16_t UiDriver_NavtexTake(char* out, uint16_t max);   // drawer: copy and clear the dirty flag
+
+// The receiver's own opinion, carried into the UI alongside the characters.  It is passed in rather
+// than read from the receiver because the receiver belongs to the audio path and its instance is not
+// the display's to reach - and because the status line is the one thing that tells an operator whether
+// silence means nobody is transmitting or the clock has not been found.
+void UiDriver_NavtexStatus(uint8_t locked, float confidence, uint32_t chars);
+uint8_t UiDriver_NavtexLocked(void);
+float UiDriver_NavtexConfidence(void);
+uint32_t UiDriver_NavtexChars(void);
+#endif
 void UiDriver_TextMsgPutSign(const char *s);
 void UiDriver_TextMsgDisplay(void);
 void UiDriver_TextMsgClear(void);

@@ -626,6 +626,7 @@ void AudioDriver_Init()
     // 1615/1785 Hz of the receiver's audio is the ordinary FSK expectation: the operator tunes so
     // the pair lands there, and the filter has to be wide enough to pass both tones.
     SitorRx_Init(&navtex_rx, 12000.0f, 1615.0f, 1785.0f);
+    UiDriver_NavtexClear();
 #endif
 
     RxProcessor_Init();
@@ -1336,7 +1337,12 @@ static void AudioDriver_RxProcessor_Navtex(float32_t * const src, int16_t blockS
     {
         if (SitorRx_Sample(&navtex_rx, src[idx]))
         {
-            UiDriver_TextMsgPutChar(navtex_rx.out_char);
+            // The page, not the shared strip: see UiDriver_NavtexPutChar.  The status goes with it
+            // because the operator needs to know whether silence means an empty band or no lock.
+            UiDriver_NavtexPutChar(navtex_rx.out_char);
+            UiDriver_NavtexStatus((uint8_t) SitorRx_Locked(&navtex_rx),
+                                  SitorRx_Confidence(&navtex_rx),
+                                  SitorRx_CharsReceived(&navtex_rx));
         }
     }
 }

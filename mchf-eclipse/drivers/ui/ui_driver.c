@@ -591,6 +591,71 @@ void UiDriver_TextMsgClear()
     ui_txt_msg_update = true;
 }
 
+#ifdef USE_NAVTEX
+// The page itself is sized by NAVTEX_PAGE_MAX in the header, which is deliberately more than any
+// screen can show: the drawer decides how many rows and columns fit from the font it is given, and the
+// producer must not disagree with it.
+static char navtex_page[NAVTEX_PAGE_MAX];
+static volatile uint16_t navtex_count;
+static volatile uint8_t navtex_dirty;
+static volatile uint32_t navtex_total;         // characters received, for the status line
+static volatile uint8_t navtex_locked;
+static volatile float navtex_confidence;
+static volatile uint32_t navtex_chars;
+
+void UiDriver_NavtexPutChar(char ch)
+{
+    if (ch == '\r' || ch == '\n')
+    {
+        return;      // SITOR-B text has no line structure the page could use; the drawer wraps
+    }
+    if (navtex_count < NAVTEX_PAGE_MAX)
+    {
+        navtex_page[navtex_count++] = ch;
+    }
+    else
+    {
+        // Drop the oldest character rather than the oldest whole line: a line's worth is 26 of them on
+        // this board and 60 on the largest, and the drawer is the only thing that knows which.
+        memmove(navtex_page, navtex_page + 1, NAVTEX_PAGE_MAX - 1);
+        navtex_page[NAVTEX_PAGE_MAX - 1] = ch;
+    }
+    navtex_total++;
+    navtex_dirty = 1;
+}
+
+void UiDriver_NavtexClear(void)
+{
+    navtex_count = 0;
+    navtex_total = 0;
+    navtex_dirty = 0;
+}
+
+uint16_t UiDriver_NavtexTake(char* out, uint16_t max)
+{
+    uint16_t n = navtex_count;
+    if (n > max)
+    {
+        n = max;
+    }
+    memcpy(out, navtex_page, n);
+    out[n] = '\0';
+    navtex_dirty = 0;
+    return n;
+}
+
+void UiDriver_NavtexStatus(uint8_t locked, float confidence, uint32_t chars)
+{
+    navtex_locked = locked;
+    navtex_confidence = confidence;
+    navtex_chars = chars;
+}
+
+uint8_t UiDriver_NavtexLocked(void) { return navtex_locked; }
+float UiDriver_NavtexConfidence(void) { return navtex_confidence; }
+uint32_t UiDriver_NavtexChars(void) { return navtex_chars; }
+#endif
+
 void UiDriver_TextMsgDisplay()
 {
     if (ui_txt_msg_update == true)

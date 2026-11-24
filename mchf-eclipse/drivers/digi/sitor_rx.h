@@ -181,4 +181,10 @@ float32_t SitorRx_Confidence(const SitorRx* s);
 // 1 once the clock and the group boundary are settled.
 static inline int SitorRx_Locked(const SitorRx* s) { return s->state == SITOR_LOCKED; }
 
+/* How many characters the receiver has printed since init.  SitorRx_Confidence above is the other
+ * number the status line needs, and was already here; this one was not, and the counter it reports is
+ * the same one the bench table grades, so the radio and the table cannot disagree about what was
+ * copied. */
+static inline uint32_t SitorRx_CharsReceived(const SitorRx* s) { return s->chars_out; }
+
 #endif
