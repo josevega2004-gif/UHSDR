@@ -1241,9 +1241,14 @@ static int sitor_stream(void)
     int failures = 0;
 
     printf("SITOR-B / NAVTEX through the streaming demodulator (drivers/digi/sitor_rx.c), the file the\n"
-           "radio would compile: one sample in, one character out, the bit period measured from the\n"
-           "transitions rather than assumed, and the same 4-of-7 and time diversity rules the reference\n"
-           "modem is graded with.  Text is %zu characters.\n\n", strlen(msg));
+           "radio would compile: one sample in, one character out, the bit period chosen from a grid of integer\n"
+           "candidates and pulled toward the nominal by arithmetic, and the same 4-of-7 and time diversity\n"
+           "rules the reference modem is graded with.  Text is %zu characters.\n\n", strlen(msg));
+    printf("The `bit ms` column is that grid's winner converted to milliseconds, not an independent\n"
+           "measurement of the transitions: it reads 10.0 on the rate rows because an integer grid at\n"
+           "12 kHz only offers 116 to 124 samples, and 0.0 when nothing was chosen.  One sample of a\n"
+           "120-sample bit is 0.83 per cent, which is the same quantum that makes the rate rows fail,\n"
+           "so the column and those rows are one limitation seen twice.\n\n");
     printf("%-14s %6s %11s %8s %8s %7s %6s %6s %3s %5s %8s\n", "case", "CER %", "min-max", "err/len",
            "conf", "bit ms", "fix", "lost", "rev", "wrong", "reference CER");
     for (size_t i = 0; i < n_cases; i++)

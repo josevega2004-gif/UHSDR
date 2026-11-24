@@ -58,18 +58,30 @@ extern const char SitorFigures[128];
  * history is a 14 bit window per candidate, and once locked the receiver stops searching and only
  * feeds its own candidate, so the search is paid during acquisition instead of forever. */
 
-/* How far the grid of candidate clocks reaches either side of the nominal bit period, in whole
- * periods per bit.  It is the entire cost of the receiver: the table holds (2*SPAN+1) * period * (2*
- * SPAN+1) candidates, so SPAN=4 buys +-3.3 % of rate error for 32,316 bytes and SPAN=1 buys +-0.8 %
- * for about a tenth of that.  A radio locked to its own crystal is inside tens of ppm, so the narrow
- * grid is the one that belongs in a build which also wants the convolution filter - the two features
- * live in the same 128 KB, and the wide grid at FFT_CONVOLUTION_SIZE=128 left 136 bytes of stack.
- * The CI table is measured at the default wide span, so a narrowed build runs a different receiver
- * from the one that was graded: narrower is cheaper, not proven better. */
+/* How far the grid of candidate clocks reaches either side of the nominal bit period, in whole samples
+ * of that period.  The table holds (2*SPAN+1) periods, each with one candidate per sample of its
+ * period, so SPAN=4 at 12 kHz is 9 * about 120 = 1080 candidates covering +-3.3 % of rate error, and
+ * SPAN=1 is 360 candidates covering +-0.8 %.  A radio locked to its own crystal is inside tens of ppm,
+ * so the narrow grid is the one that belongs in a build which also wants the convolution filter: the two
+ * features live in the same 128 KB.  The CI table is measured at the default wide span, so a narrowed
+ * build runs a different receiver from the one that was graded - narrower is cheaper, not proven better.
+ *
+ * This comment used to claim SPAN=1 cost "about a tenth" of the wide grid while SITOR_MAX_GRID was a
+ * hard 1300 that no span changed: every array but base[] and ccur[] was sized by that constant, so a
+ * span-1 build saved 48 bytes of the 21 KB being described, and the radio measured 19,056 bytes of
+ * stack headroom with span 4 against 19,104 with span 1.  The bound below is derived from the knob now,
+ * so the knob is worth the thing it is documented to be worth. */
 #ifndef SITOR_GRID_SPAN
-#define SITOR_GRID_SPAN        4      // integer periods tried: nominal +- this, i.e. +-3.3 % at 12 kHz
+#define SITOR_GRID_SPAN        4      // integer samples of period tried: nominal +- this
 #endif
-#define SITOR_MAX_GRID          1300  // candidates in the grid, with room for the widest nominal
+#ifndef SITOR_GRID_NOMINAL
+#define SITOR_GRID_NOMINAL     120    // bit period in samples the arrays are sized for: 100 Bd at 12 kHz,
+                                      // which is the only rate the radio feeds this receiver.  A call with
+                                      // a wider nominal (48 kHz would be 480) clips the grid at line
+                                      // SITOR_MAX_GRID below, and SitorRx_GridClipped() says so rather
+                                      // than letting the truncation pass as a narrow search.
+#endif
+#define SITOR_MAX_GRID         ((2 * SITOR_GRID_SPAN + 1) * (SITOR_GRID_NOMINAL + SITOR_GRID_SPAN + 1))
 #define SITOR_BITS_TO_DECIDE   150    // bits a candidate must have seen before it may win on alphabet: 26 words,
 #define SITOR_DECIDE_EVERY     120     // bits between decisions while acquiring
 #define SITOR_ALPHA_LOCK       109     // aged 4-of-7 share that locks: 128 is 100 %, so this is 85 %
@@ -106,6 +118,7 @@ typedef struct
 
     // ---- the candidate grid ------------------------------------------------------------------
     int32_t   per_lo, per_hi;      // integer periods covered, inclusive
+    int32_t   grid_clipped;
     int32_t   base[SITOR_GRID_SPAN * 2 + 1];   // where each period's candidates start in the arrays
     int32_t   nper;                // how many periods
     int32_t   ccur[SITOR_GRID_SPAN * 2 + 1];   // running phase index within each period
@@ -186,5 +199,9 @@ static inline int SitorRx_Locked(const SitorRx* s) { return s->state == SITOR_LO
  * the same one the bench table grades, so the radio and the table cannot disagree about what was
  * copied. */
 static inline uint32_t SitorRx_CharsReceived(const SitorRx* s) { return s->chars_out; }
+
+// 1 when the grid the caller asked for did not fit SITOR_MAX_GRID and was cut short.  It is reported
+// because a silent truncation is how a build ends up with a receiver nobody measured.
+static inline int SitorRx_GridClipped(const SitorRx* s) { return s->grid_clipped; }
 
 #endif

@@ -1677,8 +1677,8 @@ the spectrum; the last two columns are from the linked image rather than from `s
 
 | `-DFFT_CONVOLUTION_SIZE` | block | taps | latency at 12 kHz | in-band ripple | skirt, -6 to -60 dB | image, worst in band | ops / sample | `.bss` cost | stack left |
 |---|---|---|---|---|---|---|---|---|---|
-| 256 (as committed) | 128 | 1024 | 10.0 ms | **0.06 dB** | **34 Hz** | -129.5 dB | 372 | 63,416 B | 32,800 B |
-| 128 | 64 | 512 | 4.7 ms | 1.13 dB | 71 Hz | -133.1 dB | 331 | 35,768 B | 60,448 B |
+| 256 (as committed) | 128 | 1024 | 10.0 ms | **0.06 dB** | **34 Hz** | -129.5 dB | 372 | 63,632 B | 32,776 B |
+| 128 | 64 | 512 | 4.7 ms | 1.13 dB | 71 Hz | -133.1 dB | 331 | 44,176 B | 52,232 B |
 | 64 | 32 | 256 | **2.0 ms** | 2.88 dB | 144 Hz | -121.3 dB | **295** | **21,944 B** | **74,272 B** |
 | none: the Hilbert pair in use | - | 199 x 2 | 8.25 ms | (shaped later, see below) | 127 Hz, at 3.5 kHz | **-75.8 dB** | 786 | 0 | 96,408 B |
 
@@ -1706,15 +1706,18 @@ past roughly -140 dB you are seeing the arithmetic, not a bench measurement of a
 versus 144 dB gap is real.
 
 The RAM is the reason the option stays off, and what it really costs is stack headroom. Linking with it
-moves the ELF's bss from 93,860 to 157,276 bytes, so what is left between the end of `.bss` (0x20017fd8)
-and the stack top (0x2001fff8) falls from 96,408 to 32,800 bytes. Nothing bounds that space: `_sbrk()`
+moves the ELF's `.bss` from 32,352 to 76,528 bytes at `FFT_CONVOLUTION_SIZE=128` (`_ebss` 0x20008760 to
+0x200133f0), so what is left between the end of `.bss` and the stack top (0x2001fff8) falls from 96,408
+to 52,232 bytes.  Both figures here were wrong before they were re-read from a fresh link: the earlier
+text said 93,860 to 157,276 and a 32,800 residue, and 93,860 is `.bss` plus `.ccm` - the F407 has two RAM
+regions, so `arm-none-eabi-size`'s total column adds them and is not a number to budget with. Nothing bounds that space: `_sbrk()`
 comes from libnosys, bumps a pointer up from `_end` and has no ceiling to compare against, and the
 `ASSERT(__StackLimit >= __HeapLimit)` in `linker/arm-gcc-link_f4_main.ld` compares the heap's *start*
 with the top of RAM, so it cannot fire however full the radio is. (The waterfall bitmap, which sits in
 CCM, is not one of the callers: the `malloc()` at `ui_spectrum.c:2128` is inside a `/* */` block and the
 function around it is never called from anywhere. This file said otherwise until it was checked.) What
 the heap is asked for in this configuration is the 12 byte canary word in `uhsdr_canary.c` and the USB
-class handles, so 32,800 bytes is in practice the main stack's room, down from 96,408.
+class handles, so 52,232 bytes is in practice the main stack's room at geometry 128, down from 96,408.
 
 What would have to happen before this could be switched on:
 
@@ -1881,12 +1884,47 @@ alone conflates them: **wrong** counts characters printed that are not what was 
 | bit rate 3% off | refuses: the integer grid cannot follow it |
 
 For the radio: it compiles for ARM and is in `files.mak`, and because nothing instantiates it the
-linker drops it - the shipping image's `.bss` is unchanged at 93,860 bytes and its symbols do not
-appear in the map at all. A NAVTEX mode would therefore cost **32,316 bytes of RAM** for one instance
+linker drops it - the shipping image's `.bss` is unchanged at 32,352 bytes and its symbols do not
+appear in the map at all.  (That figure used to read 93,860 here, which is `.bss` plus `.ccm`: this
+target has two RAM regions and the size tool's total column adds them, so it is not the number to
+budget a 128 KB part with.) A NAVTEX mode would therefore cost **32,316 bytes of RAM** for one instance
 (the grid's registers, aged scores and phasing history), which is the same order as the 128-point
 convolution geometry and fits in the headroom the stock build leaves. It must run on the decimated
 audio path: at 48 kHz the same percentage span would need 15,840 candidates, so the grid narrows
 itself to ±0.2% and says so in the source, which is another way of saying the mode belongs at 12 kHz.
+
+### Why the head of a message is lost, and why an earlier lock did not fix it
+
+The table spends 14 of 46 characters on acquisition, and the obvious repair - let a candidate that is
+decisively ahead of the field win after 60 bits instead of 150 - does not work.  It was implemented,
+measured, found to change nothing, and reverted rather than left in as code that advertises a capability
+it does not have.
+
+The reason came from a temporary print in `grid_decide`, on the clean row:
+
+| decision | time | winner | its score | runner-up | best far-away clock |
+|---|---|---|---|---|---|
+| 1 | 0.40 s | none | 0 | 0 | 0 |
+| 2 | 0.80 s | 470 | 68 | 68 | 68 |
+| 3 | 1.20 s | 470 | 89 | 89 | 89 |
+| 4 | 1.60 s | 470 | 102 | 102 | **104** |
+| 5 | 2.00 s | 470 | 113 | 113 | 110 |
+
+The scores are tied rather than separated: they start near the middle of their range and age toward the
+truth, so at 0.8 s a candidate two samples of period away is exactly as convinced as the winner and there
+is no margin to test.  What breaks the tie at decision 4 is the arithmetic bias toward the nominal period,
+not evidence from the signal - and the row where a *different* clock scores higher than the winner (104
+against 102) is the clearest statement of that: the bias is choosing, and a lock that fired earlier would
+be choosing on nothing.
+
+It is the same limitation the rate rows show from the other side.  The grid step at 12 kHz is one sample of
+a 120-sample bit, 0.83 per cent, so a transmitter 1.5 per cent off is two steps away and cannot be tracked:
+those rows print nothing useful, and the `bit ms` column reads 10.0 on them because an integer grid has
+nothing else to offer.  One component would move both numbers: a fractional clock that tracks - transition
+intervals measured, a non-integer period held, character boundaries following it - which would leave the
+alphabet to choose between seven group boundaries instead of 1080 candidate clocks.  That is a redesign of
+the tracking stage rather than a threshold to tune, so it is the next piece of work here rather than a row
+in this table.
 
 ## NAVTEX in the radio, `USE_NAVTEX`
 
@@ -1897,32 +1935,47 @@ prints received characters through the same routine RTTY and BPSK use.  Nothing 
 path is new, which is why the change is small; what is new is that it is a build option, off by
 default, because of where its RAM goes.
 
-`sizeof(SitorRx)` is 32,316 bytes and it is almost all the grid of candidate bit clocks - the thing
-that lets the receiver lock down to 10 dB of noise without being told the text.  That grid lives in
-the same 128 KB as the convolution filter's buffers, and the two together do not fit.  Stack
-headroom, read from the linker's own `_ebss` against `_estack`:
+`sizeof(SitorRx)` is 28,296 bytes at the default grid and almost all of it is the grid of candidate bit
+clocks - the thing that lets the receiver lock down to 10 dB of noise without being told the text.  That
+grid lives in the same 128 KB as the convolution filter's buffers.  Stack headroom, read from the
+linker's own `_ebss` against `_estack`, every row measured on a fresh link of this commit:
 
 | build | headroom | verdict |
 |---|---|---|
 | as it ships today, neither option | 96,408 bytes | - |
-| `USE_NAVTEX` alone, grid at its default width | 63,768 | fits |
-| convolution at `FFT_CONVOLUTION_SIZE=128`, no NAVTEX | 60,448 | fits |
-| convolution at 128 **plus** `USE_NAVTEX` | **136 bytes** | will crash |
-| convolution at 128 plus `USE_NAVTEX -DSITOR_GRID_SPAN=1` | 39,328 | fits |
-| convolution at **256** plus `USE_NAVTEX -DSITOR_GRID_SPAN=1` | **184 bytes** | will crash |
+| `USE_NAVTEX` alone, grid at its default width | 63,232 | fits |
+| `USE_NAVTEX` alone, `-DSITOR_GRID_SPAN=1` | 84,752 | fits, roomiest mode build |
+| convolution `FFT_CONVOLUTION_SIZE=128`, no NAVTEX | 52,232 | fits |
+| convolution `FFT_CONVOLUTION_SIZE=256`, no NAVTEX | 32,776 | fits |
+| convolution 128 **plus** `USE_NAVTEX` | 23,072 | fits |
+| convolution **256** plus `USE_NAVTEX` | **3,616** | links, too tight to trust |
+| convolution **256** plus `USE_NAVTEX -DSITOR_GRID_SPAN=1` | **21,120** | fits |
 
-That last row is the one worth remembering, and it was a wrong prediction before it was measured: the
-estimate for 256 plus the narrow grid was around 20 KB.  It is not that the narrow grid fails to help -
-it is that the 256-point geometry spends so much on its own buffers that there is nothing left for
-anything else.  Of the two combinations that do fit, `NAVX` with the stock filter keeps 63,768 bytes
-and `NAVX` at convolution 128 keeps 39,328.
+Two corrections, both of them this file believing a measurement it had stopped checking.
 
-`SITOR_GRID_SPAN` is the knob that decides it: span 4 covers +-3.3 % of rate error for 32,316 bytes,
-span 1 covers +-0.8 % for 10,796, and a radio locked to its own crystal is inside tens of ppm.  A
-span-1 run of the table above decodes identically - 0 wrong characters on every row except the two
-rate rows that are pinned - so the narrow grid is not a worse receiver under the conditions measured,
-only a narrower one, and the CI table stays at the wide span so that what is graded is what the
+The table above this commit said convolution 128 plus NAVTEX left **136 bytes** and that 256 plus the
+narrow grid left 184, and it is those two rows that got the flash pack's `VERSIONS.txt` to reject
+`stick-c256nav`.  They were transposed: 136 was `USE_NAVTEX` with **256** at the wide span, and the
+combination described as hopeless - 256 with the narrow grid - actually leaves 21,120 bytes.  The image
+that was turned down is built and in the pack now.
+
+The other correction is the reason it was mis-measured at all.  `SITOR_GRID_SPAN` was documented as the
+thing that decides whether the two features fit together - span 4 for 32,316 bytes, span 1 "for about a
+tenth of that" - and it did not do it.  `SITOR_MAX_GRID` was a hard 1300 that no span could change, and
+every per-candidate array (`win14`, `seen`, `score`, `margin`, the phasing history) was sized by that
+constant, so narrowing the grid moved only `base[]` and `ccur[]`: a span-1 build saved **48 bytes**, and
+the radio showed 19,056 of headroom at span 4 against 19,104 at span 1.  The bound is derived from the
+knob now - `(2*SPAN+1) * (nominal period + SPAN + 1)` - which makes span 1 10,792 bytes instead of 28,296
+and gives back the 17.5 KB the comment had been promising.  A span-1 run of the table decodes identically
+at the default span on every row that matters (0 wrong characters on clean, 20 dB, 10 dB, QSB and tuning;
+the two rate rows keep the defects they are pinned for), so the narrow grid is cheaper and not worse under
+what has been measured, and the CI table still runs the wide span so that what is graded is what the
 default build ships.
+
+`SITOR_GRID_NOMINAL` is the other half of that bound: the arrays are sized for the 120-sample bit period
+that 100 Bd at 12 kHz produces, which is the only rate the radio feeds this receiver.  Initialising it at
+48 kHz wants 480-sample bits, so the grid is cut at the bound and says so through `SitorRx_GridClipped()`
+rather than passing a truncated search off as the one that was measured.
 
 With neither convolution nor NAVTEX the image grows by 8 bytes of flash, the `NAVX` label and the
 enum entry, and no RAM.  The enum entry is appended rather than inserted because `ts.digital_mode`

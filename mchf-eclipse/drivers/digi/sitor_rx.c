@@ -189,7 +189,15 @@ void SitorRx_Init(SitorRx* s, float32_t sample_rate_hz, float32_t low_hz, float3
     for (int i = 1; i < s->nper; i++)
         s->base[i] = s->base[i - 1] + (s->per_lo + i - 1);
     s->total = s->base[s->nper - 1] + s->per_hi;
-    if (s->total > SITOR_MAX_GRID) s->total = SITOR_MAX_GRID;
+    s->grid_clipped = 0;
+    if (s->total > SITOR_MAX_GRID)
+    {
+        // The grid the caller wanted does not fit the arrays this build sized.  Cutting it is the only
+        // safe option, but it must not look like the search that was measured: the flag is how the bench
+        // and the radio say the receiver is narrower than its own documentation.
+        s->total = SITOR_MAX_GRID;
+        s->grid_clipped = 1;
+    }
     s->next_decide = (uint32_t)(s->win * 40);
 }
 
