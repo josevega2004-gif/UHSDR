@@ -172,6 +172,18 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi sitor-stream
 
+      # The same takes, through the file a firmware build would compile: samples one at a time, pixel
+      # clock searched rather than assumed.  Graded against the reference on identical audio, so the
+      # column that CI watches is the difference between the two.  On the rows where the transmitter's
+      # clock is a whole number of grid steps away the streaming receiver is much better (3.5% of pixels
+      # and 30 of 30 glyph cells exact, against 36.0% for the reference, which samples at a fixed
+      # nominal period); on the exact-nominal row it is worse, because 97.959 samples does not sit on the
+      # grid and the residual slip shears the raster.  Both are pinned, so a step that trades one for the
+      # other shows up as a failure here rather than as a surprise on air.
+      - name: Run the streaming Hellschreiber receiver the radio would compile
+        working-directory: mchf-eclipse
+        run: make -C support/digi hell-stream
+
       # Hellschreiber has no alphabet, so this step grades a picture: exact glyph cells and the share
       # of pixels wrong, with the paper position free and a pixel clock error that has to fail.
       - name: Run the Hellschreiber reference modem

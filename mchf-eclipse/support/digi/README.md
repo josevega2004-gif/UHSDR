@@ -1266,6 +1266,72 @@ gap columns stop being empty (0.28 of them blank). Both failing rows are pinned 
 below in the table, and the self check additionally holds the 2 % case, so a receiver
 that started following the clock slowly would fail rather than read as an improvement.
 
+## Streaming Hellschreiber, `make -C support/digi hell-stream`
+
+`drivers/digi/hell_rx.c` is the file a firmware build would compile: one sample in, one keyed pixel out,
+the pixel clock searched rather than assumed. It is graded on the reference's own takes with the
+reference's own picture score, so the column that matters is the difference between the two.
+
+| case | streaming, wrong pixels | cells exact | reference | what it shows |
+|---|---|---|---|---|
+| clean (122.5 Bd exactly) | 4.9 % | 4 / 30 | **0.0 %** | the grid misses the truth, see below |
+| clock +1 % | **3.5 %** | **30 / 30** | 36.0 % | searching the clock beats assuming it |
+| clock +2 % | **11.2 %** | 20 / 30 | 37.0 % | the same, less completely |
+| clock -2 % | 11.3 % | 4 / 30 | 39.7 % | |
+| tone +450 Hz | 22.8 % | 7 / 28 | 14.7 % | off tune costs both, the reference more slowly |
+| noise only | never locks (0.11) | - | - | the discriminator does not fire on nothing |
+
+`sizeof(HellRx)` is 904 bytes with 65 candidate clocks spanning 94 to 102 samples in eighths of a sample -
+against 28,296 bytes for the SITOR-B receiver's grid. Feld-Hell is cheap to hold and hard to lock.
+
+### The three ways this receiver was wrong before it worked, all found by measurement
+
+**A phase-slot grid measures nothing on this mode.** The first design kept, for each candidate period, one
+accumulator per phase slot, and scored how much of the envelope's variance sat between the slots - the
+same shape of argument that works for SITOR-B. The numbers were 0.001, 0.001, 0.002 across the whole grid
+while the reference decoded the same take perfectly. The reason is the mode: a pixel is one constant level,
+so every phase inside a pixel holds the same value and there is nothing to separate. What differs between
+pixels is the *sequence*, not the phase. 7,764 bytes bought a statistic that could not rise; the replacement
+is 904.
+
+**Purity is real but too blunt to choose.** Scoring the share of pixel blocks that land clearly outside the
+midpoint of the two level clusters fixed the clock choice enough to move clean from 37 % wrong pixels to
+4.9 % and pick 98 rather than 99 samples. But at eighth-of-a-sample resolution the candidates from 98.25 to
+99.125 all score 0.951: a plateau, and the winner is decided by noise. It also costs a lock at 0.88 while
+white noise sits at 0.72 by arithmetic - a normal spread has that much outside a quarter of its own range -
+so the margin between signal and noise in this metric is narrower than it looks.
+
+**Straddling, measured over the whole block, is destroyed by the envelope filter.** The sharp test is the
+early/late one: a block that spans a keying edge contains both levels, so counting such blocks measures
+clock error directly. Implemented naively it produced a 28 % straddle rate on a clean take - indistinguishable
+from noise, and the receiver never locked. The cause is the 40-sample boxcar that turns the keyed tone into a
+level: its output ramps for about 20 samples either side of an edge, which is two fifths of a pixel, so every
+block contains the ramp. Watching only the middle three fifths of each block fixed it, and that is the version
+in the table: noise falls to 0.11 and the real takes stay at 0.90-1.00, which is a discriminator with room in
+it rather than a threshold in the middle of a distribution.
+
+### The defect that is still open, and why it is the same one as everywhere else in this tree
+
+On the exact-nominal row the receiver reads 4.9 % of pixels wrong and 4 cells in 30 intact, while on
+`clk +1 %` - where the transmitter's period happens to land on a grid point - it reads 3.5 % and 30 of 30.
+The truth at 12 kHz is 97.959 samples; the grid offers 97.9375 and 98.0625 and picks something nearer 98.1.
+A few hundredths of a sample per pixel accumulate into two whole pixels over a line, and in a raster mode a
+clock error is a seam rather than a slip: the picture reads until the boundary walks across a glyph, and the
+cells that straddle it are the ones lost.
+
+The fixes are finer resolution (`HELL_PERIOD_STEP` 4 buys one thirty-second of a sample at 193 candidates,
+2.9 KB, roughly 200 ops per sample) or tracking the clock after lock instead of choosing it. That is the same
+wall SITOR-B hit from the other side, where a 1.5 % rate error is two integer steps and cannot be followed at
+all. Both point at one missing component: a held fractional clock - a measured period carried as a fraction
+and nudged every pixel, rather than a list of whole-sample candidates picked from once. It is the next piece
+of DSP work in this directory, and it is worth doing once, for both modes.
+
+**This receiver is not in the firmware.** It compiles, it is in the bench, it is in CI, and `files.mak` does
+not list it: a mode earns its place by decoding traffic that was not generated by the same assumptions, and
+Hell has no on-air capture behind it yet - the NAVTEX receiver has `ddk2-4583.wav`, this one has nothing but
+the table above.
+
+
 ## MFSK16, `make -C support/digi mfsk16`
 
 Sixteen tones 15.625 Hz apart, one tone per symbol at 15.625 baud: four bits a symbol,

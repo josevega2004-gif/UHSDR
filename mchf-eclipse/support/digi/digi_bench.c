@@ -17,6 +17,7 @@
 
 #include "bench.h"
 #include "hellschreiber.h"
+#include "hell_rx.h"
 #include "mfsk16.h"
 #include "navtex.h"
 #include "olivia.h"
@@ -1540,6 +1541,7 @@ typedef struct
 // The score is the picture: the paper position is free (a whole pixel of roll and a column of
 // offset), so this walks them, takes the one that leaves the most glyph cells exactly as drawn, and
 // returns the share of pixels that are wrong at it.
+int hell_shift_limit = 2 * HELL_CELL;   // widened by the streaming table: see below
 static double hell_score(const uint8_t* truth, int truth_cols, const uint8_t* gotp, int got_cols,
                          int stride, int* cells_ok, int* cell_total, int* out_roll, int* out_shift)
 {
@@ -1547,7 +1549,7 @@ static double hell_score(const uint8_t* truth, int truth_cols, const uint8_t* go
     int best_roll = 0, best_shift = 0;
     for (int roll = 0; roll < HELL_ROWS; roll++)
     {
-        for (int cs = 0; cs < 2 * HELL_CELL; cs++)
+        for (int cs = 0; cs < hell_shift_limit; cs++)
         {
             int err = 0, seen = 0, cells = 0, total = 0;
             for (int col = 0; col + cs < truth_cols && col < got_cols; col++)
@@ -1586,6 +1588,215 @@ static double hell_score(const uint8_t* truth, int truth_cols, const uint8_t* go
     *out_roll = best_roll;
     *out_shift = best_shift;
     return (best_seen && best_err >= 0) ? 100.0 * (double) best_err / (double) best_seen : 100.0;
+}
+
+/*
+ * ------------------------------------------------------------------
+ *  Hellschreiber, streaming: drivers/digi/hell_rx.c graded on the reference's own takes
+ * ------------------------------------------------------------------
+ * Same generator, same picture score, same case list as `hell`.  What changes is the receiver: no view
+ * of the whole take, no sort for the threshold, and a pixel clock that has to be found instead of
+ * assumed.  Two rows are therefore expected to differ in the receiver's favour (the clock-error rows,
+ * where the reference uses a fixed period) and one in its disfavour (the off-tune rows, where the
+ * reference's envelope is wider than this filter).  A streaming receiver that simply matched the
+ * reference everywhere would not be testing anything.
+ */
+typedef struct
+{
+    const char* name;
+    float snr_db, qsb_rate, qsb_depth, tune_hz, clk_pct;
+    float max_pixel;          // worst allowed pixel error, percent
+    int   must_fail;          // rows pinned from below: the receiver has to give up here
+} hell_stream_case_t;
+
+static int hell_stream(void)
+{
+    static const char* msg = "HELLSCHREIBER TEST DE UHSDR 123";
+    enum { MAXC = 640 };
+    static uint8_t truth[HELL_ROWS * MAXC], gotp[HELL_ROWS * MAXC];
+    static const hell_stream_case_t cases[] =
+    {
+        /* Ceilings are pinned from the measured table below, not from what the receiver should be able
+         * to do.  Where that leaves a row looking generous, the reason is the known defect at the end
+         * of this file's note: the grid resolves to an eighth of a sample, so a transmitter sitting
+         * between two candidates keeps a small clock error, and a clock error in a raster mode is a
+         * seam rather than a slip.  The rows are still real assertions - a regression past these
+         * numbers means the clock was lost, not merely that the picture is imperfect. */
+        { .name = "clean",      .snr_db = 100.0f, .max_pixel = 6.0f },
+        { .name = "snr 20",     .snr_db = 20.0f,  .max_pixel = 12.0f },
+        { .name = "snr 10",     .snr_db = 10.0f,  .max_pixel = 18.0f },
+        { .name = "snr 10 qsb", .snr_db = 10.0f,  .qsb_rate = 0.5f, .qsb_depth = 6.0f, .max_pixel = 14.0f },
+        // The reference modem's envelope reaches about 700 Hz off tune; this filter is deliberately
+        // narrower (40 samples at 12 kHz, first null near 300 Hz), so a station that far off is a known
+        // cost of streaming rather than a bug to hide.
+        { .name = "tone +200",  .snr_db = 20.0f,  .tune_hz = 200.0f, .max_pixel = 30.0f },
+        /* This row was written expecting a failure that does not happen: 450 Hz off tune, the receiver
+         * reads 22.8 % wrong pixels and the reference reads 14.7 %.  Neither envelope is as narrow as
+         * the "first null near 300 Hz" arithmetic suggested, because the null is a point and not a
+         * wall.  So it is a cost rather than a stop, and it is pinned as one - the row still asserts,
+         * it just asserts the truth. */
+        { .name = "tone +450",  .snr_db = 20.0f,  .tune_hz = 450.0f, .max_pixel = 30.0f },
+        // The rows the reference cannot do at all: it samples at HS_RATE / HS_BAUD, a fixed period,
+        // while this receiver searches 94..102 samples. Clock error is where searching should win.
+        { .name = "clk +1 %",   .snr_db = 20.0f,  .clk_pct = 1.0f,  .max_pixel = 5.0f },
+        { .name = "clk +2 %",   .snr_db = 20.0f,  .clk_pct = 2.0f,  .max_pixel = 12.0f },
+        { .name = "clk -2 %",   .snr_db = 20.0f,  .clk_pct = -2.0f, .max_pixel = 12.0f },
+        /* 4 % of 98 samples is 3.9, and the grid reaches 102, so this is inside the bracket after all:
+         * the receiver locks and reads it at 29 %.  Kept as a row because it is the edge of the range
+         * and the number there is worth watching, not because it has to fail. */
+        { .name = "clk +4 %",   .snr_db = 20.0f,  .clk_pct = 4.0f,  .max_pixel = 32.0f },
+        { .name = "snr 0",      .snr_db = 0.0f,   .max_pixel = 30.0f },
+        { .name = "noise only", .snr_db = -20.0f, .max_pixel = 100.0f, .must_fail = 1 },
+    };
+    const size_t n_cases = sizeof(cases) / sizeof(cases[0]);
+    int failures = 0;
+
+    printf("Hellschreiber through the streaming receiver (drivers/digi/hell_rx.c): samples one at a\n"
+           "time, pixel period searched rather than assumed, threshold tracked from the grid's own\n"
+           "two clusters.  The receiver is initialised at the nominal 1 kHz tone, so an off-tune\n"
+           "station is off-tune for the receiver and not for the test.  Text is %zu characters.\n\n",
+           strlen(msg));
+    printf("%-13s %9s %11s %9s %8s %7s %7s %7s  %s\n", "case", "pixels%", "min-max",
+           "cells ok", "pix ms", "conf", "lock s", "ref %", "verdict");
+
+    for (size_t i = 0; i < n_cases; i++)
+    {
+        const hell_stream_case_t* c = &cases[i];
+        const size_t cap = 300000;
+        float32_t* x = malloc(cap * sizeof(float32_t));
+        float32_t* work = malloc(cap * sizeof(float32_t));
+        if (!x || !work) { free(x); free(work); return 1; }
+
+        int truth_cols = 0;
+        const size_t n = Bench_HellGenerate(x, cap, msg, truth, MAXC, &truth_cols,
+                                           1000.0f + c->tune_hz, c->clk_pct);
+        if (!n) { printf("FAIL  %-13s nothing generated\n", c->name); failures++; free(x); free(work); continue; }
+
+        const int nseeds = c->snr_db < 90.0f ? TABLE_SEEDS : 1;
+        spread_t pix_s = { 0 };
+        int cells_ok = 0, cell_total = 0, got_cols = 0, locked_any = 0, ref_locked = 0;
+        double px_ms = 0.0, conf = 0.0, ref_pix = 100.0, lock_ms = 0.0;
+
+        for (int k = 0; k < nseeds; k++)
+        {
+            memcpy(work, x, n * sizeof(float32_t));
+            if (nseeds > 1)
+            {
+                Bench_RngSeed(0x48454C4Cu + (uint32_t) k);
+                Bench_AddNoise(work, n, c->snr_db, 0.0f);
+            }
+            Bench_AddQsb(work, n, c->qsb_rate, c->qsb_depth);
+
+            HellRx rx;
+            HellRx_Init(&rx, 12000.0f, 1000.0f);
+            memset(gotp, 0, sizeof(gotp));
+            int pix_i = 0;
+            long lock_at = -1;
+            double lock_ms_this = 0.0;
+            for (size_t j = 0; j < n; j++)
+            {
+                if (lock_at < 0 && HellRx_Locked(&rx)) lock_at = (long) j;
+                if (!HellRx_Sample(&rx, work[j])) continue;
+                const int col = pix_i / HELL_ROWS;
+                const int row = pix_i % HELL_ROWS;
+                if (col < MAXC) gotp[row * MAXC + col] = rx.pixel;
+                pix_i++;
+            }
+            got_cols = pix_i / HELL_ROWS;
+            if (HellRx_Locked(&rx)) locked_any++;
+            lock_ms_this = (lock_at < 0) ? (double)n / 12000.0 : (double)lock_at / 12000.0;
+
+            if (getenv("HELL_DUMP") && !k)
+            {
+                fprintf(stderr, "\n[%s] truth then received, %d columns (period %d, mid %.3f):\n",
+                        c->name, truth_cols, rx.period, (double)rx.cand[rx.period_index].mid);
+                for (int r = 0; r < HELL_ROWS; r++)
+                {
+                    fprintf(stderr, "  t ");
+                    for (int col = 0; col < 66 && col < truth_cols; col++)
+                        fputc(truth[r * MAXC + col] ? '#' : '.', stderr);
+                    fprintf(stderr, "\n  r ");
+                    for (int col = 0; col < 66 && col < got_cols; col++)
+                        fputc(gotp[r * MAXC + col] ? '#' : '.', stderr);
+                    fprintf(stderr, "\n");
+                }
+            }
+
+            int cc = 0, tt = 0, roll = 0, shift = 0;
+            /* A streaming receiver starts producing pixels when it locks, not at the first sample of
+             * the take, so the paper can be offset by however many columns that took.  The reference
+             * does not need a wide search because it always starts at the beginning; 12 columns was
+             * chosen for it, and applying the same limit here would score a correct picture as wrong
+             * purely for starting late.  The row roll is free for the same reason. */
+            extern int hell_shift_limit;
+            hell_shift_limit = 2 * HELL_CELL + (int)(lock_ms_this * 122.5 / HELL_ROWS) + HELL_CELL;
+            const double pp = got_cols ? hell_score(truth, truth_cols, gotp, got_cols, MAXC,
+                                                    &cc, &tt, &roll, &shift) : 100.0;
+            spread_add(&pix_s, pp);
+            if (!k)
+            {
+                cells_ok = cc; cell_total = tt;
+                px_ms = (double)HellRx_PeriodQ7(&rx) / 128.0 / 12.0;
+                conf = HellRx_Confidence(&rx);
+                // measured, not derived from the constants: the sample the receiver was first found
+                // locked on, which is the head of the message paid for in acquisition
+                lock_ms = (lock_at < 0) ? (double)n / 12000.0 : (double)lock_at / 12000.0;
+
+                // the reference on the identical take, which is the column that says what streaming
+                // bought and what it cost
+                static uint8_t refp[HELL_ROWS * MAXC];
+                int ref_cols = 0;
+                hell_result_t rres;
+                const int rok = Bench_HellDecode(work, n, refp, MAXC, &ref_cols, &rres);
+                if (rok) ref_locked++;
+                int rc = 0, rt = 0, rr = 0, rs = 0;
+                ref_pix = rok ? hell_score(truth, truth_cols, refp, ref_cols, MAXC, &rc, &rt, &rr, &rs)
+                              : 100.0;
+            }
+        }
+
+        const double mean = pix_s.n ? pix_s.sum / pix_s.n : 100.0;
+        int bad = 0;
+        if (c->must_fail)
+        {
+            // pinned from below: a receiver that reads a take it should not be able to read has found a
+            // way to be confident about something that is not there
+            if (locked_any && mean < 60.0) bad = 1;
+        }
+        else
+        {
+            if (!locked_any) bad = 1;
+            else if (mean > c->max_pixel) bad = 1;
+        }
+
+        printf("%-13s %8.1f%% %5.1f-%-5.1f %4d/%-4d %7.2f %7.2f %7.2f %7.1f  %s\n",
+               c->name, mean, pix_s.lo, pix_s.hi, cells_ok, cell_total, px_ms, conf, lock_ms,
+               ref_pix, bad ? "FAIL" : "");
+        if (bad) failures++;
+        (void) ref_locked;
+    }
+
+    printf("\n`pix ms` is the period the receiver chose, in milliseconds; 8.16 ms is exactly 122.5 Bd.  The\n"
+           "grid covers 94 to 102 samples at 12 kHz, so the 4 %% row is a stated limit rather than a\n"
+           "defect - widening HELL_PERIOD_LO/HI buys rate range at roughly one byte per candidate slot.\n"
+           "`ref %%` is the whole-file modem on the same take, sampling at a fixed nominal period: the\n"
+           "clock rows are where searching pays, and the tune rows where the narrower envelope costs.\n");
+    printf("\nThe row that shows the defect is `clean`: 4.9 %% of pixels wrong and only 4 of 30 glyph\n"
+           "cells exact, while clk +1 %% - where the transmitter's period lands exactly on a grid point\n"
+           "- gives 3.5 %% and 30 of 30.  The truth is 97.959 samples; the grid offers 97.9375 and\n"
+           "98.0625 and the winner is nearer 98.1, so a few hundredths of a sample per pixel accumulates\n"
+           "into two whole pixels of slip over a line.  In a raster mode that is a seam, not a slip: the\n"
+           "picture is right until it isn't, and the cells that straddle a seam are the ones lost.  The\n"
+           "fix is finer resolution (HELL_PERIOD_STEP down to 4 buys 1/32 of a sample at 193 candidates,\n"
+           "2.9 KB per receiver, about 200 ops per sample) or tracking the clock after lock.  This is the\n"
+           "same wall SITOR-B met from the other direction, where a 1.5 %% rate error is two integer steps\n"
+           "and cannot be followed at all - and both point at the same component: a clock that is\n"
+           "measured and held as a fraction, not chosen from a list of whole samples.\n");
+    hell_shift_limit = 2 * HELL_CELL;      // back to the reference's own range; see above
+    printf("sizeof(HellRx) = %lu bytes (%.1f KB), %d candidate clocks from %.3f to %.3f samples.\n",
+           (unsigned long)sizeof(HellRx), sizeof(HellRx) / 1024.0, HELL_N_PERIODS,
+           (double)HELL_PERIOD_LO, (double)HELL_PERIOD_HI);
+    return failures ? 1 : 0;
 }
 
 static int hell_table(void)
@@ -5464,7 +5675,8 @@ int main(int argc, char** argv)
     // through a receiver's AGC, and running it through a second one would not be the radio's path.
     if (strcmp(what, "mode-id") && strcmp(what, "rtty-wav") && strcmp(what, "rtty-align") && strcmp(what, "align-check")
         && strcmp(what, "rtty-trace") && strcmp(what, "tx-check") && strcmp(what, "wefax")
-        && strcmp(what, "navtex") && strcmp(what, "hell") && strcmp(what, "mfsk16")
+        && strcmp(what, "navtex") && strcmp(what, "hell") && strcmp(what, "hell-stream")
+        && strcmp(what, "mfsk16")
         && strcmp(what, "olivia") && strcmp(what, "capture-check")
         && strcmp(what, "navtex-wav") && strcmp(what, "hell-wav")
         && strcmp(what, "mfsk16-wav") && strcmp(what, "olivia-wav")
@@ -5493,6 +5705,7 @@ int main(int argc, char** argv)
     if (!strcmp(what, "navtex")) return navtex_table();
     if (!strcmp(what, "sitor-stream")) return sitor_stream();
     if (!strcmp(what, "hell")) return hell_table();
+    if (!strcmp(what, "hell-stream")) return hell_stream();
     if (!strcmp(what, "mfsk16")) return mfsk16_table();
     if (!strcmp(what, "olivia")) return olivia_table();
     if (!strcmp(what, "floors-2k5")) return floors_2k5();

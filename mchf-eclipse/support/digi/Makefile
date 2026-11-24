@@ -32,7 +32,7 @@ SHIM     = shim
 BENCH_OBJS = digi_bench.o modem_host.o wefax.o navtex.o hellschreiber.o mfsk16.o olivia.o \
              softdds_host.o
 DIRDIR   = ../../drivers/digi
-FW_OBJS    = rtty.o audio_agc.o uhsdr_math.o sitor_rx.o
+FW_OBJS    = rtty.o audio_agc.o uhsdr_math.o sitor_rx.o hell_rx.o
 
 CC       ?= gcc
 # -MMD -MP: the bench allocates the firmware's structs on its own stack, so a stale object compiled
@@ -72,6 +72,9 @@ uhsdr_math.o: ../../misc/uhsdr_math.c
 
 # the streaming SITOR-B demodulator, compiled as the radio compiles it: this is the firmware file,
 # and the reference modem in navtex.c reads the same alphabet tables it does
+hell_rx.o: ../../drivers/digi/hell_rx.c ../../drivers/digi/hell_rx.h
+	$(CC) $(CFLAGS) $(DEFINES) $(INCLUDES) -c -o $@ $<
+
 sitor_rx.o: ../../drivers/digi/sitor_rx.c ../../drivers/digi/sitor_rx.h
 	$(CC) $(CFLAGS) $(FWCFLAGS) $(DEFINES) $(INCLUDES) -c -o $@ $<
 
@@ -142,6 +145,12 @@ navtex: digi_bench
 # receiver never got to - see the table's own text for what each row is pinning.
 sitor-stream: digi_bench
 	@./digi_bench sitor-stream
+
+# Hellschreiber, but through the file the radio would compile: samples one at a time, the pixel clock
+# found by a grid rather than assumed.  Graded against the same takes as `hell` above, so the column
+# that matters is the difference between the two.
+hell-stream: digi_bench
+	@./digi_bench hell-stream
 
 # Hellschreiber: on/off keyed raster at 122.5 Bd, scored as a picture rather than as characters
 hell: digi_bench
