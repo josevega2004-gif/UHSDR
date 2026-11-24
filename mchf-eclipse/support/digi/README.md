@@ -1882,6 +1882,61 @@ its output directly. It never calls `AudioDriver_SetProcessingChain()` and never
 have shown this. "Measured off the radio, therefore the radio is fine" is the exact shape of mistake
 this bug rewarded, and it is the second time in one week that a host result was quoted about something
 the host does not exercise.
+### What this filter is, measured against the design note that proposed it
+
+Upstream keeps a page for exactly this idea - `df8oe/UHSDR` wiki, *Low-latency filtering: Partitioned
+Convolution*, by DD4WH - and reading it against `audio_convolution.c` says plainly what we have and what
+we do not.
+
+The note's own numbers: 1024 complex coefficients partitioned into **eight blocks**, `size = 128`,
+`FFT_size = 256`, decimation 4 from 48 ksps, latency `(size * DF) / SR` = **10.67 ms**, about 27,136
+multiplies and 18,944 adds per 128 new samples, which the note costs at **20 % of a 216 MHz STM32F7**,
+and about 40 KB of memory. The latency formula is the one the bench probe uses too (`FFT/2` over the
+IQ rate - 48000/4 = 12000, so 256 gives 10.67 ms identically), which is why the two sets of numbers line
+up at all.
+
+**What we compile is the one-block special case of that scheme**, not the scheme:
+`CONVOLUTION_MAX_NO_OF_BLOCKS` is 1, so each round does one forward FFT, one complex multiply and one
+inverse FFT, and the tap count is capped at `FFT/2` by construction. That has two consequences worth
+saying out loud, because they are the two questions people ask this filter:
+
+* **Selectivity and latency are tied together here and are not tied together upstream.** Their eight
+  blocks buy 1024 taps at the same 10.67 ms; our 256-size geometry can hold at most 128 taps at that
+  latency, full stop. Wanting a steeper wall at c256's delay means implementing the delay line, which is
+  a `for j < N_blocks` loop over stored block spectra plus `N_blocks` coefficient spectra - roughly
+  three times the multiply count and another ~30 KB, on a chip with 128 KB of it.
+* **Partitioning is a latency-per-selectivity trick, not a CPU trick.** It costs *more* arithmetic per
+  sample than one block, not less, because every input block must be multiplied against every filter
+  block. So it does nothing for the question "the F4 seems not powerful enough for c256" - the answer to
+  that is the smaller geometry, or the load readout on the radio. The measured figures for this build
+  belong to whoever has the radio: the debug line reports `L nn%` average and `P nnn%` worst-case
+  interrupt, and those two numbers, not the F7's 20 %, are what says whether c256 fits a 168 MHz F407.
+
+### Why the noise blanker is a waterfall problem and not an audio problem
+
+The default blanker (`USE_OBSOLETE_NOISEBLANKER 0`) is DL2FW's linear-prediction design, described on the
+upstream *Noise blanker* page and visible at `audio_nr.c:2330-2493`: autocorrelate a 128-sample frame,
+solve Levinson-Durbin for ten LPCs, run the inverse FIR to strip speech, run the matched FIR to find
+impulses, threshold at `2.5 * sqrt(sigma2 * LPC_power)`, then reconstruct each impulse from forward and
+backward predictions. It is not a peak detector - the peak detector is the *obsolete* branch, and saying
+otherwise is a mistake worth correcting because it inverts the cost: the LPC path is worth tens of
+thousands of multiply-accumulates per frame, which is what the debug line's `NB nnnus` was measuring at
+90-120 microseconds.
+
+Two things follow, and both are about where it runs rather than what it computes:
+
+* `AudioNr_HandleNoiseReduction` is called from `UiDriver_TaskHandler_HighPrioTasks()`, the **main loop**,
+  which is the same loop that draws the waterfall. Its guard is `is_dsp_nb_active() || is_dsp_nr()`, so
+  **switching on the blanker switches on the whole spectral NR chain as well** - 256-point FFTs, sqrt-Hann
+  windows, overlap-add - and does so whether or not the operator asked for noise reduction.
+* That chain's own latency is 21.3 ms at 48 ksps (256 x 4 / 48000, stated on the *Noise reduction* page),
+  which is more than double c256's 10.67 ms. Anyone judging the filter's keying feel with NR or NB on is
+  measuring the NR, not the filter.
+
+So "c256 with NB is glitchy in the waterfall" is not the filter starving the audio ISR. It is main-loop
+work: a 100-microsecond block in the loop that also owns the display, arriving in bursts, exactly when
+impulses do. The fix is measurement and placement, not a cheaper blanker - and the A/B between c128 and
+stock should be run with both NB and NR off, or the comparison is not of the filters.
 
 ## The streaming SITOR-B receiver, rewritten around what the mode actually gives away
 
