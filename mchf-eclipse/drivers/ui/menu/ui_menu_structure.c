@@ -416,7 +416,7 @@ const MenuDescriptor infoGroup[] =
 
 const MenuDescriptor debugGroup[] =
 {
-    { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_ENABLE_INFO, NULL,"Enable Debug Info Display", UiMenuDesc("Enable debug outputs on LCD for testing purposes (touch screen coordinates, load, noise blanker, noise reduction and FFT timing) and audio interrupt duration indication via green led") },
+    { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_ENABLE_INFO, NULL,"Enable Debug Info Display", UiMenuDesc("Enable debug outputs on LCD for testing purposes: touch screen coordinates, audio interrupt load and its worst single interrupt (L and P), and the time per frame spent in the noise blanker, noise reduction and the FFT pair inside spectral NR. The green LED used to show interrupt duration; that indication is only in the bootloader.") },
     { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_CW_OFFSET_SHIFT_KEEP_SIGNAL, NULL,"CW Shift Keeps Signal", UiMenuDesc("Enable automatic sidetone correction for CW OFFSET MODE = SHIFT. If you tuned in SSB to a CW signal around the sidetone frequency, you'll keep that signal when going to CW. Even if you switch from USB to CW-LSB etc.") },
     { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_TX_AUDIO, NULL,"TX Audio via USB", UiMenuDesc("If enabled, send generated audio to PC during TX.") },
     { MENU_DEBUG, MENU_ITEM, MENU_DEBUG_CLONEOUT, NULL,"FT817 Clone Transmit", UiMenuDesc("Will in future send out memory data to an FT817 Clone Info (to be used with CHIRP).") },

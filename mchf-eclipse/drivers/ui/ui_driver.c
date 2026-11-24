@@ -7968,16 +7968,28 @@ void UiDriver_TaskHandler_MainTasks()
 #if 1
 				ProfilingTimedEvent* pe_ptr = profileTimedEventGet(ProfileAudioInterrupt);
 
-				// Percent audio interrupt load  = Num of cycles per audio interrupt  / ((max num of cycles between two interrupts ) / 100 )
-				//
-				// Num of cycles per audio interrupt = cycles for all counted interrupts / number of interrupts
-				// Max num of cycles between two interrupts / 100 = HCLK frequency / Interruptfrequenz -> e.g. 168000000 / 1500 / 100 = 1120
-				// FIXME: Need to figure out which clock is being used, 168000000 in mcHF, I40 UI = 168.000.000 or 216.000.000 or something else...
-
-				uint32_t load =  pe_ptr->duration / (pe_ptr->count * (1120));
+				// Share of the interval between two audio interrupts spent inside the handler.  Both
+				// halves come from the build: SystemCoreClock, which HAL_RCC_ClockConfig() sets at
+				// startup and which the microsecond figures on this same screen already use, and
+				// IQ_INTERRUPT_FREQ, the rate this handler runs at - and uhsdr_board_config.h asserts
+				// that the audio and IQ block rates are one and the same interrupt, so a single number
+				// is enough.  It used to divide by a literal 1120 with a note from 2014 wondering aloud
+				// whether the clock was 168 MHz or 216 MHz.  At 168 MHz and 1500 Hz that constant is
+				// correct, and at any other clock the reading is wrong by exactly that ratio - which is
+				// the wrong way round for the number that decides whether a filter geometry fits on the
+				// chip.  L is the average over the window, P the worst single interrupt in it; see
+				// ProfilingTimedEvent.peak for why the pair matters.
+				const uint32_t cycles_per_interrupt = SystemCoreClock / IQ_INTERRUPT_FREQ;
+				uint32_t load = 0;
+				uint32_t peak_load = 0;
+				if (pe_ptr != NULL && pe_ptr->count != 0 && cycles_per_interrupt != 0)
+				{
+					load      = (uint32_t)((pe_ptr->duration * 100) / ((uint64_t)pe_ptr->count * cycles_per_interrupt));
+					peak_load = (uint32_t)((pe_ptr->peak * 100u) / cycles_per_interrupt);
+				}
 				profileTimedEventReset(ProfileAudioInterrupt);
 				char str[20];
-				snprintf(str,20,"L%3u%%",(unsigned int)load);
+				snprintf(str,20,"L%3u%% P%3u%%",(unsigned int)load,(unsigned int)peak_load);
 				if(ts.show_debug_info)
 				{
 					UiLcdHy28_PrintText(ts.Layout->LOAD_X,ts.Layout->LOADANDDEBUG_Y,str,White,Black,0);

@@ -37,6 +37,13 @@ typedef struct {
     uint32_t start;
     uint32_t stop;
     uint64_t duration; // to get average divide duration by count
+    uint32_t peak;     // longest single run, in cycles.  The average is the wrong number for asking
+                       // whether a handler fits in its interval: an audio interrupt that averages 60 %
+                       // and peaks at 130 % misses one block in ten and sounds like a click, while one
+                       // that averages 60 % flat sounds perfect.  The impulse blanker is exactly this
+                       // shape - it exits cheaply when a frame has no impulse in it and runs an
+                       // autocorrelation, a Levinson-Durbin recursion and two FIR passes when it does -
+                       // so on a noisy band its cost is a duty cycle, not a level.
 } ProfilingTimedEvent;
 
 typedef struct {
@@ -132,7 +139,12 @@ static inline void profileTimedEventStop(const ProfiledEventNames pe)
     if (pe<EventProfileMax) {
         eventProfile.event[pe].stop = stop;
         eventProfile.event[pe].count++;
-        eventProfile.event[pe].duration += (eventProfile.event[pe].stop-eventProfile.event[pe].start);
+        const uint32_t run = stop - eventProfile.event[pe].start;
+        eventProfile.event[pe].duration += run;
+        if (run > eventProfile.event[pe].peak)
+        {
+            eventProfile.event[pe].peak = run;
+        }
     }
 #endif
 
@@ -145,6 +157,7 @@ static inline void profileTimedEventReset(const ProfiledEventNames pe)
         eventProfile.event[pe].stop = 0;
         eventProfile.event[pe].count = 0;
         eventProfile.event[pe].duration = 0;
+        eventProfile.event[pe].peak = 0;
     }
 #endif
 }
