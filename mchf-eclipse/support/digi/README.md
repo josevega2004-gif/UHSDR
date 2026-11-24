@@ -1679,7 +1679,7 @@ the spectrum; the last two columns are from the linked image rather than from `s
 |---|---|---|---|---|---|---|---|---|---|
 | 256 (as committed) | 128 | 1024 | 10.0 ms | **0.06 dB** | **34 Hz** | -129.5 dB | 372 | 63,632 B | 32,776 B |
 | 128 | 64 | 512 | 4.7 ms | 1.13 dB | 71 Hz | -133.1 dB | 331 | 44,176 B | 52,232 B |
-| 64 | 32 | 256 | **2.0 ms** | 2.88 dB | 144 Hz | -121.3 dB | **295** | **21,944 B** | **74,272 B** |
+| 64 | 32 | 256 | **2.0 ms** | 2.88 dB | 144 Hz | -121.3 dB | **295** | 34,448 B | 61,960 B |
 | none: the Hilbert pair in use | - | 199 x 2 | 8.25 ms | (shaped later, see below) | 127 Hz, at 3.5 kHz | **-75.8 dB** | 786 | 0 | 96,408 B |
 
 This is the trade, and it is a real one rather than a free lunch: fewer taps buys latency and RAM with
