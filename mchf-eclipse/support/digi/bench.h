@@ -63,7 +63,8 @@ typedef struct
     uint32_t lines_expected;
     uint32_t lines_found;     // rows actually placed and decoded
     uint32_t lines_missed;    // nominal line positions where no sync tip was found
-    float    row_rms_error;   // pixel columns
+    float    row_rms_error;   // samples between consecutive captured tips, minus one line time
+    float    mean_tip_ratio;  // how pure 1857 Hz the windows it accepted as tips actually were
     float    grey_corr;       // Pearson correlation against the ground truth
     float    mean_level;      // decoded grey mean, 0..255
 } wefax_result_t;

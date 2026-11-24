@@ -2666,6 +2666,39 @@ static int mfsk16_wav(const char* path, const char* expected, float limit)
 // can know on its own: how many lines it captured, how the grey is spread, and the picture. The
 // correlation the table scores with is simply not available here, and the run says so instead of
 // printing something that looks like it.
+// The acquisition numbers for a file, with no ground truth anywhere in the path.  A 120 lines/min
+// emission puts its sync tips on a 6000-sample grid, so the spacing between the tips the capture
+// accepted is a measurement the receiver can make without knowing what the picture shows - which is
+// what the earlier claim in this file was wrong about: it said the harness cannot judge a fax capture
+// at all, and what it cannot judge is the content.  Measured, this is the number: 2.6 samples on the
+// generated chart, 335 on a real RTTY take, 317 on a real 25 s recording of 12262.5 kHz that turned
+// out not to be fax.  Two orders of magnitude, from traffic, not from a model.
+static float wefax_acquisition(const char* path, uint32_t* lines_out, float* ratio_out)
+{
+    size_t n; double secs; uint32_t rate, ch;
+    float* x = rec_load_12k(path, &n, &secs, &rate, &ch);
+    if (!x) return -1.0f;
+    const size_t onset = rec_onset(x, n);
+    if (onset)
+    {
+        memmove(x, x + onset, (n - onset) * sizeof(float));
+        n -= onset;
+    }
+    const size_t rows = n / WEFAX_SAMPLES_PER_LINE + 2;
+    uint8_t* grey = calloc(rows, WEFAX_IMG_COLS);
+    wefax_result_t res;
+    memset(&res, 0, sizeof(res));
+    if (grey)
+    {
+        Bench_WefaxDecode(x, n, grey, (uint32_t) rows, &res);
+        free(grey);
+    }
+    free(x);
+    if (lines_out) *lines_out = res.lines_found;
+    if (ratio_out) *ratio_out = res.mean_tip_ratio;
+    return res.row_rms_error;
+}
+
 static int wefax_wav(const char* path)
 {
     size_t n; double secs; uint32_t rate, ch;
@@ -2695,6 +2728,14 @@ static int wefax_wav(const char* path)
     printf("file      : %s\n", path);
     printf("format    : %u Hz, %u channel(s), %.2f s\n", rate, ch, secs);
     printf("lines     : %u captured, %zu line times in the recording\n", res.lines_found, possible);
+    // Acquisition, not content: how pure the accepted tips were, and how steady the spacing between
+    // them came out.  Both are things the receiver knows without being told what the picture should
+    // look like, which is what the grey statistics below are not.
+    printf("tips      : mean ratio %.3f of 1857 Hz against the two picture tones, spacing rms %.1f samples\n",
+           (double) res.mean_tip_ratio, (double) res.row_rms_error);
+    printf("          : %u nominal line positions searched, %u with no tip found\n",
+           res.lines_found + res.lines_missed, res.lines_missed);
+
     if (!ok || res.lines_found == 0)
     {
         printf("verdict   : nothing captured. A fax transmission is 4 kHz wide and this harness reads\n"
@@ -2737,10 +2778,16 @@ static int wefax_wav(const char* path)
     }
     printf("rows      : %u of %u span more than 60 levels, %u start dark\n",
            (unsigned)contrast, res.lines_found, (unsigned)tip);
-    printf("verdict   : none. Open the picture. A capture of another mode can decode into full-length\n"
-           "            lines of plausible-looking grey, and this harness cannot tell that without the\n"
-           "            picture it expects; if the sky is black and the land white, open the other file,\n"
-           "            because the table's own invert row shows the decoder does not choose polarity.\n");
+    // Acquisition, which the receiver can judge, kept apart from content, which it cannot.
+    printf("verdict   : acquisition. %u line times searched, %u tips accepted at mean purity %.3f,\n"
+           "            spacing rms %.1f samples.  A 120 lines/min emission puts its tips on a\n"
+           "            6000-sample grid, so that rms is the test: the generated chart gives 2.6, a\n"
+           "            real RTTY take 335, a real 25 s take of 12262.5 kHz that was not fax 317.\n"
+           "            Nothing here says what the picture shows, and the table's own invert row shows\n"
+           "            the decoder does not choose polarity, so if the sky is black and the land\n"
+           "            white, open the other file.\n",
+           (unsigned) (res.lines_found + res.lines_missed), res.lines_found,
+           (double) res.mean_tip_ratio, (double) res.row_rms_error);
 
     char base[512];
     const char* slash = strrchr(path, '/');
@@ -5000,6 +5047,34 @@ static int selftest(void)
         // miss offsets every later window.  Rows it loses are holes now, not a slide of the picture.
         check(res.lines_found >= cfg.rows * 3 / 4 && skew_corr < 0.9f,
               "fax: per-line skew is not tracked, and the table pins how much it costs");
+        {
+            // The verdict against traffic rather than models: a real RTTY recording must not look like
+            // fax to the acquisition metric, and the generated broadcast must.  Both numbers come from
+            // files on disk, and the RTTY one is an on-air recording, so this is the first check in the
+            // WEFAX section that touches propagation.
+            uint32_t lines = 0; float ratio = 0.0f;
+            const float rtty_rms = wefax_acquisition("fixtures/ddk2-4583.wav", &lines, &ratio);
+            // Its own positive control, written here rather than borrowed from whichever target ran
+            // last: wefax_snr20.wav only exists if make wefax has been run, and a check that reads a
+            // stale file from a previous run is a check that can pass by accident.
+            wefax_cfg_t plain = { .name = "acquisition", .snr_db = 20.0f, .rows = 12 };
+            const size_t plain_n = (size_t) plain.rows * WEFAX_SAMPLES_PER_LINE;
+            float32_t* px = malloc(plain_n * sizeof(float32_t));
+            float fax_rms = -1.0f;
+            if (px)
+            {
+                Bench_WefaxGenerate(px, NULL, &plain);
+                if (Bench_WavWrite("/tmp/fax-acq.wav", px, plain_n, 12000))
+                {
+                    fax_rms = wefax_acquisition("/tmp/fax-acq.wav", &lines, &ratio);
+                }
+                free(px);
+            }
+            printf("     acquisition: real RTTY take spacing rms %.1f samples, generated chart %.1f\n",
+                   (double) rtty_rms, (double) fax_rms);
+            check(fax_rms >= 0.0f && fax_rms < 20.0f, "fax: a broadcast the harness made is accepted as fax by its tip spacing");
+            check(rtty_rms > 100.0f, "fax: a real RTTY recording is rejected as fax by the same spacing metric that accepts it");
+        }
         check(corr > 0.5f, "fax: the chart is still recognisable at 8 dB with fading");
         free(x); free(truth); free(grey);
     }

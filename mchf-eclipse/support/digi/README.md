@@ -182,12 +182,25 @@ line boundary and already knows the picture. The verb loads a take, trims to its
 the other four do, decodes, and writes two PGMs - one each way round, because the table's own
 `invert` row shows the decoder does not choose polarity, so the eye decides.
 
-It reports lines captured, the grey mean, the black/mid/white shares, and the row statistics, and
-then refuses to give a verdict: a capture of another mode can decode into full-length lines of
-plausible-looking grey. The first version of this did judge, from "rows that vary" and "rows that
-start dark", and got it exactly backwards - the real chart has empty sky rows and a sync tip outside
-the picture area, while an RTTY take decoded as fax produces rows that swing from end to end and
-begin black. So the numbers are printed and the picture is the check.
+It reports lines captured, the grey mean, the black/mid/white shares, the mean purity of the windows
+it accepted as sync tips, the spacing between those tips, and the row statistics.
+
+**There is now a verdict, and it is about acquisition rather than content.** A 120 lines/min emission
+puts its sync tips on a 6000-sample grid, so the spacing between the tips the capture accepted is a
+number the receiver can compute without knowing what the picture shows. Measured, it separates by two
+orders of magnitude: **2.6 samples** on a generated broadcast, **335.4 samples** on `ddk2-4583.wav` -
+a real RTTY recording, on air, in the repository as a fixture - and **317.1** on a real 25 s take of
+12262.5 kHz that turned out not to be carrying fax at that hour. Both ends of that are pinned in
+`make test`: the metric must accept the chart it made and reject the RTTY recording. The positive
+control generates and writes its own take inside the check, because reading `wefax_snr20.wav` would
+have made the check pass or fail on whichever target happened to run last.
+
+What the earlier refusal said is still true of *content*, and the reason it was written down is worth
+keeping: the first version of this did judge, from "rows that vary" and "rows that start dark", and got
+it exactly backwards - the real chart has empty sky rows and a sync tip outside the picture area, while
+an RTTY take decoded as fax produces rows that swing from end to end and begin black. Grey statistics
+are not a mode signature. Tip spacing is, and the decoder does not yet choose polarity, which is why
+two pictures are written and the eye still decides whether the sky is up.
 
 **What joining a transmission mid-line costs, measured in `record-check`:** a take with a 0.75 s lead,
 which is one and a half line times and therefore neither a line boundary nor a symbol boundary, returns
@@ -599,9 +612,16 @@ the sync window is 5 ms, so it weathers a few ppm on HF and shares the 6 m limit
   the steer control, not a smarter score.
 * Real station parameters (576 lines/min family, pilot levels, actual phasing signals, the
   frequency plans used by specific shore stations) are not modelled yet.
-* No recorded on-air samples: the radio has no audio input and no mass storage, so a corpus means
-  capturing I/Q or audio some other way. That is the highest value thing to solve before porting
-  this into the firmware, because everything above is a synthetic channel.
+* **No recorded on-air sample of fax itself.** The path from a receiver to a graded picture is now
+  proven end to end against live traffic - `capture/websdr_capture.py` at a 300-4300 Hz passband,
+  through `decode_oracle.js`, into `wefax-wav` - and the acquisition metric rejects the real takes that
+  were not fax (see above). What has not happened yet is a take that *is* fax, because the frequencies
+  tried were not transmitting it at that hour: 12262.5 kHz was busy with something else, and 7880 and
+  16943.5 kHz are not in NA5B's band table (it covers the amateur bands and MW-160, and the capture
+  tool refuses a frequency outside a band rather than returning another band's audio). Everything in
+  this file's WEFAX section is still a synthetic channel until one real chart comes back.
+  Two ways to close it: catch the NOAA circuit on 12262.5 kHz at a time it is actually scheduled, which
+  a receiver in Texas can reach, or record the radio's own USB audio output during a transmission.
 
 ## Future source of real test samples: public WebSDR receivers
 

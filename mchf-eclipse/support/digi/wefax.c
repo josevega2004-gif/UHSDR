@@ -206,6 +206,7 @@ bool Bench_WefaxDecode(const float32_t* x, size_t n, uint8_t* grey, uint32_t gre
     size_t lines = 0;
     size_t starts[512];
     float mean_sum = 0.0f;
+    float ratio_sum = 0.0f;
 
     while (have_prev ? (prev_tip + WEFAX_SAMPLES_PER_LINE < n) : (WEFAX_SAMPLES_PER_LINE < n))
     {
@@ -308,6 +309,7 @@ bool Bench_WefaxDecode(const float32_t* x, size_t n, uint8_t* grey, uint32_t gre
         mean_sum += row_sum;
 
         if (lines < 512) starts[lines] = best;
+        ratio_sum += best_ratio;
         lines++;
         prev_tip = best;
         have_prev = 1;
@@ -329,5 +331,6 @@ bool Bench_WefaxDecode(const float32_t* x, size_t n, uint8_t* grey, uint32_t gre
         res->row_rms_error = sqrtf(acc / (float) (lines - 1));
     }
     res->mean_level = lines ? mean_sum / ((float) lines * WEFAX_IMG_COLS) : 0.0f;
+    res->mean_tip_ratio = lines ? ratio_sum / (float) lines : 0.0f;
     return lines > 0;
 }

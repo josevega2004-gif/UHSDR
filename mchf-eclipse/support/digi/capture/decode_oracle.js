@@ -52,6 +52,11 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
+// How many rate changes a stream is allowed to contain.  Real receivers change it when the requested
+// passband needs a different audio rate, which happens once; several changes in a short stream is what
+// random bytes look like, and the refusal has to stay available for that.
+const MAX_RATE_CHANGES = 2;
+
 function fail(msg) {
   process.stderr.write('oracle: FAIL ' + msg + '\n');
   process.exit(1);
@@ -155,8 +160,24 @@ function walkMessage(b, st, frame) {
     } else if (t === 129) {                          // sample rate
       if (a + 3 > n) return 'rate element cut off at byte ' + a;
       const r = b[a + 1] * 256 + b[a + 2];
-      if (st.rate && r !== st.rate) return 'sample rate changed mid-stream: ' + st.rate + ' -> ' + r;
-      if (!st.rate) { st.rate = r; st.rateFrame = frame; }
+      // A receiver that is handed a wider passband than it started with changes the rate it sends
+      // audio at, because the rate follows the filter width: 4 kHz of weather fax does not arrive at
+      // the 8000 Hz a narrow dial position produced.  That used to be a refusal, which meant a fax take
+      // could never be decoded at all.  It is now a mark, and the take is the longest run between marks
+      // - see recordingSpan.  Joining runs is NOT done: samples at 8000 and 16000 Hz are different
+      // numbers, and interpolating them to one rate would put artifacts of my resampler between the
+      // measurement and the receiver.
+      if (st.rate && r !== st.rate) {
+        st.rateChanges++;
+        if (st.rateChanges > MAX_RATE_CHANGES) {
+          return 'the sample rate changes ' + st.rateChanges + ' times (limit ' + MAX_RATE_CHANGES
+                 + '): a receiver settling on the requested filter changes it once or twice, a stream '
+                 + 'that keeps changing it is not traffic';
+        }
+      }
+      st.rate = r;
+      st.rateFrame = frame;
+      st.rateMarks.push({ frame: frame, rate: r, samples: st.samples });
       a += 3;
     } else if (t === 130) {
       if (a + 3 > n) return 'element 130 cut off at byte ' + a;
@@ -191,6 +212,7 @@ function walkMessage(b, st, frame) {
 function readStream(streamPath) {
   const raw = fs.readFileSync(streamPath);
   const st = { rate: 0, rateFrame: -1, samples: 0, blocks8: 0, blocks14: 0,
+    rateMarks: [], rateChanges: 0,
                silence: 0, maxSilence: 0, G: 0 };
   const frames = [];
   let off = 0;
@@ -258,11 +280,32 @@ function loadDecoder(clientPath) {
 // What the recorder is handed: the message carrying the rate, the samples that share that message
 // and are dropped with it, the frames the recorder gets, and how many samples that is.
 function recordingSpan(st, frames) {
-  const firstRate = st.rateFrame;
+  // The longest stretch that keeps one rate.  Marks are at the messages that declared a rate, so the
+  // run from mark i is everything after that message up to mark i+1, and its sample count is the
+  // difference of the counts the walk carried at those two messages.
+  const marks = st.rateMarks;
+  let pick = 0;
+  let bestSamples = -1;
+  for (let i = 0; i < marks.length; i++) {
+    const end = i + 1 < marks.length ? marks[i + 1].samples : st.samples;
+    const held = end - marks[i].samples;
+    if (held > bestSamples) { bestSamples = held; pick = i; }
+  }
+  const firstRate = marks[pick].frame;
+  const rate = marks[pick].rate;
+  const endMark = pick + 1 < marks.length ? marks[pick + 1].frame : frames.length;
+  const endSamples = pick + 1 < marks.length ? marks[pick + 1].samples : st.samples;
   const next = frames[firstRate + 1];
   const beforeRec = next ? next.samplesBefore : st.samples;
-  return { firstRate: firstRate, beforeRec: beforeRec, earlier: frames[firstRate].samplesBefore,
-           recorded: frames.slice(firstRate + 1), recordedSamples: st.samples - beforeRec };
+  return { firstRate: firstRate, lastFrame: endMark, rate: rate,
+           beforeRec: beforeRec, earlier: frames[firstRate].samplesBefore,
+           recorded: frames.slice(firstRate + 1, endMark),
+           recordedSamples: endSamples - beforeRec,
+           // Everything the take is not: audio in earlier runs and any in later ones.  Counting only
+           // what follows the chosen run reads as nothing dropped when the longest run is also the
+           // last, which is exactly what a receiver does when it widens its filter part-way through.
+           droppedSamples: st.samples - (endSamples - beforeRec),
+           droppedRate: marks.length > 1 ? rate : 0 };
 }
 
 // Whether a take could be recorded at all - a complaint, or null.  These rules live apart from the
@@ -319,9 +362,9 @@ function unrecordable(st, frames) {
 // differently from the format.  A function rather than two fail() calls in the decode because the
 // complaint is what the self test pins, and because the rows that run it go through the decode with
 // a recorder of their own: see expectAnswer() below.
-function decode_mismatch(st, rec, expected) {
-  if (rec.sr !== st.rate) {
-    return 'the recorder took ' + rec.sr + ' Hz, the stream declares ' + st.rate + ' Hz';
+function decode_mismatch(st, rec, expected, rate) {
+  if (rec.sr !== rate) {
+    return 'the recorder took ' + rec.sr + ' Hz, the run it was fed declares ' + rate + ' Hz';
   }
   const got = Math.floor(rec.len / 2);            // 16-bit mono, as rec_finish reports it
   if (got !== expected) {
@@ -358,12 +401,12 @@ function decodeWith(st, span, frames, decoder, outPath) {
   };
   feed(0, span.firstRate + 1);
   app.rec_start();                                   // now the client's rate is the stream's
-  feed(span.firstRate + 1, frames.length);
+  feed(span.firstRate + 1, span.lastFrame);
   const rec = app.rec_finish();
 
   // the decoder has to have accounted for exactly the samples the walk counted, at the rate the
   // stream declares - a mismatch means it consumed the bytes differently from the format
-  const mismatch = decode_mismatch(st, rec, span.recordedSamples);
+  const mismatch = decode_mismatch(st, rec, span.recordedSamples, span.rate);
   if (mismatch) fail(mismatch);
 
   const body = Buffer.concat(rec.wavdata.map((b) => Buffer.from(b))).subarray(0, rec.len);
@@ -610,7 +653,7 @@ function selfTest() {
                answered.recordedSamples, RATE, null);
   expectAnswer(dir, "a recorder at the client's default rate", good, { rate: 8000 },
                answered.recordedSamples, 8000,
-               'the recorder took 8000 Hz, the stream declares ' + RATE + ' Hz');
+               'the recorder took 8000 Hz, the run it was fed declares ' + RATE + ' Hz');
   expectAnswer(dir, "a recorder 128 samples short", good, {},
                answered.recordedSamples - 128, RATE,
                'the decoder produced ' + (answered.recordedSamples - 128) + ' samples where the '
@@ -636,8 +679,13 @@ function selfTest() {
     ['the 2 s silence run',
      streamOf([rateElement(RATE)], [Array(Math.floor(2 * RATE / 128) + 1).fill(132)]),
      /^the stream goes silent for 2\.01 s \(limit 2 s at 7119 Hz\); the client's recorder stops appending after that and truncates the take without saying so$/],
-    ['the rate change', streamOf([rateElement(RATE)], [block8()], [rateElement(8000)]),
-     /^message 2 at byte 140: sample rate changed mid-stream: 7119 -> 8000$/],
+    // One rate change is what a receiver does when the passband you asked for needs a different audio
+    // rate, so it is no longer a refusal - see the run selection below.  Several changes in a short
+    // stream is still not traffic, and that is what this row guards.
+    ['the rates that keep changing',
+     streamOf([rateElement(RATE)], [block8()], [rateElement(8000)], [block8()],
+              [rateElement(11378)], [block8()], [rateElement(16000)]),
+     /^message 6 at byte \d+: the sample rate changes 3 times \(limit 2\): a receiver settling on the requested filter changes it once or twice, a stream that keeps changing it is not traffic$/],
     ['the early audio', streamOf([block8(), block8(), block8()], [rateElement(RATE)], [block8()]),
      /^0\.05 s of audio arrives in messages before the rate element, so it could not be recorded at the stream's 7119 Hz$/],
     ['the cut-off block', streamOf([rateElement(RATE)], [block8().subarray(0, 128)]),
@@ -655,6 +703,31 @@ function selfTest() {
      /^3 trailing bytes after the last message$/],
   ];
   for (const [name, buf, why] of refusals) expectRefusal(dir, name, buf, why);
+
+  // The other half of that same change: a stream that settles on a new rate is not refused, and the
+  // take becomes the longer run rather than the concatenation of two rates.  Checked against the walk
+  // and the span directly, because the point is which samples the decode will be fed, and a row that
+  // only showed a refusal would pass even if the selection picked the shorter run.
+  {
+    const settled = streamOf([rateElement(RATE)], [block8()],
+                             [rateElement(16000)], [block8(), block8(), block8()]);
+    const settledPath = path.join(dir, 'settled.stream');
+    fs.writeFileSync(settledPath, settled);
+    const w = readStream(settledPath);
+    if (w.error) fail('a stream whose receiver settles its rate was still refused: ' + w.error);
+    const sp = recordingSpan(w.st, w.frames);
+    // 1 rate element then 1 block, then another element then 3 blocks: the second run is longer.
+    if (sp.rate !== 16000) fail('the take was read at ' + sp.rate + ' Hz, not the 16000 Hz run '
+                                 + 'that holds most of the audio');
+    if (sp.droppedSamples === 0) {
+      fail('the shorter run was not reported as dropped (marks ' + JSON.stringify(w.st.rateMarks)
+           + ', samples ' + w.st.samples + ', span ' + JSON.stringify({firstRate: sp.firstRate,
+              beforeRec: sp.beforeRec, recorded: sp.recordedSamples}) + ')');
+    }
+    process.stdout.write('oracle:   a stream that settles on a new rate is taken as its longer run '
+                         + '(' + sp.recordedSamples + ' samples at ' + sp.rate + ' Hz, '
+                         + sp.droppedSamples + ' dropped)\n');
+  }
   process.stdout.write('oracle: self-test ok - the built stream walks and is still recordable, four '
                        + 'rows run the recorder\'s answers through the decode itself, and '
                        + refusals.length + ' streams were refused for the reason each was '
