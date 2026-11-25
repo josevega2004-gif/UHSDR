@@ -8045,17 +8045,26 @@ void UiDriver_TaskHandler_MainTasks()
 						}
 					}
 #ifdef USE_CONVOLUTION
-					// the convolution pipeline, one line under the encoders: blocks in and out of the
-					// worker, blocks dropped for want of a free one, and slices refused because the
-					// chain was never sized.  A radio with no audio and in==out==0 and nosetup growing
-					// is a setup that never ran; in climbing while out stays at 0 is a worker that is
-					// not running; out climbing while the operator hears nothing is downstream of all
-					// of this.
+					// the convolution pipeline, one line under the encoders: blocks that went into the
+					// worker and came out of it since this line was last drawn, blocks dropped for want of
+					// a free one, slices refused because the chain was never sized, and slices refused
+					// while a filter was being designed (b1 or more right after a filter change is normal,
+					// b growing while you are not touching the menu is not).  A radio with no audio and
+					// in==out==0 and nosetup growing is a setup that never ran; in climbing while out
+					// stays at 0 is a worker that is not running; out climbing while the operator hears
+					// nothing is downstream of all of this.
 					//
-					// The block size is deliberately not printed: str is 20 bytes and
-					// "C 15780/15780 d0 n0 s128" is 25, so the last field was being cut off mid-number -
-					// and a field that vanishes under truncation cannot be told from a field that reads
-					// zero. The size is known from which image is flashed.
+					// The two block counts are differences, not totals, and that is the fix for the other
+					// way this line used to lie: as totals it filled the 20 byte buffer at about 93.75
+					// blocks a second, which is eighteen minutes after tuning in, and a field cut off by
+					// truncation cannot be told from a field that reads zero.  d and n are totals, capped
+					// at four digits so they cannot bring the truncation back.  The window is one refresh
+					// (64 ms) without the level statistics and about a second with them, because the two
+					// readings then share the line and alternate.
+					//
+					// The block size is deliberately not printed: the line is 19 characters wide at the
+					// caps below and "s128" would be the fifth field nobody asked for.  The size is known
+					// from which image is flashed.
 					// On the P line, i and o are the loudest sample seen since boot on each side of
 					// the filter, in thousandths of full scale: i812 o0 is audio a quarter of full
 					// scale going in and nothing coming out, which is what the block counts cannot
@@ -8066,29 +8075,172 @@ void UiDriver_TaskHandler_MainTasks()
 					// 160 pixel screen the sixth is at the very bottom edge, where whatever else is drawn
 					// there wins. A number nobody can read is worth nothing, and one nobody can read is
 					// exactly what the peaks were.
+					// What the measurement build adds, and the order it cycles through:
+					//
+					//   "G10700/10700 us f2"  the hole one filter change made, from the queue flush to the first
+					//                    sample the new filter hands back.  First number is the *last* change in
+					//                    microseconds, second the worst since reset, so turning one menu item and
+					//                    looking at the screen reports that change rather than a lifetime average.
+					//                    Its floor is one block of buffering (10.7 ms at 12 kHz, 2.7 ms at
+					//                    48 kHz), which a change pays even when the band is cached and nothing
+					//                    is designed, so read it against that floor rather than against zero.
+					//                    f is the frames of audio the design itself refused, at 667 us each:
+					//                    one frame is the most a design can take before it is a click rather
+					//                    than a pause, and the refill after it is in G, not in f.  The
+					//                    microseconds fields cap at 99999, and a capped field here means "over
+					//                    99 ms", which is a fail on its own.
+					//   "W999 I999 O999" cost per block of the pipeline itself: W is the average PendSV worker
+					//                    pass over the blocks it actually filtered (the last 1024 of them, about
+					//                    ten seconds, so the sum cannot wrap), I and O the worst-case
+					//                    audio-interrupt slices on each side of the filter.  These are the
+					//                    numbers the L%/P% duty readout shows as a fraction of 667 us; here they
+					//                    are attributed to this filter instead of to the whole handler.
+					//   "M9999 K9999 n9/9" where a design's time goes: M the cepstrum (four long transforms), K
+					//                    the mask partitions (nfor of them), n designs run over setups called -
+					//                    1/99 means the band cache is working, 99/99 means every menu step is
+					//                    redesigning and the cache is not.
+					//   "U99999 F99999"   the stack: U bytes of main stack used at its deepest, sampled in the
+					//                    audio ISR, the worker and the design; F the bytes still between that
+					//                    point and _ebss, i.e. how much room the heap and the .bss the filter
+					//                    just grew still have.  F is the number the linker cannot tell you, and
+					//                    F!n is the answer you do not want: the stack went n bytes below .bss,
+					//                    printed that way so a collision cannot read as a margin.
+					//
+					// Each reading holds the line for 16 refreshes, about a second.  The fields are capped for
+					// the reason the pipeline line already gives: a value that runs off the end of a 19
+					// character field cannot be told from a zero, and 99999 in a microseconds field means
+					// "over 99 ms", which is a fail on its own.
 					{
 						static uint8_t conv_line_phase;
+						static uint32_t conv_line_in;
+						static uint32_t conv_line_out;
+						// One slot per reading the build can actually produce.  The measurement slots start
+						// after the pipeline line and, when they exist, the peaks line - so a build that asks for
+						// the cost of a design but not for per-sample peaks still gets four seconds of useful
+						// readings rather than a duplicate of the pipeline line.
+						const uint8_t conv_slot_us = 16;
+#ifdef CONVOLUTION_MEASURE
+#ifdef CONVOLUTION_LEVEL_STATS
+						const uint8_t conv_slot_first_meas = 2;
+#else
+						const uint8_t conv_slot_first_meas = 1;
+#endif
+						const uint8_t conv_slot_count = conv_slot_first_meas + 4;
+#else
+						// Without the measurement build the line does what it always did: blocks, then peaks
+						// if the peaks are compiled in, otherwise the blocks again.
+						const uint8_t conv_slot_count = 2;
+#endif
 						conv_line_phase++;
-						if (conv_line_phase >= 32) conv_line_phase = 0;
-						// With the level statistics compiled out there is nothing to show in the
-						// second phase, so the line stops rotating instead of alternating between
-						// two copies of the same numbers.
-						if (conv_line_phase < 16
+						if (conv_line_phase >= conv_slot_count * conv_slot_us) conv_line_phase = 0;
+						const uint8_t conv_slot = conv_line_phase / conv_slot_us;
+#ifdef CONVOLUTION_MEASURE
+						// cycles -> microseconds with one integer division: SystemCoreClock is what
+						// profileTimedEventInit() and the L% readout already use, and dividing the clock first
+						// keeps the arithmetic in 32 bits, which a multiply by 1000000 would not.
+						const uint32_t cyc_per_us = SystemCoreClock / 1000000u;
+						const uint32_t meas_gap  = cyc_per_us ? conv_meas_gap_cyc_last  / cyc_per_us : 0;
+						const uint32_t meas_max  = cyc_per_us ? conv_meas_gap_cyc_max   / cyc_per_us : 0;
+						const uint32_t meas_blk  = cyc_per_us && conv_meas_block_count
+						                            ? conv_meas_block_cyc_total / conv_meas_block_count / cyc_per_us : 0;
+						const uint32_t meas_isr_i = cyc_per_us ? conv_meas_isrin_cyc_max  / cyc_per_us : 0;
+						const uint32_t meas_isr_o = cyc_per_us ? conv_meas_isrout_cyc_max / cyc_per_us : 0;
+						const uint32_t meas_minp  = cyc_per_us ? conv_meas_minphase_cyc_max / cyc_per_us : 0;
+						const uint32_t meas_mask  = cyc_per_us ? conv_meas_mask_cyc_max / cyc_per_us : 0;
+						// The stack: the deepest of the three sampled pointers, against the top the startup
+						// code installed (startup_stm32f407xx.S does `ldr sp, =_estack`) and against the end of
+						// .bss, which is where _sbrk() starts pushing up.
+						extern unsigned int _ebss, _estack;
+						uint32_t msp_low = 0;
+						uint32_t msp_cand;
+						for (uint8_t k = 0; k < 3; k++)
+						{
+							msp_cand = k == 0 ? conv_meas_msp_min_isr : (k == 1 ? conv_meas_msp_min_worker : conv_meas_msp_min_design);
+							if (msp_cand != 0 && (msp_low == 0 || msp_cand < msp_low)) msp_low = msp_cand;
+						}
+						const uint32_t stack_used  = msp_low ? (uint32_t)&_estack - msp_low : 0;
+						const int32_t stack_clear = msp_low ? (int32_t)(msp_low - (uint32_t)&_ebss) : 0;
+						if (conv_slot == conv_slot_first_meas)
+						{
+							snprintf(str,20,"G%u/%u us f%u",
+									(unsigned int)(meas_gap > 99999u ? 99999u : meas_gap),
+									(unsigned int)(meas_max > 99999u ? 99999u : meas_max),
+									(unsigned int)(conv_meas_busyin_last > 99u ? 99u : conv_meas_busyin_last));
+						}
+						else if (conv_slot == conv_slot_first_meas + 1)
+						{
+							snprintf(str,20,"W%u I%u O%u",
+									(unsigned int)(meas_blk > 9999u ? 9999u : meas_blk),
+									(unsigned int)(meas_isr_i > 999u ? 999u : meas_isr_i),
+									(unsigned int)(meas_isr_o > 999u ? 999u : meas_isr_o));
+						}
+						else if (conv_slot == conv_slot_first_meas + 2)
+						{
+							snprintf(str,20,"M%u K%u %u/%u",
+									(unsigned int)(meas_minp > 9999u ? 9999u : meas_minp),
+									(unsigned int)(meas_mask > 9999u ? 9999u : meas_mask),
+									(unsigned int)(conv_meas_design_count > 9u ? 9u : conv_meas_design_count),
+									(unsigned int)(conv_meas_setup_count > 9u ? 9u : conv_meas_setup_count));
+						}
+						else if (conv_slot == conv_slot_first_meas + 3)
+						{
+							if (stack_clear < 0)
+							{
+								// The stack is below .bss: the one thing this field exists to catch, and an
+								// unsigned subtraction used to print it as a margin of 999999 bytes.
+								snprintf(str,20,"U%u F!%u",
+										(unsigned int)(stack_used > 99999u ? 99999u : stack_used),
+										(unsigned int)(-stack_clear > 9999 ? 9999 : -stack_clear));
+							}
+							else
+							{
+								snprintf(str,20,"U%u F%u",
+										(unsigned int)(stack_used > 99999u ? 99999u : stack_used),
+										(unsigned int)(stack_clear > 999999 ? 999999 : stack_clear));
+							}
+						}
+						else
+#endif
+						// The counters line, unless this is the peaks slot of a build that has the level
+						// statistics: showing i0 o0 without them would report a measurement that was never
+						// taken, which is how this line used to lie the other way.  A build without them
+						// compiles the condition to false and always falls through to the counters.
+						if (conv_slot == 1
 #ifndef CONVOLUTION_LEVEL_STATS
-						    || 1
+						    && 0
 #endif
 						    )
 						{
-							snprintf(str,20,"C %u/%u d%u n%u",
-									(unsigned int)conv_stat_blocks_in, (unsigned int)conv_stat_blocks_out,
-									(unsigned int)conv_stat_dropped, (unsigned int)conv_stat_nosetup);
+							// Only reachable with the level statistics compiled in.
+							snprintf(str,20,"P i%u o%u",
+									(unsigned int)conv_stat_peak_in, (unsigned int)conv_stat_peak_out);
 						}
 						else
 						{
-							// Only reachable with the level statistics compiled in: showing i0 o0
-							// otherwise would report a measurement that was never taken.
-							snprintf(str,20,"P i%u o%u",
-									(unsigned int)conv_stat_peak_in, (unsigned int)conv_stat_peak_out);
+							// conv_meas_reset() zeroes the totals these differences are taken against, and the
+							// baselines are statics that outlive it: a total that went backwards is that reset, so
+							// the baselines are taken again rather than printing the wrapped difference as a capped
+							// 999.  Nothing else makes a total smaller - they only wrap after 4.29e9 blocks, about
+							// 529 days at this rate, and the difference means nothing then either.
+							if (conv_stat_blocks_in < conv_line_in || conv_stat_blocks_out < conv_line_out)
+							{
+								conv_line_in = conv_stat_blocks_in;
+								conv_line_out = conv_stat_blocks_out;
+							}
+							// Every field is capped, because the bug being reported here is the line itself:
+							// as since-boot totals it overfilled the 20 byte buffer eighteen minutes after
+							// tuning in, and a number that disappears under truncation is indistinguishable
+							// from a zero.  Worst case below is "C999/999 d99 n99 b9" = 19 characters.
+							snprintf(str,20,"C%u/%u d%u n%u b%u",
+									(unsigned int)((conv_stat_blocks_in - conv_line_in) > 999u ? 999u
+									                                       : (conv_stat_blocks_in - conv_line_in)),
+									(unsigned int)((conv_stat_blocks_out - conv_line_out) > 999u ? 999u
+									                                       : (conv_stat_blocks_out - conv_line_out)),
+									(unsigned int)(conv_stat_dropped > 99u ? 99u : conv_stat_dropped),
+									(unsigned int)(conv_stat_nosetup > 99u ? 99u : conv_stat_nosetup),
+									(unsigned int)(conv_stat_busyin > 9u ? 9u : conv_stat_busyin));
+							conv_line_in = conv_stat_blocks_in;
+							conv_line_out = conv_stat_blocks_out;
 						}
 						UiLcdHy28_PrintText(0,(uint16_t)(ts.Layout->LOADANDDEBUG_Y + 9 * (ENC_MAX + 1)),str,White,Black,0);
 					}

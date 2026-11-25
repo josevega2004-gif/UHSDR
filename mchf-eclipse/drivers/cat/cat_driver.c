@@ -1015,7 +1015,8 @@ bool CatDriver_CloneInStart()
 // master works on the translated frequency, everywhere else the two are the same.  Both the read and
 // the write path need this, and a copy of it that learns a condition on one side only would make the
 // radio answer a frequency query with something other than the frequency it just accepted.
-static ulong CatDriver_TranslateOffset(void)
+// Signed, because the translate modes are: -6 kHz and -12 kHz (the default) are negative offsets.
+static int32_t CatDriver_TranslateOffset(void)
 {
     if(ts.xlat != 0)
     {
@@ -1057,7 +1058,7 @@ static void CatDriver_HandleCommands()
         case FT817_SET_FREQ:
         {
             ulong f = 0;
-            ulong fdelta = CatDriver_TranslateOffset();
+            const int32_t fdelta = CatDriver_TranslateOffset();
 
             // The four bytes are two BCD digits each, and an FT817 sends decimal digits only: a
             // nibble over 9 means this is not a frequency at all, which is what a master that lost
@@ -1081,14 +1082,17 @@ static void CatDriver_HandleCommands()
                 break;                          // not a frequency: no tune, and no ACK claiming one
             }
             f *= 10;
-            if (f < fdelta)
+            // the offset is subtracted because the command names the translated frequency and the
+            // dial holds the RF one; below a positive offset that subtraction used to wrap the
+            // unsigned arithmetic to about 4.3 GHz, and the radio went to the generic band with an
+            // ACK.  Done in 64 bits because the offset has a sign: compared as unsigned, a negative
+            // one is about 4.3 GHz itself and every frequency there is reads as below it.
+            const int64_t tune = (int64_t) f - fdelta;
+            if (tune < 0)
             {
-                // the offset is subtracted because the command names the translated frequency and the
-                // dial holds the RF one; below the offset that subtraction used to wrap the unsigned
-                // arithmetic to about 4.3 GHz, and the radio went to the generic band with an ACK
                 break;
             }
-            df.tune_new = f - fdelta;
+            df.tune_new = (ulong) tune;
 
             resp[0] = 0;
             bc = 1;
@@ -1101,9 +1105,13 @@ static void CatDriver_HandleCommands()
 
         case FT817_GET_FREQ:
         {
-            ulong fdelta = CatDriver_TranslateOffset();
+            int64_t translated = (int64_t) df.tune_new + CatDriver_TranslateOffset();
+            if (translated < 0)
+            {
+                translated = 0;
+            }
 
-            ulong f = (df.tune_new + fdelta  + 5)/ 10;
+            ulong f = (ulong) ((translated + 5) / 10);
             ulong fbcd = 0;
             int fidx;
             for (fidx = 0; fidx < 8; fidx++)

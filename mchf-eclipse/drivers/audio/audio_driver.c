@@ -1191,29 +1191,6 @@ void AudioDriver_SetProcessingChain(uint8_t dmod_mode, bool reset_dsp_nr)
     // conditions because getting them out of step shifts the passband instead of failing.
     if (CONVOLUTION_USED_FOR(dmod_mode))
     {
-        // 128 samples per block: 128/48000 = 2.7ms, 128/12000 = 10.7ms
-        cbs.size = FFT_CONVOLUTION_SIZE / 2;
-        // The partitions must fit the arrays: nfor = nc / size, and fmask[]/fftout[] have
-        // CONVOLUTION_MAX_NO_OF_BLOCKS of them, so the longest response the block size allows is
-        // MAX_NO_OF_BLOCKS * size taps.  Clamped rather than asserted, because this runs on whatever
-        // filter path the user last used and a rejected build would only hide it.
-        cbs.nc = CONVOLUTION_MAX_NO_OF_COEFFS;
-        if (cbs.nc / cbs.size > CONVOLUTION_MAX_NO_OF_BLOCKS)
-        {
-            cbs.nc = cbs.size * CONVOLUTION_MAX_NO_OF_BLOCKS;
-        }
-        cbs.nfor = cbs.nc / cbs.size;
-        cbs.buffidx = 0;
-
-        const float32_t conv_bw = (float32_t) FilterInfo[ts.filters_p->id].width;
-        // 10% of the passband kept clear at the low end: that is where the carrier and the
-        // heterodyne products of a mistuned signal live, and the 250 Hz floor the 2018 experiment
-        // hard-coded for a 2.7 kHz filter is exactly conv_bw/10 at that width.
-        const float32_t conv_lo = conv_bw / 10.0f;
-        // The sideband is a property of the filter, not of a later sum: USB and CW-U are positive
-        // frequencies, LSB and CW-L negative.  Same predicate the receiver uses further down, so a
-        // CW flip of ts.cw_lsb re-designs the mask the way it swaps the i+q / i-q sum today.
-        const float32_t conv_sign = RadioManagement_LSBActive(dmod_mode) ? -1.0f : 1.0f;
         // The rate these blocks actually carry.  The RX processor picks it a few hundred lines
         // below with (FIR_I_coeff_file == i_rx_new_coeffs && mode != FM) || SAM || AM; for the modes
         // this path takes over, CONVOLUTION_USED_FOR() has already excluded FM, SAM and AM, so the
@@ -1225,13 +1202,14 @@ void AudioDriver_SetProcessingChain(uint8_t dmod_mode, bool reset_dsp_nr)
         const float32_t conv_rate = (float32_t) ((ts.filters_p->FIR_I_coeff_file == i_rx_new_coeffs)
                 ? ads.decimated_freq : IQ_SAMPLE_RATE);
 
-        // The windowed sinc comes out of the designer with a passband gain of bandwidth/rate, which
-        // at 2.7 kHz on 12 kHz is -13 dB: the AGC would absorb it, but the S-meter and the squelch
-        // thresholds read the same stream, so the masks are normalised to unity instead and the
-        // audio arrives at about the level the Hilbert path delivers today.
-        AudioDriver_SetConvolutionFilter(cbs.nc, conv_sign * conv_lo, conv_sign * conv_bw, conv_rate,
-                                         0, conv_rate / conv_bw);
-        AudioDriver_ConvolutionReset();
+        // The band is the filter path's: its width around its centre, not 0..width.  A 500 Hz CW
+        // path is centred on the sidetone pitch, and the path's IIR, which still runs after this
+        // filter, is centred there too.  The sideband is a property of the filter rather than of a
+        // later sum: USB and CW-U above zero, LSB and CW-L below, by the predicate the receiver
+        // uses further down for its i+q / i-q choice.
+        AudioDriver_ConvolutionSetFilterPath((float32_t) FilterInfo[ts.filters_p->id].width,
+                                             (float32_t) ts.filters_p->offset,
+                                             RadioManagement_LSBActive(dmod_mode), conv_rate);
     }
 #endif
 
@@ -2781,7 +2759,11 @@ static void AudioDriver_RxProcessor(IqSample_t * const srcCodec, AudioSample_t *
                 // of step with the input.  With today's numbers a slice never straddles a block (128 is
                 // a multiple of 8 and of 32), but nothing here may depend on that, and the first block
                 // of all is always missing because the filter answers one block late.
-                (void) conv_taken;      // the input side cannot partially fail
+                // The count is not used here: the input side can return short, because an empty free
+                // ring makes it drop the rest of the slice (and count it).  Nothing below depends on
+                // the count - the slice is rewritten from here on, first by the output side and then
+                // by the silence below - so a short take is a dropout, not a desynchronisation.
+                (void) conv_taken;
                 if (conv_given < blockSizeIQ)
                 {
                     arm_fill_f32(0.0f, adb.iq_buf.i_buffer + conv_given, blockSizeIQ - conv_given);

@@ -58,7 +58,11 @@ static void transform(float* d, int n, int inverse)
 
         for (int i = 0; i < n; i += len)
         {
-            float cur_real = 1.0f, cur_imag = 0.0f;
+            // The rotation is kept in double and only its products are rounded to float.  Kept in float
+            // it is rounded once per step, 2048 times over in a 4096 point stage, where CMSIS reads
+            // each rotation from a table - and the minimum phase design, whose stop band is 110 dB
+            // down, is the one caller that would see the difference.
+            double cur_real = 1.0, cur_imag = 0.0;
 
             for (int k = 0; k < len / 2; k++)
             {
@@ -80,8 +84,8 @@ static void transform(float* d, int n, int inverse)
 
                 double nr = cur_real * wreal - cur_imag * wimag;
                 double ni = cur_real * wimag + cur_imag * wreal;
-                cur_real = (float) nr;
-                cur_imag = (float) ni;
+                cur_real = nr;
+                cur_imag = ni;
                 conv_probe_fft_ops += 6;
             }
         }
@@ -102,6 +106,10 @@ const arm_cfft_instance_f32 arm_cfft_sR_f32_len64  = { 64,  NULL, NULL, 0 };
 const arm_cfft_instance_f32 arm_cfft_sR_f32_len128 = { 128, NULL, NULL, 0 };
 const arm_cfft_instance_f32 arm_cfft_sR_f32_len256 = { 256, NULL, NULL, 0 };
 const arm_cfft_instance_f32 arm_cfft_sR_f32_len512 = { 512, NULL, NULL, 0 };
+// the minimum phase design's transform: four times the response, so 1024, 2048 or 4096 points
+const arm_cfft_instance_f32 arm_cfft_sR_f32_len1024 = { 1024, NULL, NULL, 0 };
+const arm_cfft_instance_f32 arm_cfft_sR_f32_len2048 = { 2048, NULL, NULL, 0 };
+const arm_cfft_instance_f32 arm_cfft_sR_f32_len4096 = { 4096, NULL, NULL, 0 };
 
 void arm_cfft_f32(const arm_cfft_instance_f32* S, float32_t* p1, uint8_t ifftFlag,
                   uint8_t bitReverseFlag)

@@ -1687,7 +1687,7 @@ real part as the audio: the filter and the demodulator become the same operation
 depending on how steep the shape is. The maths is Warren Pratt's wdsp partitioned convolution.
 
 It had not been buildable since 1c09d16c (2019-02-02), and building it turned out to be the small
-part. Six things were wrong, in the order they were found:
+part. Nine things were wrong, the first six in the order they were found:
 
 1. `Sample_Buffer` in `audio_driver.h` used `SAMPLE_BUFFER_SIZE` from a header that includes it. That
    one line is why 95 of the 476 translation units failed, rather than one file.
@@ -1712,85 +1712,501 @@ part. Six things were wrong, in the order they were found:
    overlap-save block are the clean part and the wrap-corrupted part, so the filter in use was not
    the filter that was designed. Measured, sideband separation went from 12.3 dB to 144 dB.
 
+Three more were in the setup rather than in the filter, and the harness passed all three until it was
+made to compare with the radio instead of with itself:
+
+7. **The sidebands were swapped.** The designer was carried over with `e^{-jwn}` taps, and the masks
+   here are a forward transform of them, so a band given as positive frequencies passed the negative
+   ones: USB received the lower sideband. The check for exactly this was green, because the probe's
+   model of the Hilbert pair was written `table[k] * x[n-k]`, while `audio_filter.c` hands the tables
+   to `arm_fir_f32()` unreversed and CMSIS pairs `pCoeffs[0]` with the *oldest* sample. The model was
+   mirrored, the filter was mirrored, and the two agreed. With the model in the radio's tap order the
+   check failed on the committed code, and the designer's sign is what was corrected.
+8. **The band ignored where the filter path sits.** It was always `width/10 .. width`. A CW path is
+   300 or 500 Hz wide *around the sidetone*, 500 to 950 Hz up, so all ten 300 Hz paths and three of
+   the five 500 Hz ones had no overlap with the band at all (-110 dB at the note), and the offset
+   1.8 kHz and 2.3 kHz paths lost their top end. The band is now the path's: `offset +- width/2`,
+   with a 50 Hz floor where the path starts at zero, which is where the Hilbert pair is 4 dB down.
+9. **The gain was `rate / width`.** The windowed sinc already has a passband gain of one, so the
+   audio came out 7 dB hot at 2.7 kHz, 22 dB at 500 Hz and 26 dB at 300 Hz, and stepped with every
+   change of filter. The `i+q` sum it replaces has a gain of two on every table, so it is two.
+
+The setup is one function now, `AudioDriver_ConvolutionSetFilterPath()`, which the radio and the probe
+both call: the probe used to type its own copy, with different edges and a different gain, which is why
+8 and 9 could not show. Section 8 of the probe then takes the radio's own `FilterPathInfo[]` - the
+Makefile cuts the table out of `audio_filter.c` - and puts a tone through the centre of every SSB and CW
+path, both sidebands: it has to come out within 1 dB of the level the path in use delivers, and 60 dB
+down on the other side of zero. Each of 7, 8 and 9 put back makes it fail.
+
 Today the option compiles in all 95 units that can see it (`make build-config-check` holds it there),
 it links, and `convolution_probe.c` runs the shipped module on a host. What it is worth, measured by
 putting one complex tone through each path at the 2.7 kHz / 12 kHz filter path:
 
 | | convolution, 1024 taps | Hilbert pair + `i+q`, 199 taps |
 |---|---|---|
-| sideband separation at +-1350 Hz | **144 dB** | 88 dB |
-| response at +3000 / +4500 / +6000 Hz | -139 / -137 / -159 dB | -111 / -104 / -94 dB |
-| arithmetic per sample, counted as it runs | **372** | 786 |
+| sideband separation at +-1350 Hz | **110 dB** | 88 dB |
+| response at +3000 / +4500 / +6000 Hz, above the 2.7 kHz edge | -110 / -111 / -112 dB | 0.0 / -85 / -94 dB (its IQ filter closes at 3.5 kHz, see below) |
+| arithmetic per sample, counted as it runs (steady state) | **356** | 796 |
+| CPU time per audio sample on the F407 at 168 MHz | **3.2 us, 3.8 % of the core** | 7.1 us, 8.5 % |
 | the same 1024-tap shape as an ordinary FIR | 8192 per sample | - |
-| delay, decimated path | 10.0 ms (a 128-sample block is 10.7 ms of 12 kHz) | 8.25 ms |
-| delay, path that does not decimate | **2.0 ms** (the same block is 2.7 ms of 48 kHz) | 2.06 ms |
-| static RAM the module adds | **62 KiB** | none, the tables live in flash |
-| flash | +2,560 bytes | - |
+| audio delay, 2.7 kHz SSB path at 12 kHz | 11.0 ms (10.0 of buffering, 1.0 in the taps) | 8.25 ms |
+| audio delay, 500 Hz CW path at 12 kHz | 15.0 ms (10.0 of buffering, 5.0 in the taps) | 8.25 ms |
+| static RAM the module adds | **54 KiB** | none, the tables live in flash |
+| flash | +44,320 bytes, 41,296 of them the minimum phase design and the 4096-point transform it uses | - |
+
+The op counts are steady state, and that is what the CPU row multiplies. The probe's own run averages read
+372 and 786, which is what its counter prints when it is asked: the convolution run divides four blocks of
+tail flush by the stream length (+16 per sample) and the pair run includes the first 199 samples, in which
+the window is still filling (-10 per sample). Steady state is what the radio pays on every sample it
+actually filters, so it is what every table here bills.
 
 So the answer to "might it be better" is yes on both selectivity and cost per sample, at the price of
-about 2 ms and 62 KiB of RAM.
+about 3 ms of delay on SSB and 7 ms on CW at this geometry, 54 KiB of RAM and 44 KB of flash. The delay
+is a geometry choice: at `-DFFT_CONVOLUTION_SIZE=64` this filter is *earlier* than the Hilbert pair, see
+the table below and "Minimum phase" after it.
 
 The geometry is a build choice, and all three settings below were measured with this same harness:
 
 ```
-make -C support/digi convolution-check EXTRA_DEFS='-DFFT_CONVOLUTION_SIZE=64 -DCONVOLUTION_MAX_NO_OF_COEFFS=512'
+make -C support/digi convolution-check EXTRA_DEFS='-DFFT_CONVOLUTION_SIZE=64'
 ```
+
+The tap count and the impulse array follow from the block size (`CONVOLUTION_MAX_NO_OF_COEFFS` is
+`CONVOLUTION_MAX_NO_OF_BLOCKS * FFT_CONVOLUTION_SIZE / 2` unless something overrides it, and
+`AudioDriver_ConvolutionSetFilterPath()` clamps to the same product), so one flag moves the whole geometry
+rather than leaving the arrays sized for a different build.
 
 All three were measured with the same harness, on the same signals. The ripple, the skirt and both
 rejection columns come from sweeping 216 whole-cycle offsets through each path twice, once on each side
 of zero, so the passband curve and the image curve are the same measurement asked of the two halves of
 the spectrum; the last two columns are from the linked image rather than from `sizeof`:
 
-| `-DFFT_CONVOLUTION_SIZE` | block | taps | latency at 12 kHz | in-band ripple | skirt, -6 to -60 dB | image, worst in band | ops / sample | `.bss` cost | stack left |
+| `-DFFT_CONVOLUTION_SIZE` | block | taps | audio delay at 12 kHz, SSB 2.7 kHz / CW 500 Hz | in-band ripple | skirt, -6 to -60 dB | image, worst in band | ops / sample, steady state | `.bss` cost | stack left |
 |---|---|---|---|---|---|---|---|---|---|
-| 256 (as committed) | 128 | 1024 | 10.0 ms | **0.06 dB** | **34 Hz** | -129.5 dB | 372 | 63,632 B | 32,776 B |
-| 128 | 64 | 512 | 4.7 ms | 1.13 dB | 71 Hz | -133.1 dB | 331 | 44,176 B | 52,232 B |
-| 64 | 32 | 256 | **2.0 ms** | 2.88 dB | 144 Hz | -121.3 dB | **295** | 34,448 B | 61,960 B |
-| none: the Hilbert pair in use | - | 199 x 2 | 8.25 ms | (shaped later, see below) | 127 Hz, at 3.5 kHz | **-75.8 dB** | 786 | 0 | 96,408 B |
+| 256 (as committed) | 128 | 1024 | 11.0 / 15.0 ms | 0.00 dB | **34 Hz** | -110.3 dB | 356 | 55,472 B | 40,836 B |
+| 128 | 64 | 512 | 5.7 / 9.2 ms | 0.00 dB | 71 Hz | -110.3 dB | 324 | 31,920 B | 64,388 B |
+| 64 | 32 | 256 | **2.9 / 5.9 ms** | 0.00 dB | 144 Hz | -110.2 dB | **292** | 20,144 B | 76,164 B |
+| none: the Hilbert pair in use | - | 199 x 2 | 8.25 ms | (shaped later, see below) | 127 Hz, at 3.5 kHz | **-75.8 dB** | 796 | 0 | 96,304 B |
+
+**What the arithmetic is in time.** The op counts above are measured; the clock is arithmetic. A Cortex-M4F
+issues one single-precision operation per cycle, and the CMSIS and compiled loops spend roughly that much
+again on loads, stores and loop control, so 1.5 cycles per counted operation at 168 MHz is the estimate
+the CPU-time figures are drawn with, and 1.0 to 2.0 is the range they are uncertain by:
+
+| | normal receiver (199-tap pair) | conv 256 | conv 128 | conv 64 |
+|---|---|---|---|---|
+| CPU time per 12 kHz sample | 7.1 us | **3.2 us** | 2.9 us | 2.6 us |
+| share of one core | 8.5 % | **3.8 %** | 3.5 % | 3.1 % |
+| the same, at 1.0 - 2.0 cycles per operation | 4.7 - 9.5 us | 2.1 - 4.2 us | 1.9 - 3.9 us | 1.7 - 3.5 us |
+| one worker pass | none, it runs per sample | 0.41 ms every 10.7 ms | 0.19 ms every 5.3 ms | 0.08 ms every 2.7 ms |
+
+Two things follow that the op count alone does not say. The pair's 8.5 % is spread evenly through the audio
+interrupt, one sample at a time, while the filter's 3.8 % arrives in bursts: a whole 128-sample block, two
+transforms and eight partitions, is about 0.43 ms of work in the worker every 10.7 ms, which is the block
+part of the `G` reading in the measurement build. And the smaller geometries are cheaper in time as well as
+RAM: 3.1 % at geometry 64 against 3.8 % at 256, for the skirt and for what section 11 charges at DC.
+Neither number is a measurement of this chip: the check is `L`/`P` on the debug line, and `G` for the
+burst, which is what the measurement build exists for.
+
+The `.bss` and stack columns were re-read from four clean links after `CONVOLUTION_MAX_NO_OF_COEFFS`
+became derived from the block size rather than a fixed 2048, which is 8 KiB at the default geometry and
+12 KiB at the other two: `_ebss` 0x200087c8 without the option and 0x20016074, 0x20010474, 0x2000d674 at
+256, 128 and 64, against a stack top of 0x2001fff8. Text moves 44,320 bytes at 256 and 3,504 at 128 and
+64 - the difference being the 4096-point transform, which only the default geometry asks for.
 
 This is the trade, and it is a real one rather than a free lunch: fewer taps buys latency and RAM with
-passband quality. 1024 taps holds the audio band to 0.06 dB and gets from -6 dB to -60 dB in 34 Hz; 256
-taps gets the same job done in 144 Hz of skirt and wanders 2.9 dB across the band, which is a colour you
-would hear on a signal with a lot of high-frequency content in it.
+the skirt. 1024 taps gets from -6 dB to -60 dB in 34 Hz and 256 taps takes 144 Hz to do it. The audio
+band itself is flat at all three (the ripple column is measured from 300 to 2400 Hz, and it read 1.1 and
+2.9 dB at the two smaller geometries only while the band started at 270 Hz and their wider low skirt
+reached into that window). What the wider skirt costs at the low end instead is the other sideband close
+to the carrier: at 256 taps a signal within about 100 Hz of zero on the wrong side is rejected no better
+than the Hilbert pair rejects it, where 1024 taps has it 100 dB down 10 Hz out.
 
 The image column is the reason the option exists: a tone on the *rejected* side of the carrier, at any
-offset inside the audio band, comes out some 45 to 57 dB lower than it does from the path in use today.
-That is what a Hilbert pair made of two 199-tap real FIRs costs - its quadrature error is largest at the
-ends of the band, which is exactly where a digimode or a badly centred voice sits. The three convolution
-figures (-121, -129, -133 dB) should not be ranked against each other: all of them are at or past the
-float32 floor of the measurement, which the harness reports as around -140 dB, while -75.8 dB for the
-path in use is a genuine number.
+offset inside the audio band, comes out 34 dB lower than it does from the path in use today. That is
+what a Hilbert pair made of two 199-tap real FIRs costs - its quadrature error is largest at the ends of
+the band, which is exactly where a digimode or a badly centred voice sits. The three convolution figures
+are one number because they are one decision: -110 dB is the floor the minimum phase design is given
+(see below), and all three geometries reach it. In linear phase they read -131, -131 and -113 dB, the
+first two of which are the float32 floor of the measurement. -75.8 dB for the path in use is a real
+figure.
 
 The Hilbert row's corner at 3.5 kHz is not sloppiness on the radio's part - its IQ filter is deliberately
 wider than the audio band and the post-demod filters finish the shape afterwards, so the two rows are not
 cut from the same cloth, and the harness prints the comparison instead of scoring it.
 
+#### Every path, not just the two
+
+The figures above are the 2.7 kHz SSB path; the geometry table's skirt and ripple are the 500 Hz CW
+one. `path_sweep.c` sweeps all 62 SSB and CW paths of `FilterPathInfo[]`, a shape and a bill for each, so
+that neither "it is the better filter" nor its cost rests on two examples:
+
+```sh
+sh support/digi/convolution_graphs/build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep.csv
+```
+
+Each row is that path's own `width` and `offset`, designed at the rate its blocks carry, and swept on the
+same grid for both filters. `ripple` is peak to peak over the band's interior, the outer tenth of the
+width left out at each edge because a windowed sinc is 6 dB down at its nominal edges by design;
+`skirt` is -6 to -60 dB above the top edge; `image` is the worst level in the mirror of that same
+interior. A `-` in a skirt column means the filter measured is already 60 dB down at the band edge, so
+there is no skirt to measure.
+
+Three things the two-path comparison could not show.
+
+**The pair is two different filters.** 44 of the 62 paths run the 199-tap table decimated to 12 kHz. The
+18 at 3.8 kHz and wider run an 89-tap table and *do not decimate at all*: `use_decimatedIQ` in
+`audio_driver.c` tests for `i_rx_new_coeffs`, and those rows point at `i_rx_4k5` / `5k` / `6k` / `7k5` /
+`10k`, so their blocks arrive at 48 kHz and the pair runs at 48 kHz whatever `sample_rate_dec` says in
+the table. Measured, the pair costs 8.5 % of the core on the row that has been quoted all along, and
+15.3 % on every path from 3.8 kHz up; the convolution filter costs 3.8 % or 15.3 %. On the wide paths it
+is not cheaper in operations at all - 89 taps x 4 operations is 356 per sample, the same number the
+measured convolution bills - it is only much better shaped.
+
+**The skirt follows the rate, not the path.** It is one geometry, 1024 taps: 36.5 Hz from -6 to -60 dB on
+every 12 kHz path, and 145 Hz at 48 kHz, where the same taps are four times shorter in time. Against the
+pair that is 3.5x steeper on the narrow paths (127 Hz) and 7.9x on the wide ones (1143 Hz).
+
+**Image rejection is where the two differ most, and the pair is worst just where its band is widest.**
+-72 to -85 dB on the 199-tap rows, but -22 to -56 dB from 3.8 kHz up: an 89-tap Hilbert pair at 48 kHz is
+poor quadrature at the top of a 10 kHz band. The convolution filter is -110 dB on all 62, because its
+floor comes from the design, not from the rate. The stock ripple figures on the wide rows (up to 11 dB)
+are the same story and the same caveat: they measure the IQ filter's own corner, which the real IIR after
+demodulation finishes, not what the operator hears - and the 3.6 kHz rows have no skirt at all because
+their IQ filter closes at 3.5 kHz. No post-demod filter can reject an image, so the image column does
+stand for both sides.
+
+The op counts here are steady state, the same convention as the first table above: 356 for the convolution
+filter at this geometry and 796 for the pair, times 1.5 cycles at 168 MHz - the same model as above.
+
+| id | path | width | centre | rate | stock ripple | stock skirt | stock image | stock CPU | conv ripple | conv skirt | conv image | conv CPU |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | 500Hz | 300 | 500 | 12 kHz | 0.00 | 127.0 | -76.3 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 5 | 550Hz | 300 | 550 | 12 kHz | 0.00 | 127.0 | -77.5 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 6 | 600Hz | 300 | 600 | 12 kHz | 0.00 | 127.0 | -78.5 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 7 | 650Hz | 300 | 650 | 12 kHz | 0.00 | 127.0 | -79.5 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 8 | 700Hz | 300 | 700 | 12 kHz | 0.00 | 127.0 | -79.7 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 9 | 750Hz | 300 | 750 | 12 kHz | 0.00 | 127.0 | -80.4 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 10 | 800Hz | 300 | 800 | 12 kHz | 0.00 | 127.0 | -81.3 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 11 | 850Hz | 300 | 850 | 12 kHz | 0.00 | 127.0 | -82.0 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 12 | 900Hz | 300 | 900 | 12 kHz | 0.00 | 127.0 | -82.8 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 13 | 950Hz | 300 | 950 | 12 kHz | 0.00 | 127.0 | -83.5 | 8.53 % | 0.06 | 36.5 | -110.4 | 3.81 % |
+| 14 | 550Hz | 500 | 550 | 12 kHz | 0.00 | 127.0 | -75.8 | 8.53 % | 0.00 | 36.5 | -110.4 | 3.81 % |
+| 15 | 650Hz | 500 | 650 | 12 kHz | 0.00 | 127.0 | -77.5 | 8.53 % | 0.00 | 36.5 | -110.4 | 3.81 % |
+| 16 | 750Hz | 500 | 750 | 12 kHz | 0.00 | 127.0 | -79.5 | 8.53 % | 0.00 | 36.5 | -110.4 | 3.81 % |
+| 17 | 850Hz | 500 | 850 | 12 kHz | 0.00 | 127.0 | -81.3 | 8.53 % | 0.00 | 36.5 | -110.4 | 3.81 % |
+| 18 | 950Hz | 500 | 950 | 12 kHz | 0.00 | 127.0 | -82.0 | 8.53 % | 0.00 | 36.5 | -110.4 | 3.81 % |
+| 19 | LPF | 1400 | 700 | 12 kHz | 0.00 | 127.0 | -71.9 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 20 | BPF | 1400 | 775 | 12 kHz | 0.00 | 127.0 | -72.3 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 21 | LPF | 1600 | 800 | 12 kHz | 0.00 | 127.0 | -72.3 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 22 | BPF | 1600 | 875 | 12 kHz | 0.00 | 127.0 | -72.6 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 23 | 1.1k | 1800 | 1125 | 12 kHz | 0.00 | 127.0 | -76.6 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 24 | 1.3k | 1800 | 1275 | 12 kHz | 0.00 | 127.0 | -79.5 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 25 | 1.4k | 1800 | 1425 | 12 kHz | 0.00 | 127.0 | -82.0 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 26 | 1.6k | 1800 | 1575 | 12 kHz | 0.00 | 127.0 | -83.5 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 27 | 1.7k | 1800 | 1725 | 12 kHz | 0.00 | 127.0 | -85.4 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 28 | LPF | 1800 | 900 | 12 kHz | 0.00 | 127.0 | -72.3 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 29 | LPF | 2100 | 1050 | 12 kHz | 0.00 | 127.0 | -73.7 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 30 | BPF | 2100 | 1125 | 12 kHz | 0.00 | 127.0 | -73.7 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 31 | 1.3k | 2300 | 1275 | 12 kHz | 0.00 | 127.0 | -76.3 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 32 | 1.4k | 2300 | 1412 | 12 kHz | 0.00 | 127.0 | -78.5 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 33 | 1.6k | 2300 | 1562 | 12 kHz | 0.00 | 127.0 | -81.0 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 34 | 1.7k | 2300 | 1712 | 12 kHz | 0.00 | 127.0 | -82.8 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 35 | LPF | 2300 | 1150 | 12 kHz | 0.00 | 127.0 | -73.7 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 36 | LPF | 2500 | 1250 | 12 kHz | 0.00 | 127.0 | -74.9 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 37 | BPF | 2500 | 1325 | 12 kHz | 0.00 | 127.0 | -75.1 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 38 | LPF | 2700 | 1350 | 12 kHz | 0.00 | 127.0 | -75.1 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 39 | BPF | 2700 | 1425 | 12 kHz | 0.00 | 127.0 | -75.2 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 40 | LPF | 2900 | 1450 | 12 kHz | 0.00 | 127.0 | -75.1 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 41 | BPF | 2900 | 1525 | 12 kHz | 0.00 | 127.0 | -76.3 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 42 | LPF | 3200 | 1600 | 12 kHz | 0.00 | 127.0 | -76.3 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 43 | BPF | 3200 | 1675 | 12 kHz | 0.00 | 127.0 | -76.3 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 44 | LPF | 3400 | 1700 | 12 kHz | 0.00 | 127.0 | -76.3 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 45 | BPF | 3400 | 1775 | 12 kHz | 0.00 | 127.0 | -77.5 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
+| 46 | LPF | 3600 | 1800 | 12 kHz | 0.00 | 49.0 | -76.6 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 47 | BPF | 3600 | 1875 | 12 kHz | 0.00 | - | -77.5 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 48 | LPF | 3800 | 1900 | 48 kHz | 1.76 | 1143.0 | -24.1 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 49 | BPF | 3800 | 1975 | 48 kHz | 1.52 | 1143.0 | -26.0 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 50 | LPF | 4000 | 2000 | 48 kHz | 1.60 | 1143.0 | -25.3 | 15.26 % | 0.00 | 145.0 | -110.4 | 15.26 % |
+| 51 | LPF | 4200 | 2100 | 48 kHz | 1.45 | 1143.0 | -26.6 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 52 | LPF | 4400 | 2200 | 48 kHz | 1.31 | 1143.0 | -27.5 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 53 | LPF | 4600 | 2300 | 48 kHz | 2.21 | 1028.0 | -25.9 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
+| 54 | LPF | 4800 | 2400 | 48 kHz | 3.89 | 828.0 | -25.7 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 55 | LPF | 5000 | 2500 | 48 kHz | 1.39 | 1256.0 | -21.8 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 56 | LPF | 5500 | 2750 | 48 kHz | 5.46 | 756.0 | -24.1 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
+| 57 | LPF | 6000 | 3000 | 48 kHz | 0.82 | 1264.0 | -26.6 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
+| 58 | LPF | 6500 | 3250 | 48 kHz | 3.86 | 790.0 | -29.5 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 59 | LPF | 7000 | 3500 | 48 kHz | 11.13 | 290.0 | -32.7 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 60 | LPF | 7500 | 3750 | 48 kHz | 0.38 | 1250.0 | -36.3 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
+| 61 | LPF | 8000 | 4000 | 48 kHz | 0.11 | 1270.0 | -40.5 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 62 | LPF | 8500 | 4250 | 48 kHz | 0.06 | 1270.0 | -45.6 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 63 | LPF | 9000 | 4500 | 48 kHz | 0.03 | 1270.0 | -51.9 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 64 | LPF | 9500 | 4750 | 48 kHz | 0.01 | 1270.0 | -56.3 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 65 | LPF | 10000 | 5000 | 48 kHz | 0.04 | 1270.0 | -56.3 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
+
+#### Minimum phase: why the delay column is not 53 ms
+
+The designer makes a windowed sinc, which is linear phase: symmetric about its middle, so everything it
+passes comes out half its length late. For 1024 taps at 12 kHz that is 42.6 ms, on top of the block. This
+file used to say "the block is what you wait for, not the number of taps", from a measurement that
+compared the pipeline with a plain FIR *over the same taps* and so cancelled exactly that half out. Put a
+tone through and time it, and the linear phase filter is 52.6 ms late at geometry 256, 25.9 at 128 and
+12.6 at 64 - against 8.25 ms for the Hilbert pair.
+
+Nothing about selecting a band needs the symmetry. `convolution_minimum_phase()` turns the designer's
+taps into the minimum phase taps with the same magnitude response, at every filter change: the logarithm
+of the magnitude, its cepstrum, the cepstrum folded onto positive time, and back. Same passband, same
+skirts, same number of taps and masks, and the delay is then set by how narrow the band is rather than
+by how many taps describe it - 1.0 ms in the taps for the 2.7 kHz SSB path, 5.0 ms for the 500 Hz CW
+path, at all three geometries give or take a millisecond.
+
+What it costs, and what it does not:
+
+* **No RAM.** The transform it works in has to be several times the response, and four times is what
+  the filter's own buffers hold - the masks, which are about to be rewritten, and the worker's history,
+  which is about to be cleared. So the design runs in those (`design_scratch` in `ConvolutionBuffers`).
+  That is only legal because the design closes the seam for its own duration: a worker pass landing in
+  the middle of the cepstrum leaves all 4096 mask floats NaN, the band cache then holds them until the
+  filter width changes, and the block counters never notice, because a queue of NaN moves exactly as
+  fast as a queue of audio. `conv_design_busy` in `audio_convolution.c` is what stops that, and probe
+  section 12 tests it by running a worker pass from inside a design - which is what the audio interrupt
+  and the worker it pends do to a design on a radio. Until that flag existed the only thing holding the
+  invariant was `ads.af_disabled` at the call site, and that flag is a `bool` used as a nesting counter
+  (`RadioManagement_SetDemodMode()` takes it, `AudioDriver_SetProcessingChain()` clears it on the way
+  out, thirteen lines before the mode change finishes), so the condition was real but load-bearing.
+* **Flash, at the default geometry only.** Four times 1024 taps is the 4096-point CMSIS transform,
+  whose tables nothing else in the radio links: 41,296 bytes, measured as the difference between a
+  minimum phase link (421,017 bytes of text) and `-DCONVOLUTION_LINEAR_PHASE` (379,721). At 128 and 64
+  the design needs 1024- and 2048-point transforms, both of which are already linked for the filter
+  itself, and those images move 3,504 bytes in text.
+* **The stop band is where it is told to be.** The construction needs a floor under the logarithm, and
+  the floor is the stop band that comes out. It is set to -110 dB (`CONVOLUTION_MINPHASE_FLOOR`), which
+  is what the linear phase taps reach above the band, and at four times the response in float32 that is
+  also about as far as the arithmetic is exact: the passband is unchanged to 0.00 dB.
+* **The delay is not the same at every frequency.** It is least in the middle of the band and rises
+  towards the edges - for the 2.7 kHz path about 1 ms in the middle, 6 ms a hundred Hz inside an edge.
+  That is inaudible on voice and CW and is the wrong property for a mode that needs equal delay, none of
+  which this filter is handed.
+* **All of the ringing comes after the signal.** A filter this steep rings whatever its phase; linear
+  phase splits it before and after a keyed edge, minimum phase puts it all after, and through the
+  500 Hz path at geometry 256 that is an overshoot of about a fifth that dies away over some 30 ms.
+  Whether that is better or worse on the ear than the same ringing ahead of the dit is for a radio
+  to say.
+* **Time at each filter change, measured on a host and not yet on a radio.** A design is four transforms
+  plus a logarithm, an exponential, a sine and a cosine per point, and the audio is held off for the
+  whole of it - the RX processor does not run while the processing chain is being rebuilt, so this is
+  gap in what the operator hears, not a background cost. Measured on a 2 GHz x86 at -O2: 1.3 ms, or
+  1,720,320 butterfly operations against the 33,280 one block of filtering costs, i.e. fifty-two blocks
+  of the filter's own transform work in one go. An F407 is single-issue at 168 MHz and takes its `logf`
+  and `expf` from software, so expect several times the host figure, which is worth counting with the
+  DWT cycle counter the bench already uses before this geometry is chosen by ear. `-DCONVOLUTION_LINEAR_PHASE`
+  skips the four big transforms altogether, so a build that must not pause on a filter change has a
+  way to avoid it.
+
+`-DCONVOLUTION_LINEAR_PHASE` leaves the taps as the designer makes them, for hearing the difference on
+one radio. Section 9 of the probe times a tone through both paths and fails if the taps cost more than
+half of what linear phase would (or, built with that switch, if they do not cost exactly that), and
+section 10 fails if anything at all comes out of a filter that has just been changed and fed silence -
+which is what a design left in the worker's history sounds like, and what the previous filter's last
+audio sounded like before the history was cleared at all. Section 11 is the low edge (below) and section
+12 is the design-under-interrupt test described in the first bullet above. Section 13 belongs to the
+measurement build below: it checks that the fields that build prints count what their names say, which
+is the only part of that build a host can see - the timing fields read 0 there, because DWT does not
+exist off the chip, and the section says so rather than reporting a zero as a measurement.
+
+#### The low edge, and what geometry 64 does not do
+
+The band is the filter path's own width around its own centre, except that a path whose band reaches
+0 Hz gets a low edge (`CONVOLUTION_LOW_CUT_HZ`, 50 Hz) rather than reaching down to DC. It is not
+cosmetic: the AGC's own DC removal is switched on for AM and SAM only (`audio_driver.c:559`), so on
+USB, LSB and CW - the three modes this filter takes over - there is nothing downstream that takes DC
+out. On the 2.7 kHz path the edge holds DC 124 dB down where removing it passes it 6 dB down, within a
+factor of two of the audio sitting on top of it.
+
+The wide paths are the limit of what an edge can do, and probe section 11 now says so. They run at the
+full 48 kHz, where 50 Hz is a thousandth of the rate, and a response of a few hundred taps cannot make a
+wall that narrow:
+
+| | DC, 2.7 kHz path at 12 kHz | DC, worst path at 48 kHz | the Hilbert pair in use, same paths |
+|---|---|---|---|
+| geometry 256 | -118 dB | -9.5 dB | -9.7 / -0.2 dB |
+| geometry 128 | -35 dB | -4.0 dB | -9.7 / -0.2 dB |
+| geometry 64 | -19 dB | -1.9 dB | -9.7 / -0.2 dB |
+
+At 256 and 128 the filter is better than the pair it replaces everywhere, which is what the check holds
+it to. At 64 it is not: on the narrow paths DC is 9.5 dB down against the pair's 9.7, and on the widest
+paths 1.9 dB, so `make -C support/digi convolution-check EXTRA_DEFS=-DFFT_CONVOLUTION_SIZE=64` fails
+section 11 and says which paths. That is a real cost of the low-latency geometry rather than a bug to
+tune out, and the options if it matters are to raise the edge with the rate (which cuts the bass of wide
+SSB), to keep the geometry on the decimated paths only, or to put a DC blocker in front of the filter and
+drop the edge.
+
+#### The measurement build: what to flash and what to write down
+
+Everything above is measured on a host. The three numbers that decide whether `USE_CONVOLUTION` stops
+being a build option are not host numbers, and no amount of bench work substitutes for them: how much
+audio a filter change eats, what a block of filtering costs on the chip, and how close the stack comes to
+the 55 KiB of `.bss` the filter just grew. So there is a build whose only job is to answer them,
+`-DCONVOLUTION_MEASURE`, which times the pipeline with the DWT cycle counter (`misc/profiling.h`, the
+same one the `L nn%` readout uses, already started at boot by `profileTimedEventInit()`), samples the
+main stack pointer in all three contexts, and prints it on the debug overlay.
+
+```sh
+# the measurement image: the filter, the counters, the peaks, and the timing
+make clean && make -j4 all \
+  CONFIGFLAGS='-DUI_BRD_MCHF -DRF_BRD_MCHF -DUSE_CONVOLUTION -DCONVOLUTION_MEASURE -DCONVOLUTION_LEVEL_STATS'
+# the control, for a radio that is silent on the image above: every counter and the same geometry,
+# with USB/LSB/CW routed back to the Hilbert pair the stock firmware runs
+make clean && make -j4 all \
+  CONFIGFLAGS='-DUI_BRD_MCHF -DRF_BRD_MCHF -DUSE_CONVOLUTION -DCONVOLUTION_OFF_FOR_TEST -DCONVOLUTION_MEASURE -DCONVOLUTION_LEVEL_STATS'
+```
+
+What those two commands produce, and what they cost in the image itself:
+
+| build | text | `.bss` | stack headroom at link time |
+|---|---|---|---|
+| measurement, geometry 256 | 422,753 | 149,524 | 40,748 |
+| same with `CONVOLUTION_OFF_FOR_TEST` | 378,265 | 141,212 | 49,056 |
+| same with `-DFFT_CONVOLUTION_SIZE=128` | 381,937 | 125,972 | 64,300 |
+| same with `-DCONVOLUTION_LINEAR_PHASE` | 381,401 | 149,524 | 40,748 |
+| convolution, no measurement | 421,017 | 149,436 | 40,836 |
+| as it ships, option off | 376,697 | 93,964 | 96,304 |
+
+The instrumentation is 1,736 bytes of text and 88 of `.bss`, which is why it is a build rather than
+always-on: it costs a clock read per call, not per sample, but the RAM has nowhere to come from.
+
+All four measurement images are built and left in the root, so a session does not need a laptop between
+steps: `fw-mchf-convmeasure.bin` is the one to start on, `fw-mchf-convofftest.bin` is the control for
+step 6, and `fw-mchf-convmeasure128.bin` / `fw-mchf-convmeasurelinear.bin` are the two answers to a bad
+`G` reading - half the block delay, and no cepstrum at all. Built with the commands above, at geometry
+256 unless the name says otherwise. Each has a `.dfu`, `.elf` and `.map` beside it; the `.elf` is for
+reading the same fields from a debugger, where they are plain globals rather than a rotating line.
+
+**The images land in the repository root, not in `build/`.** `fw-mchf.elf`/`.bin`/`.dfu`/`.map` are what
+the last link wrote; `build/fw-f4/` holds images from whatever release build was last run there and is
+not refreshed by `make all` - which is how a table in this file quoted 96,408 bytes of headroom for
+weeks when the current link gave 96,304, and how a size read from `build/fw-f4/fw-mchf.elf` reported a
+binary from November 18 as though it had just been built. Check the timestamp on the file you measure.
+The named copies above survive the next rebuild; `fw-*` is gitignored, so nothing of them reaches the
+repository, and the tree itself is left built as it ships (option off).
+
+Readout: Debug menu, *Debug info on LCD* (`MENU_DEBUG_ENABLE_INFO`) - the same switch that brings up the
+`L nn% P nnn%` load line and the encoder lines. Under it the convolution line cycles, about a second
+per reading, in this order.
+
+**Flashing the `.bin`.** `dfu-util -a 0 -s 0x08010000:leave -D fw-mchf-convmeasure.bin`, radio in DFU mode
+(hold Band+ through power-on until "STM Device in DFU Mode" answers, and keep it held until the upload
+finishes - `useful_manuals/bootloader_doc.md`:234). The address is not decoration: the F4 links the
+firmware at `rom ORIGIN = 0x08010000`, because the bootloader owns the first 64 KiB, and
+`objcopy -O binary` throws addresses away, so a raw `.bin` does not say where it goes - you have to. The
+first two words of `fw-mchf-convmeasure.bin` are `0x2001FFF8` and a reset handler of `0x08010211`, which
+is the same thing said from the image itself. A `.bin` sent to `0x08000000` overwrites the bootloader
+instead of the firmware, which is a much worse day than a bad radio image. The `.dfu` files are the
+prefixed form (`hex2dfu` from the `.hex`, which does carry addresses) and are what DfuSeDemo wants - the
+Windows doc says so in as many words at `bootloader_doc.md`:219 - so use `.bin` with `dfu-util` and the
+address, or `.dfu` with DfuSeDemo and none.
+
+| line | what it is | the number that matters |
+|---|---|---|
+| `C999/999 d99 n99 b9` | blocks in/out since the last refresh, drops, unsized slices, slices refused in a design | `d` must stay 0 while you listen |
+| `P i812 o799` | loudest sample in and out, x1000 | `o0` with `i` alive is the silent-filter case |
+| `G10700/10700 us f2` | the hole one change makes, queue flush to the first sample back: last / worst since reset, and frames the design itself refused | see the thresholds below |
+| `W123 I12 O13` | worker pass average, worst-case audio-interrupt slice in and out | `W` against 667 us |
+| `M999 K99 3/5` | where a design's time went (cepstrum / partitions), designs run over setups called | `3/5` says the cache works |
+| `U1234 F5678` | main stack bytes used at its deepest, bytes clear of `.bss` (`F!n`: n bytes below it) | `F` is the margin the linker cannot give |
+
+The fields cap at four to six digits, so a capped field means "at least that": `G99999` is a fail, not a
+measurement, and `F!` is the stack having crossed into `.bss`, not a margin.
+
+**The session, in the order that wastes the fewest radio-hours.** Write down the mode and filter width
+beside every number; a filter change on a 250 Hz CW path and one on the 2.7 kHz SSB path are different
+codes running at different rates, and the averages of the two are meaningless.
+
+1. Baseline first, on the image as it ships (option off): note `L`/`P` in USB on a 2.7 kHz filter and in
+   CW on 500 Hz. Every load figure below is against these two numbers, not against the design note's
+   "20 % of an STM32F7".
+2. Flash `fw-mchf-convmeasure.bin`. Same two settings. `L`/`P` now include the filter; `W`, `I`, `O` say
+   where the difference came from. A worker pass above 667 us means blocks cannot keep up and `d` starts
+   climbing - which is the failure, not the number.
+3. Filter changes, one at a time, watching `G`: width 2.7k to 500 to 200, offset changes, USB to LSB,
+   and one CAT-driven frequency step that crosses a filter path. Each is one design or several; the
+   second field of `G` is the worst of the session and `f` is the frames the filter refused for the last
+   one. Then listen: change a width on a weak station and on a strong one, and say out loud whether you
+   hear a tick, a pause, or nothing.
+4. `M`/`K` for the same changes, which decides the fix if `G` is bad: if `M` dominates, the 4096-point
+   cepstrum is the cost and `-DCONVOLUTION_LINEAR_PHASE` removes it; if `K` dominates, it is the
+   partitions, and the fix is the smaller geometry or fewer of them.
+5. `U`/`F` after ten minutes of tuning, TX/RX swapping, and a waterfall page - the deepest the radio has
+   been, sampled in the interrupt, the worker and the design.
+6. If the audio is wrong or missing at all, flash `fw-mchf-convofftest.bin` without touching anything
+   else. Same counters, same geometry, same debug line; the demodulation goes back to the pair. Audible
+   on this image and silent on the measurement image puts the fault inside the filter, and the `P i/o`
+   and `C` lines say which half of it.
+7. Ten minutes of unattended listening on a real signal, then read `d` and `n`. Anything other than 0 is
+   a queue that is not being served, in a case the bench cannot reach because it drives the seam by hand.
+
+**Thresholds, with the arithmetic that gives them.** The IQ interrupt runs at 1500 Hz, so one frame of
+audio is 667 us and `f1` is the most the design can cost and still be a pause rather than a click. `G`
+also carries the queue flush and the refill of the first block, so its floor is one block of buffering
+whatever the design did - 10.7 ms at 12 kHz on a decimated path, 2.7 ms at 48 kHz on a full-rate one.
+
+| reading | acceptable | what to do if it is not |
+|---|---|---|
+| `G` last, `f` | one block + <= 667 us (about 11.4 ms at 12 kHz, 3.4 ms at 48 kHz), `f` <= 1 | `-DCONVOLUTION_LINEAR_PHASE` (removes `M`), or a smaller geometry (removes most of `M` and shrinks `K`), or move the design out of the held-off window into the worker a partition at a time |
+| `G` | one block + 700-3000 us, `f` 2-4 | a soft tick on every filter change. Usable, and worth deciding on by ear rather than by table: some operators will never notice, and a CW operator stepping width constantly will |
+| `W` | < 667 us | the worker cannot keep up. Fewer partitions, which is the smaller geometry, at the DC cost section 11 charges you |
+| `L`, `P` | the pair's figures plus what you are willing to pay | the option is not free; if it eats the headroom the noise blanker needs, that is the answer, and `d` climbing on a noisy band is the same answer twice |
+| `F` | > 4000 bytes | do not run that configuration. 4 kB is not a derived limit - it is the size of the unknown: the known heap asks are a 12-byte canary and the USB class handles, and the nesting the sampler does not see (a PendSV preempted by the audio ISR) is one more frame per level. Below that, the smaller geometry, or `FFT_CONVOLUTION_SIZE=128`, which is 23.5 KiB better on the link |
+| `d`, `n` after step 7 | 0 | a leak in the queues, which is what section 3's counters were added to find; take `C` and `P` off the radio and go back to the bench |
+
+On a 2 GHz x86 at -O2 the design alone is 1.3 ms with `f` 2, the cepstrum (four transforms, one of them
+4096-point) the bulk of it; `G` on the radio is that plus a block of buffering. If the F407 is two to
+eight times the host on this code - float `logf`/`expf` from software, single-issue at 168 MHz - the
+design is 3 to 10 ms and 5 to 16 frames, which is a click. That range is the whole reason this build exists rather than a guess about which end it lands on.
+
+One thing the build cannot tell you: whether 10.7 ms of block delay is acceptable to hear. That is not a
+counter, and the answer changes between SSB and CW, so it has to be listened to on the same radio, with
+`-DFFT_CONVOLUTION_SIZE=128` (5.7 ms) built the same way for comparison.
+
+Probe section 6 is the one place the control build is checked rather than trusted: with
+`CONVOLUTION_OFF_FOR_TEST` defined it stops asking "only the measured modes are replaced" and asserts
+the opposite - that no mode is handed to the filter - because an image that claims to be the control and
+still replaces USB would make "audible here, silent there" mean nothing. Running the probe with that
+switch is therefore meaningful, and `make -C support/digi convolution-check
+EXTRA_DEFS='-DCONVOLUTION_MEASURE -DCONVOLUTION_OFF_FOR_TEST'` is the measurement build's control: 19
+checks, of which the one that changed personality is the point.
+
 `make build-config-check` and the probe both run the committed geometry. The `EXTRA_DEFS` line above is
 what the harness was made to accept, and it keeps a stamp of the flags it was built with so that a
 measurement cannot come from an object compiled against a different one. Read the -140 dB figures with care: the harness computes in float32, so
 past roughly -140 dB you are seeing the arithmetic, not a bench measurement of a filter. The 88 dB
-versus 144 dB gap is real.
+versus 110 dB gap is real.
 
 The RAM is the reason the option stays off, and what it really costs is stack headroom. Linking with it
-moves the ELF's `.bss` from 32,352 to 76,528 bytes at `FFT_CONVOLUTION_SIZE=128` (`_ebss` 0x20008760 to
-0x200133f0), so what is left between the end of `.bss` and the stack top (0x2001fff8) falls from 96,408
-to 52,232 bytes.  Both figures here were wrong before they were re-read from a fresh link: the earlier
-text said 93,860 to 157,276 and a 32,800 residue, and 93,860 is `.bss` plus `.ccm` - the F407 has two RAM
-regions, so `arm-none-eabi-size`'s total column adds them and is not a number to budget with. Nothing bounds that space: `_sbrk()`
+moves the ELF's `.bss` from 93,964 to 125,884 bytes at `FFT_CONVOLUTION_SIZE=128` (`_ebss` 0x200087c8 to
+0x20010474), so what is left between the end of `.bss` and the stack top (0x2001fff8) falls from 96,304
+to 64,388 bytes - twelve KiB better than the figures this paragraph carried until the impulse array was
+made to follow the block size instead of a fixed 2048 taps. Two earlier versions of these numbers were
+wrong in a way worth keeping: one said 93,860 to 157,276 with a 32,800 residue, and 93,860 is `.bss`
+*plus* `.ccm` - the F407 has two RAM regions, so `arm-none-eabi-size`'s total column adds them and is not
+a number to budget with. Nothing bounds that space: `_sbrk()`
 comes from libnosys, bumps a pointer up from `_end` and has no ceiling to compare against, and the
 `ASSERT(__StackLimit >= __HeapLimit)` in `linker/arm-gcc-link_f4_main.ld` compares the heap's *start*
 with the top of RAM, so it cannot fire however full the radio is. (The waterfall bitmap, which sits in
 CCM, is not one of the callers: the `malloc()` at `ui_spectrum.c:2128` is inside a `/* */` block and the
 function around it is never called from anywhere. This file said otherwise until it was checked.) What
 the heap is asked for in this configuration is the 12 byte canary word in `uhsdr_canary.c` and the USB
-class handles, so 52,232 bytes is in practice the main stack's room at geometry 128, down from 96,408.
+class handles, so 64,388 bytes is in practice the main stack's room at geometry 128, down from 96,304.
+At the committed geometry 256 it is 40,836.
 
 What would have to happen before this could be switched on:
 
 * the arrays have to come down, or the RAM they compete with has to be found. That is now a build
-  choice rather than an edit - see the geometry table below - and it is cheaper than it looks, because
-  the arrays are sized by partitions times block, and a short block with few partitions costs little
-  selectivity when the stop-band is already 120 dB deep.
+  choice rather than an edit - see the geometry table below - and part of it has already been taken:
+  the impulse array now follows the block size instead of being sized for 2048 taps at every geometry,
+  which is 8 KiB back at 256 and 12 KiB at 128 and 64. What is left is sized by partitions times block,
+  so a short block with few partitions costs little selectivity when the stop band is already 110 dB
+  deep - but see the low edge above before choosing the shortest one.
 * the block latency has to be listened to, and it depends on the filter path: the block is a fixed 128
   samples, so it is 2.7 ms of audio at 48 kHz and 10.7 ms at the decimated 12 kHz the narrow SSB
   filters use. The AGC, the notch, the post-demod filters and the audio output all still run on the
@@ -1814,7 +2230,9 @@ What would have to happen before this could be switched on:
 One more thing the harness checks, because getting it wrong is not subtle: a design above zero has to
 select the sideband the `i+q` sum selects, and a design below zero the one `i-q` selects, measured by
 which side of zero each path puts its band energy on. `AudioDriver_RxProcessor()` and
-`AudioDriver_SetProcessingChain()` are written to agree with that pair.
+`AudioDriver_SetProcessingChain()` are written to agree with that pair. This check is only as good as
+its model of the `i+q` path, and the model has to use `arm_fir_f32()`'s tap order - see 7 above for what
+it passed while it did not.
 
 Re-measure with `make -C support/digi convolution-check`. Two of its checks are load bearing and were
 each demonstrated to fail: the partitioned pipeline has to reproduce a plain complex FIR over the same
@@ -1840,7 +2258,9 @@ has to agree with the stream it came from (`oracle-check`, which needs no WebSDR
 run on the pinned take and on the fixture that take is quoted from (`capture-check` and
 `fixture-check`), the shaped 2.5 kHz floors against the readings this file documents
 (`floors-2k5-check`), and the convolution RX filter against the SSB stage in use
-(`convolution-check`, which measures the filter, checks the mode table and sweeps the passband).
+(`convolution-check`, which measures the filter, checks the mode table, sweeps the passband, puts a
+tone through every SSB and CW filter path, times the audio delay and checks that a filter change is
+silent).
 `make -C support/digi wefax` and `floors-2k5` are targets of their own and
 are not among the twenty. `make digi-bench` is also available on its own; it is
 one of the twenty, not the whole job.
@@ -1895,22 +2315,33 @@ and about 40 KB of memory. The latency formula is the one the bench probe uses t
 IQ rate - 48000/4 = 12000, so 256 gives 10.67 ms identically), which is why the two sets of numbers line
 up at all.
 
-**What we compile is the one-block special case of that scheme**, not the scheme:
-`CONVOLUTION_MAX_NO_OF_BLOCKS` is 1, so each round does one forward FFT, one complex multiply and one
-inverse FFT, and the tap count is capped at `FFT/2` by construction. That has two consequences worth
-saying out loud, because they are the two questions people ask this filter:
+**What we now compile is the note's scheme, not a special case of it.** `CONVOLUTION_MAX_NO_OF_BLOCKS`
+is 8 and the response is 1024 taps at the default geometry, which is what the note describes; the
+one-block version this section used to document was the state of the branch before the partition loop,
+the mask cache and the input history were fixed, and it could not have worked - the count of partitions
+was the reason the tap count was capped at `FFT/2`, so the filter had 128 taps and a 127 Hz skirt at
+10.7 ms rather than 34 Hz at the same 10.7 ms. Two things the note says are still worth repeating,
+because they are the two questions people ask this filter:
 
-* **Selectivity and latency are tied together here and are not tied together upstream.** Their eight
-  blocks buy 1024 taps at the same 10.67 ms; our 256-size geometry can hold at most 128 taps at that
-  latency, full stop. Wanting a steeper wall at c256's delay means implementing the delay line, which is
-  a `for j < N_blocks` loop over stored block spectra plus `N_blocks` coefficient spectra - roughly
-  three times the multiply count and another ~30 KB, on a chip with 128 KB of it.
-* **Partitioning is a latency-per-selectivity trick, not a CPU trick.** It costs *more* arithmetic per
-  sample than one block, not less, because every input block must be multiplied against every filter
-  block. So it does nothing for the question "the F4 seems not powerful enough for c256" - the answer to
-  that is the smaller geometry, or the load readout on the radio. The measured figures for this build
-  belong to whoever has the radio: the debug line reports `L nn%` average and `P nnn%` worst-case
-  interrupt, and those two numbers, not the F7's 20 %, are what says whether c256 fits a 168 MHz F407.
+* **Partitioning is what buys selectivity at a fixed latency, and it is not free.** Eight blocks of 128
+  samples reach 1024 taps at the same 10.67 ms that a single block of 128 would cost, but every input
+  block has to be multiplied against every partition, so the arithmetic per sample grows with the
+  number of partitions rather than falling: measured, 356 ops per audio sample at eight partitions
+  against 324 at a shorter block (`-DFFT_CONVOLUTION_SIZE=128`, 512 taps, 5.7 ms of delay). It is a
+  latency-per-selectivity trade, not a CPU trick, and it does nothing for the question "the F4 seems not
+  powerful enough for c256" - the answer to that is the smaller geometry, or the load readout on the
+  radio.
+* **What the eight blocks are worth against the receiver as it ships is measured, not quoted.** The
+  tables above are from this tree, running the shipped module: 34 Hz of skirt where the Hilbert pair
+  gives 127 Hz (and its wall is at 3.5 kHz, not at the filter width), 110 dB of opposite sideband where
+  the pair gives 75.8 dB worst-case in band, and 356 arithmetic operations per sample where the pair and
+  its `i+q` sum bill 796. The note's 20 % of an STM32F7 belongs to the note; whether c256 fits a 168 MHz
+  F407 is what `L nn%` and `P nnn%` on the debug line are for, and no radio has been asked yet.
+
+The cost the note does not carry, because its geometry is the one it chose, is DC: see "The low edge, and
+what geometry 64 does not do" above. At 1024 taps on a 12 kHz path the 50 Hz edge holds DC 118 dB down;
+at 256 taps on a 48 kHz path it holds it 2 dB down, which is why the harness now fails that geometry on
+those paths rather than recommending it as a free way to buy latency.
 
 ### Why the noise blanker is a waterfall problem and not an audio problem
 
@@ -2059,18 +2490,20 @@ default, because of where its RAM goes.
 `sizeof(SitorRx)` is 28,296 bytes at the default grid and almost all of it is the grid of candidate bit
 clocks - the thing that lets the receiver lock down to 10 dB of noise without being told the text.  That
 grid lives in the same 128 KB as the convolution filter's buffers.  Stack headroom, read from the
-linker's own `_ebss` against `_estack`, every row measured on a fresh link of this commit:
+linker's own `_ebss` against `_estack`; every row re-measured on a fresh link after the impulse array was
+made to follow the block size, which is 8 KiB back at geometry 256 and 12 KiB at 128 and 64 (the row for
+convolution 256 with NAVTEX was 3,616 bytes before that change, which is the same eight KiB):
 
 | build | headroom | verdict |
 |---|---|---|
-| as it ships today, neither option | 96,408 bytes | - |
-| `USE_NAVTEX` alone, grid at its default width | 63,232 | fits |
-| `USE_NAVTEX` alone, `-DSITOR_GRID_SPAN=1` | 84,752 | fits, roomiest mode build |
-| convolution `FFT_CONVOLUTION_SIZE=128`, no NAVTEX | 52,232 | fits |
-| convolution `FFT_CONVOLUTION_SIZE=256`, no NAVTEX | 32,776 | fits |
-| convolution 128 **plus** `USE_NAVTEX` | 23,072 | fits |
-| convolution **256** plus `USE_NAVTEX` | **3,616** | links, too tight to trust |
-| convolution **256** plus `USE_NAVTEX -DSITOR_GRID_SPAN=1` | **21,120** | fits |
+| as it ships today, neither option | 96,304 bytes | - |
+| `USE_NAVTEX` alone, grid at its default width | 67,144 | fits |
+| `USE_NAVTEX` alone, `-DSITOR_GRID_SPAN=1` | 84,648 | fits, roomiest mode build |
+| convolution `FFT_CONVOLUTION_SIZE=128`, no NAVTEX | 64,388 | fits |
+| convolution `FFT_CONVOLUTION_SIZE=256`, no NAVTEX | 40,836 | fits |
+| convolution 128 **plus** `USE_NAVTEX` | 35,228 | fits |
+| convolution **256** plus `USE_NAVTEX` | **11,676** | links, and still the tightest combination here |
+| convolution **256** plus `USE_NAVTEX -DSITOR_GRID_SPAN=1` | 29,180 | fits |
 
 Two corrections, both of them this file believing a measurement it had stopped checking.
 

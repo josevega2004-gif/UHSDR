@@ -275,7 +275,7 @@ fixture-check:
 	@python3 fixture_check.py
 
 clean:
-	rm -f digi_bench digi_bench-break-rx convolution_probe *.o *.d *.wav *.pgm .convolution_defs
+	rm -f digi_bench digi_bench-break-rx convolution_probe *.o *.d *.wav *.pgm .convolution_defs filter_paths.gen.c
 # fixtures/ is untouched on purpose: the on air recording is tracked, not a build product
 
 # The convolution probe compiles drivers/audio/audio_convolution.c as *text*, because the arrays that
@@ -285,8 +285,10 @@ clean:
 # harmless by comparing the whole pipeline with a plain time-domain FIR that uses no FFT at all.
 CONV_DEFS   = -DUSE_CONVOLUTION -D__IO=volatile
 # The geometry of the filter is a build choice (see audio_convolution.h), so the harness that measures
-# it takes the same choices: EXTRA_DEFS='-DFFT_CONVOLUTION_SIZE=64 -DCONVOLUTION_MAX_NO_OF_COEFFS=256'
-# measures the low latency variant, and the numbers it prints are that variant's, not the default's.
+# it takes the same choices: EXTRA_DEFS='-DFFT_CONVOLUTION_SIZE=64' measures the low latency variant,
+# and the numbers it prints are that variant's, not the default's.  The tap count and the impulse array
+# follow from the block size, so one flag moves the geometry rather than leaving one array sized for
+# another build.
 CONV_DEFS  += $(EXTRA_DEFS)
 
 # ... but those choices are not visible to make's dependency rules, and a measurement taken from an
@@ -309,7 +311,25 @@ $(CONV_STAMP):
 	@printf '%s\n' '$(_conv_want)' > $@
 CONV_INC    = -I$(SHIM) -I$(LIBDIR) -I$(LIBDIR)/filters -I../../hardware -I../../misc
 
-convolution_probe: convolution_probe.o convolution_fft.o iq_rx_filter.o
+# The probe checks every SSB and CW filter path the radio has, so it needs the radio's path table,
+# FilterPathInfo[] in audio_filter.c.  The rest of that file is the filter setup of a running radio and
+# does not build on a host, so the table is cut out of it as text: everything up to the line that
+# closes the table.  If that line is ever reworded sed copies the whole file and the compile stops on
+# the first function, which is the right way for this to fail.  The table points at the coefficient
+# tables in filters/, all of which are plain data, so they are compiled as they are.
+FILTER_TABLE_SRCS := $(wildcard $(LIBDIR)/filters/*.c)
+FILTER_TABLE_OBJS := $(notdir $(FILTER_TABLE_SRCS:.c=.o))
+
+filter_paths.gen.c: $(LIBDIR)/audio_filter.c
+	sed '/^}; \/\/ end FilterPath/q' $< > $@
+
+filter_paths.o: filter_paths.gen.c $(LIBDIR)/audio_filter.h $(LIBDIR)/filters/filters.h $(CONV_STAMP)
+	$(CC) $(CFLAGS) $(CONV_DEFS) $(CONV_INC) -c -o $@ filter_paths.gen.c
+
+$(FILTER_TABLE_OBJS): %.o: $(LIBDIR)/filters/%.c $(LIBDIR)/filters/filters.h $(CONV_STAMP)
+	$(CC) $(CFLAGS) $(CONV_DEFS) $(CONV_INC) -c -o $@ $<
+
+convolution_probe: convolution_probe.o convolution_fft.o filter_paths.o $(FILTER_TABLE_OBJS)
 	$(CC) $(LINKFLAGS) -o $@ $^ -lm
 
 # Everything the probe compiles in as text or includes, spelled out: it evaluates CONVOLUTION_USED_FOR,
@@ -317,15 +337,13 @@ convolution_probe: convolution_probe.o convolution_fft.o iq_rx_filter.o
 # here leaves the probe checking a stale object.  A mutation of that macro sat unnoticed behind exactly
 # this omission until the dependency was written down.
 convolution_probe.o: convolution_probe.c $(LIBDIR)/audio_convolution.c $(LIBDIR)/audio_convolution.h \
-        $(LIBDIR)/audio_driver.h $(LIBDIR)/filters/filters.h ../../hardware/uhsdr_demod_modes.h \
+        $(LIBDIR)/audio_driver.h $(LIBDIR)/audio_filter.h $(LIBDIR)/filters/filters.h \
+        ../../hardware/uhsdr_demod_modes.h \
         $(SHIM)/uhsdr_board.h $(SHIM)/arm_math.h $(SHIM)/arm_const_structs.h $(CONV_STAMP)
 	$(CC) $(CFLAGS) $(DEFINES) $(CONV_DEFS) $(CONV_INC) -c -o $@ convolution_probe.c
 
 convolution_fft.o: convolution_fft.c $(SHIM)/arm_const_structs.h
 	$(CC) $(CFLAGS) $(CONV_INC) -c -o $@ convolution_fft.c
-
-iq_rx_filter.o: $(LIBDIR)/filters/iq_rx_filter.c $(LIBDIR)/filters/filters.h $(CONV_STAMP)
-	$(CC) $(CFLAGS) $(CONV_DEFS) $(CONV_INC) -c -o $@ $(LIBDIR)/filters/iq_rx_filter.c
 
 # A nonzero exit on its own proves nothing, so the probe says which of its checks it failed on: the
 # partitioned pipeline has to reproduce a plain complex FIR over the same taps, and the sideband
@@ -338,5 +356,5 @@ convolution-check: convolution_probe
 # probe's, and sitor_rx.o's) stay, because they also say which files are compiled as text and which
 # switches have to be re-run.
 ALL_DEPS = $(BENCH_OBJS:.o=.d) $(FW_OBJS:.o=.d) digi_bench.break-rx.d \
-           convolution_probe.d convolution_fft.d iq_rx_filter.d
+           convolution_probe.d convolution_fft.d filter_paths.d $(FILTER_TABLE_OBJS:.o=.d)
 -include $(ALL_DEPS)

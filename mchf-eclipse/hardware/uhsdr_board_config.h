@@ -89,10 +89,13 @@
 // the RX interpolation compiled out underneath it, so it could not have worked; that is fixed and the
 // filter is now measured rather than described - see support/digi/README.md for the passband, latency
 // and RAM table and for the geometry knobs (FFT_CONVOLUTION_SIZE 64/128/256, which trade receive
-// latency for skirt sharpness).  Cost at geometry 128: 44,176 bytes of .bss, 52,232 of stack headroom.
+// latency for skirt sharpness).  Cost, measured on a fresh link of each: 55,472 bytes of .bss and 40,836
+// of stack headroom at 256, 31,920 / 64,388 at 128, 20,144 / 76,164 at 64, against 93,964 / 96,304 with
+// the option off.  Note that 64 fails the probe's DC check on the wide paths: the low edge needs taps to
+// be made of, and at 256 of them on a 48 kHz path there are none to spare.
 //#define USE_CONVOLUTION
 
-// OPTION - diagnostic builds of the convolution path.  Both are listed here rather than only at their
+// OPTION - variant builds of the convolution path.  They are listed here rather than only at their
 // point of use because a switch the CI sweep cannot see is how the option above stayed broken: it
 // compiles, nobody builds it, and the file it lives in looks fine.
 //
@@ -107,6 +110,24 @@
 // in the audio path - and the diagnostic it was built for (a filter moving blocks on time and outputing
 // silence) is answered, so it is off unless a build asks for it.  The variables still exist and read 0.
 // #define CONVOLUTION_LEVEL_STATS
+//
+// CONVOLUTION_LINEAR_PHASE: leave the filter's taps as the designer makes them, symmetric, instead of
+// converting them to minimum phase.  The two have the same passband, skirts and stop band; what
+// differs is delay.  Linear phase delays every frequency alike, by half the response - 42.6 ms for
+// the 1024 taps of the default geometry at 12 kHz - and minimum phase delays the middle of the band by
+// about a millisecond for SSB and four to seven for the CW filters, more towards the band edges.  This
+// switch is for hearing that difference on one radio, and for a mode where equal delay matters.
+// #define CONVOLUTION_LINEAR_PHASE
+//
+// CONVOLUTION_MEASURE: what the filter costs on real hardware, in DWT cycles and stack pointer values,
+// printed on the debug overlay and readable as globals.  It answers the three questions that decide
+// whether USE_CONVOLUTION can stop being a build option: how much audio a filter change eats (the
+// design runs with the RX processor held off, so this is a hole in what you hear, not a background
+// cost), what one block of filtering costs in the PendSV worker and in the audio interrupt, and how far
+// the stack gets from the .bss the filter just grew.  Costs one clock read per call, so measure with it
+// on and ship with it off.  See support/digi/README.md, "The measurement build", for the thresholds and
+// for what to write down.
+// #define CONVOLUTION_MEASURE
 
 // old LMS noise reduction
 // will probably never used any more

@@ -13,6 +13,8 @@
 #include "audio_convolution.h"
 #include "audio_driver.h"        // Sample_Buffer, the block the queues carry
 #include "arm_const_structs.h"    // the arm_cfft_sR_f32_lenNN the geometry below names
+#include "profiling.h"            // conv_meas_clock(): the DWT cycle counter, empty header on the host bench
+#include <string.h>
 
 // The CMSIS transform instance has to be the one whose length matches FFT_CONVOLUTION_SIZE, which is a
 // build-time choice rather than a constant of this file: see the note in audio_convolution.h.  Naming
@@ -28,6 +30,23 @@
 #define CONVOLUTION_CFFT_INSTANCE   arm_cfft_sR_f32_len256
 #else
 #error "FFT_CONVOLUTION_SIZE has to be 64, 128 or 256: those are the float32 CFFT instances this module is given, and a block is half of it.  It is not a sample rate - the IQ rate is IQ_SAMPLE_RATE, 48000, set by the codec clock."
+#endif
+
+// The transform the minimum phase design works in.  It needs to be several times longer than the
+// response, and four times is what the design scratch in ConvolutionBuffers holds for any geometry:
+// the response is at most MAX_NO_OF_BLOCKS * SIZE / 2 taps and the scratch is a little over
+// 2 * MAX_NO_OF_BLOCKS * SIZE complex points.
+#ifndef CONVOLUTION_LINEAR_PHASE
+#define CONVOLUTION_MINPHASE_FFT_SIZE   (2 * CONVOLUTION_MAX_NO_OF_BLOCKS * FFT_CONVOLUTION_SIZE)
+#if   CONVOLUTION_MINPHASE_FFT_SIZE == 4096
+#define CONVOLUTION_MINPHASE_CFFT_INSTANCE   arm_cfft_sR_f32_len4096
+#elif CONVOLUTION_MINPHASE_FFT_SIZE == 2048
+#define CONVOLUTION_MINPHASE_CFFT_INSTANCE   arm_cfft_sR_f32_len2048
+#elif CONVOLUTION_MINPHASE_FFT_SIZE == 1024
+#define CONVOLUTION_MINPHASE_CFFT_INSTANCE   arm_cfft_sR_f32_len1024
+#else
+#error "the minimum phase design needs a CFFT of 2 * CONVOLUTION_MAX_NO_OF_BLOCKS * FFT_CONVOLUTION_SIZE points, and CMSIS has 1024, 2048 and 4096: choose the two so that their product is 512, 1024 or 2048, or define CONVOLUTION_LINEAR_PHASE"
+#endif
 #endif
 #endif
 
@@ -190,14 +209,161 @@ int32_t Sample_out_has_room()
 // ways - the chain was never set up so cbs.size is still 0, the free ring is empty so slices are
 // dropped, the worker is not running so nothing is queued, or the interrupt is not reading so nothing
 // comes back - and from the operator's chair all four look the same: a radio that tunes, displays and
-// hears nothing.  These four numbers tell them apart on the screen.
+// hears nothing.  These numbers tell them apart on the screen.
 volatile uint32_t conv_stat_slices_in;      // slices handed in by the audio interrupt
 volatile uint32_t conv_stat_blocks_in;      // whole blocks that reached the worker's queue
 volatile uint32_t conv_stat_blocks_out;     // finished blocks the interrupt took back
 volatile uint32_t conv_stat_dropped;        // blocks thrown away because nothing was free
 volatile uint32_t conv_stat_nosetup;        // slices refused because cbs.size was still 0
+volatile uint32_t conv_stat_busyin;         // slices refused while a filter was being designed
 volatile uint32_t conv_stat_peak_in;        // loudest |sample| handed in since boot, times 1000
 volatile uint32_t conv_stat_peak_out;       // loudest |sample| handed back, times 1000
+
+#ifdef CONVOLUTION_MEASURE
+// ---------------- the numbers that decide whether this filter can be switched on ----------------
+//
+// Everything above says whether the pipeline is moving; none of it says whether moving it is
+// affordable.  The three questions a radio has to answer before USE_CONVOLUTION stops being a build
+// option and becomes a default are:
+//
+//   1. How much audio does a filter change eat?  A design runs with the RX processor held off, so a
+//      design that takes longer than one IQ interrupt (667 us at 1500 Hz) is not a background cost but
+//      a hole in what the operator hears.  conv_meas_gap_* measures the hole directly, in cycles, and
+//      conv_meas_busyin_* counts the slices that were refused inside it, which is the same hole
+//      counted in units of audio (each slice is 32 samples at 48 kHz or 8 at 12 kHz, and both are one
+//      667 us interrupt).
+//   2. What does one block of filtering cost, in the worker and in the interrupt?  conv_meas_block_*
+//      and conv_meas_isr*_* answer that; they are the per-frame budget the L% readout shows as a duty
+//      cycle, but attributed to this filter rather than to the whole handler.
+//   3. How close does the stack get to the .bss the filter just grew?  The link says the two regions
+//      fit; only running the radio says whether the ISR chain fits between them.  conv_meas_msp_*
+//      records the lowest main stack pointer ever seen in each of the three contexts, which compared
+//      against _ebss is the margin the linker's arithmetic cannot give.
+//
+// Cycles, not microseconds: the counter is DWT's free-running CYCCNT, already started at boot by
+// profileTimedEventInit() in uhsdr_main.c, and this build does not reset it because the audio load
+// readout shares it.  Divide by SystemCoreClock/1000000 to read them (the UI line does).
+//
+// On the host bench conv_meas_clock() returns 0 and the stack pointer is not sampled, so the timing
+// fields stay zero and only the counting fields (design/setup counts, busyin) carry meaning - which is
+// what convolution_probe.c section 13 checks, because a counter nobody runs on a host rots.
+volatile uint32_t conv_meas_setup_count;     // calls of the setup, cached or not
+volatile uint32_t conv_meas_design_count;    // of those, the ones that actually designed masks
+volatile uint32_t conv_meas_gap_cyc_last;    // audio-off window of the most recent filter change
+volatile uint32_t conv_meas_gap_cyc_max;     // ... and the worst since reset
+volatile uint32_t conv_meas_busyin_last;     // slices refused during the most recent design
+volatile uint32_t conv_meas_busyin_max;      // ... and the worst since reset
+volatile uint32_t conv_meas_minphase_cyc_max;// the cepstrum, i.e. the four long transforms
+volatile uint32_t conv_meas_mask_cyc_max;    // the partition loop, i.e. nfor transforms of masks
+volatile uint32_t conv_meas_block_cyc_max;   // one worker pass: forward, nfor multiplies, inverse
+volatile uint32_t conv_meas_block_cyc_total; // over conv_meas_block_count passes
+volatile uint32_t conv_meas_block_count;
+volatile uint32_t conv_meas_isrin_cyc_max;   // AudioDriver_ConvolutionInput() inside the audio ISR
+volatile uint32_t conv_meas_isrout_cyc_max;  // AudioDriver_ConvolutionOutput() in the same ISR
+volatile uint32_t conv_meas_msp_min_isr;     // deepest main stack seen in the audio ISR
+volatile uint32_t conv_meas_msp_min_worker;  // ... in the PendSV worker
+volatile uint32_t conv_meas_msp_min_design;  // ... in the main loop during a design
+
+// The hole a filter change makes, opened by the main loop and closed by the audio interrupt.  It has
+// to span both: emptying the queues and refilling the first block are as much of the silence as the
+// design is, and timing only the design reported a hole the operator never heard the end of.
+static uint32_t conv_meas_gap_start;        // clock when the current change began
+static volatile bool conv_meas_gap_open;    // that window is still being counted
+
+// The worker's average is kept as a sum over a bounded number of passes.  A pass is a few hundred
+// thousand cycles, so an unbounded 32-bit sum would wrap in minutes while the count kept climbing and
+// the average would walk down towards zero; halving both at this bound keeps the ratio, bounds the
+// sum and leaves an average over the last few thousand passes - about ten seconds of receiving.
+#define CONV_MEAS_BLOCK_AVG_PASSES  1024u
+
+static inline uint32_t conv_meas_clock(void)
+{
+#ifdef HOST_BENCH
+    return 0;
+#else
+    return profileCycleCount_get();
+#endif
+}
+
+// The boot code starts the counter (profileTimedEventInit(), uhsdr_main.c:393) and this build must not
+// reset it, because the audio ISR load readout shares it; starting it again is idempotent and covers a
+// measurement taken before that line ever ran.
+static inline void conv_meas_clock_start(void)
+{
+#ifndef HOST_BENCH
+    profileCycleCount_start();
+#endif
+}
+
+static volatile bool conv_meas_did_work;   // set by the worker when a pass had a block in it
+
+static inline void conv_meas_max(volatile uint32_t* target, uint32_t cycles)
+{
+    if (cycles > *target) *target = cycles;
+}
+
+// Close the hole the last filter change opened, if it is still open.  Two callers, and that is the
+// point: the audio interrupt closes it when the new filter first hands a sample back, which is when
+// the operator hears the radio again, and the main loop closes an abandoned one when the next change
+// begins.  A change made while the receiver was not running (in TX) leaves the window open, and
+// discarding it would report nothing where the operator lost a whole interval.
+static void conv_meas_gap_close(uint32_t now)
+{
+    if (!conv_meas_gap_open)
+    {
+        return;
+    }
+    conv_meas_gap_open = false;
+    const uint32_t gap = now - conv_meas_gap_start;
+    conv_meas_gap_cyc_last = gap;
+    conv_meas_max(&conv_meas_gap_cyc_max, gap);
+}
+
+// The stack pointer is a register on ARM and does not exist on the bench, so the bench samples 0 and
+// the UI line prints "S -" rather than a headroom that would look real.
+static inline uint32_t conv_meas_sp(void)
+{
+#ifdef HOST_BENCH
+    return 0;
+#else
+    return __get_MSP();
+#endif
+}
+
+static inline void conv_meas_lowest(volatile uint32_t* target, uint32_t sp)
+{
+    if (sp != 0 && (*target == 0 || sp < *target)) *target = sp;
+}
+
+void conv_meas_reset(void)
+{
+    // A window still open when the counters are zeroed would close against a session that no longer
+    // exists, so it is abandoned rather than recorded.
+    conv_meas_gap_open = false;
+    conv_meas_setup_count = 0;
+    conv_meas_design_count = 0;
+    conv_meas_gap_cyc_last = 0;
+    conv_meas_gap_cyc_max = 0;
+    conv_meas_busyin_last = 0;
+    conv_meas_busyin_max = 0;
+    conv_meas_minphase_cyc_max = 0;
+    conv_meas_mask_cyc_max = 0;
+    conv_meas_block_cyc_max = 0;
+    conv_meas_block_cyc_total = 0;
+    conv_meas_block_count = 0;
+    conv_meas_isrin_cyc_max = 0;
+    conv_meas_isrout_cyc_max = 0;
+    // deliberately not the stack minima: those are the answer to "did the radio ever get close", and
+    // clearing them on the way past a menu item is how a measurement build ends up reporting a margin
+    // that was never measured.
+    conv_stat_slices_in = 0;
+    conv_stat_blocks_in = 0;
+    conv_stat_blocks_out = 0;
+    conv_stat_dropped = 0;
+    conv_stat_nosetup = 0;
+    conv_stat_busyin = 0;
+}
+#endif
 
 static Sample_Buffer conv_blocks[SAMPLE_BUFFER_NUM];
 // The worker writes one whole block into a buffer it is handed back and forth, so the block type has
@@ -222,8 +388,48 @@ static uint16_t conv_stage_count;
 static Sample_Buffer* conv_play;
 static uint16_t conv_play_count;
 
+// True while a filter is being designed, and the reason the design may use the worker's buffers as its
+// working store.  See AudioDriver_ConvolutionSetFilterPath().
+static volatile bool conv_design_busy;
+
+// Test seam for the host probe (support/digi/convolution_probe.c, section 12): a function to call from
+// the middle of a design, which is what the audio interrupt and the worker it pends do to a design on a
+// radio.  A single-threaded host cannot interrupt itself, so the probe names this instead.  It is a null
+// pointer in every firmware build and costs two loads per filter change.
+void (*conv_test_preempt)(const char* where);
+
+// The three contexts this module runs in are the audio interrupt (Input/Output, from the RX
+// processor), the worker that interrupt pends (convolution_handle(), at the lowest exception priority)
+// and the main loop (the design).  Where one of the variables below has more than one of them as a
+// writer, the update is inside a short critical section, and the reason is spelled out where it is
+// taken.  On a host build all three are one thread, so the primitives collapse to nothing and the same
+// code runs unguarded - which is what makes the probe's counts comparable with the radio's.
+static inline unsigned int conv_irq_save(void)
+{
+#ifdef __ARM_ARCH
+    const unsigned int primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+#else
+    return 0u;
+#endif
+}
+
+static inline void conv_irq_restore(unsigned int primask)
+{
+#ifdef __ARM_ARCH
+    __set_PRIMASK(primask);
+#else
+    (void) primask;
+#endif
+}
+
 void AudioDriver_ConvolutionReset(void)
 {
+    // The ring, the two queues and the two part-blocks are one state, and this rebuilds all of it from
+    // the main loop while the audio interrupt is live: it has to be atomic, or an interrupt landing in
+    // the middle finds a block both free and queued.
+    const unsigned int irq = conv_irq_save();
     for (int32_t i = 0; i < SAMPLE_BUFFER_NUM; i++)
     {
         conv_free[i] = &conv_blocks[i];
@@ -245,23 +451,41 @@ void AudioDriver_ConvolutionReset(void)
 
     Sample_in_buffer_reset();
     Sample_out_buffer_reset();
+    conv_irq_restore(irq);
 }
 
+// Both ends of the free ring have more than one of the three contexts as a writer, so both are a
+// read-modify-write on a variable that someone else can change underneath:
+//
+//   conv_free_head  taken by the audio interrupt, and rebuilt by the main loop in Reset()
+//   conv_free_tail  given by the audio interrupt (a block read out, a block that could not be queued)
+//                   and by the worker in convolution_handle() when the output queue is full
+//
+// Losing one of those updates either strands a block outside the pool for the rest of the session -
+// and a pool of four that leaks runs dry, which is a radio with no audio whose counters say nothing has
+// been dropped - or puts one block in the pool twice, handing the same buffer to the interrupt and the
+// worker at once.  These sections are two loads and two stores, which is nothing at the rates this
+// module runs at, and they cannot delay the audio interrupt, which is the higher of the two and the one
+// being protected.
 static Sample_Buffer* conv_block_take(void)
 {
-    if (conv_free_head == conv_free_tail)
+    const unsigned int irq = conv_irq_save();
+    Sample_Buffer* c = NULL;
+    if (conv_free_head != conv_free_tail)
     {
-        return NULL;
+        c = conv_free[conv_free_head];
+        conv_free_head = (conv_free_head + 1) % (SAMPLE_BUFFER_NUM + 1);
     }
-    Sample_Buffer* c = conv_free[conv_free_head];
-    conv_free_head = (conv_free_head + 1) % (SAMPLE_BUFFER_NUM + 1);
+    conv_irq_restore(irq);
     return c;
 }
 
 static void conv_block_give(Sample_Buffer* c)
 {
+    const unsigned int irq = conv_irq_save();
     conv_free[conv_free_tail] = c;
     conv_free_tail = (conv_free_tail + 1) % (SAMPLE_BUFFER_NUM + 1);
+    conv_irq_restore(irq);
 }
 
 // Hand a slice of I/Q to the filter.  Returns the number of samples taken, which is the whole slice
@@ -271,13 +495,28 @@ static void conv_block_give(Sample_Buffer* c)
 // and the staging between them is what has to be right.  A block dropped here is a dropout in the
 // audio rather than a desynchronisation, which is what makes refusing better in an interrupt than
 // waiting.
+// The measuring build wraps the two entry points rather than putting a clock read at every return:
+// the refusal paths are short and the work is the long part, and the shape of the code the radio runs
+// should not change because a diagnostic was switched on.  With CONVOLUTION_MEASURE off this is the
+// plain function, one call and no extra code.
+#ifdef CONVOLUTION_MEASURE
+static uint16_t conv_input_body(const float32_t* i, const float32_t* q, uint16_t count)
+#else
 uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, uint16_t count)
+#endif
 {
     uint16_t done = 0;
 
     if (cbs.size == 0)
     {   // AudioDriver_SetProcessingChain() has not sized the blocks yet
         conv_stat_nosetup++;
+        return 0;
+    }
+    if (conv_design_busy)
+    {   // A filter is being designed in the worker's buffers.  Taking samples now would queue a block
+        // for a worker that is not allowed to run, and the queues are emptied when the design starts
+        // anyway, so the honest answer is "not now" and the caller fills silence.
+        conv_stat_busyin++;
         return 0;
     }
     conv_stat_slices_in++;
@@ -289,6 +528,11 @@ uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, ui
             conv_stage = conv_block_take();
             if (conv_stage == NULL)
             {
+                // Every block is already in the pipeline and none has come back: this slice is lost.
+                // It used to be the drop nobody could see, because the only place that counted one was
+                // the queue-add below - which cannot fail while a block is free to stage, so a radio
+                // that had leaked its pool out of the free ring reported "d0" while it was dying.
+                conv_stat_dropped++;
                 break;
             }
             conv_stage_count = 0;
@@ -322,7 +566,12 @@ uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, ui
         // a zero that means "not measured" must not look like a zero that means "no signal".
 #ifdef CONVOLUTION_LEVEL_STATS
         {
-            const uint32_t pk = (uint32_t)(m * 1000.0f);
+            // NaN is a possible answer from a broken filter, and this is the line whose whole job is to
+            // be readable when something is wrong: casting a NaN to uint32_t is undefined and typically
+            // prints as a small plausible number.  Anything that is not a positive number reads as a
+            // saturating 999999, which says "that was not a sample".
+            const float32_t ml = m * 1000.0f;
+            const uint32_t pk = !(ml > 0.0f) ? 999999u : (ml > 999999.0f ? 999999u : (uint32_t) ml);
             if (pk > conv_stat_peak_in) conv_stat_peak_in = pk;
         }
 #endif
@@ -349,15 +598,33 @@ uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, ui
     return done;
 }
 
+#ifdef CONVOLUTION_MEASURE
+uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, uint16_t count)
+{
+    const uint32_t meas_t0 = conv_meas_clock();
+    const uint16_t r = conv_input_body(i, q, count);
+    conv_meas_max(&conv_meas_isrin_cyc_max, conv_meas_clock() - meas_t0);
+    // read after the work, at the depth this call reached: the wrapper frame itself is a few words
+    // deeper than anything the audio ISR chain does outside a filter, and that is the region whose
+    // margin to _ebss is the question.
+    conv_meas_lowest(&conv_meas_msp_min_isr, conv_meas_sp());
+    return r;
+}
+#endif
+
 // Take finished samples back out of the filter.  Returns the number given, which is the whole request
 // as long as blocks have come back: 0 until the worker has produced a first one, and short of the
 // request only if it has run out mid slice.  Either way the caller fills silence for what is missing,
 // and after that the two streams run at the same rate because they carry the same samples.
+#ifdef CONVOLUTION_MEASURE
+static uint16_t conv_output_body(float32_t* i, float32_t* q, uint16_t count)
+#else
 uint16_t AudioDriver_ConvolutionOutput(float32_t* i, float32_t* q, uint16_t count)
+#endif
 {
     uint16_t done = 0;
 
-    if (cbs.size == 0)
+    if (cbs.size == 0 || conv_design_busy)
     {
         return 0;
     }
@@ -396,7 +663,10 @@ uint16_t AudioDriver_ConvolutionOutput(float32_t* i, float32_t* q, uint16_t coun
         }
 #ifdef CONVOLUTION_LEVEL_STATS
         {
-            const uint32_t pk = (uint32_t)(m * 1000.0f);
+            // as on the input side: a NaN must not be able to read as a zero.  See the note in
+            // AudioDriver_ConvolutionInput().
+            const float32_t ml = m * 1000.0f;
+            const uint32_t pk = !(ml > 0.0f) ? 999999u : (ml > 999999.0f ? 999999u : (uint32_t) ml);
             if (pk > conv_stat_peak_out) conv_stat_peak_out = pk;
         }
 #endif
@@ -411,6 +681,24 @@ uint16_t AudioDriver_ConvolutionOutput(float32_t* i, float32_t* q, uint16_t coun
     }
     return done;
 }
+
+#ifdef CONVOLUTION_MEASURE
+uint16_t AudioDriver_ConvolutionOutput(float32_t* i, float32_t* q, uint16_t count)
+{
+    const uint32_t meas_t0 = conv_meas_clock();
+    const uint16_t r = conv_output_body(i, q, count);
+    conv_meas_max(&conv_meas_isrout_cyc_max, conv_meas_clock() - meas_t0);
+    conv_meas_lowest(&conv_meas_msp_min_isr, conv_meas_sp());
+    // The first sample the new filter hands back is the end of the hole: the queue flush, the design
+    // and the refill of the first block are all in it, and only this side can see the last of the
+    // three.  One flag test while no change is in flight.
+    if (conv_meas_gap_open && r > 0)
+    {
+        conv_meas_gap_close(conv_meas_clock());
+    }
+    return r;
+}
+#endif
 #endif
 
 #ifdef USE_CONVOLUTION
@@ -494,10 +782,14 @@ void AudioDriver_CalcConvolutionFilterCoeffs (int N, float32_t f_low, float32_t 
       cbs.impulse[j] = + coef * cosf (posj * w_osc);
       break;
     case 1:
+      // e^{+j w n}: a band given as positive frequencies passes positive frequencies of I + jQ, which
+      // is the side the receiver's i+q sum selects for USB.  The masks here are a forward transform of
+      // these taps; with the minus sign this was carried over with, every band came out mirrored
+      // about zero and USB received the lower sideband.
       cbs.impulse[2 * i + 0] = + coef * cosf (posi * w_osc);
-      cbs.impulse[2 * i + 1] = - coef * sinf (posi * w_osc);
+      cbs.impulse[2 * i + 1] = + coef * sinf (posi * w_osc);
       cbs.impulse[2 * j + 0] = + coef * cosf (posj * w_osc);
-      cbs.impulse[2 * j + 1] = - coef * sinf (posj * w_osc);
+      cbs.impulse[2 * j + 1] = + coef * sinf (posj * w_osc);
       break;
     }
   }
@@ -507,6 +799,97 @@ void AudioDriver_CalcConvolutionFilterCoeffs (int N, float32_t f_low, float32_t 
 
 
 #ifdef USE_CONVOLUTION
+#ifndef CONVOLUTION_LINEAR_PHASE
+// How far below the passband the minimum phase design keeps the response.  Below this the stop band
+// is treated as flat, which is what bounds it: the linear phase taps reach -111 dB, and at -110 dB
+// the converted ones measure the same.  Lower buys nothing and costs delay, because the conversion
+// has less room to be exact in: its transform is four times the response, in float32.
+#define CONVOLUTION_MINPHASE_FLOOR   3.0e-6f
+
+// Turn the taps in cbs.impulse into the minimum phase taps with the same magnitude response.
+//
+// The designer's windowed sinc is linear phase: symmetric about its middle, so everything it passes
+// comes out half its length late - 42.6 ms for 1024 taps at 12 kHz - and that half is most of what a
+// steep filter of this kind costs in delay.  Nothing about selecting a band requires it.  Among all
+// the filters with one magnitude response the minimum phase one puts its energy as early as it can
+// be put, and its delay is set by how narrow the band is and not by how many taps describe it.  The
+// price is that the delay is no longer the same at every frequency: it is smallest in the middle of
+// the band and rises towards the edges.
+//
+// This is the standard construction: the logarithm of the magnitude, its cepstrum, the cepstrum
+// folded onto positive time, and back.  It runs in place in the design scratch, which is the
+// worker's own buffers - so the caller must have emptied the queues first, and must clear the
+// worker's history afterwards.
+static void convolution_minimum_phase(int nc)
+{
+    float32_t* const x = cob.design_scratch;
+    const int points = CONVOLUTION_MINPHASE_FFT_SIZE;
+
+    for (int k = 0; k < 2 * points; k++)
+    {
+        x[k] = k < 2 * nc ? cbs.impulse[k] : 0.0f;
+    }
+    arm_cfft_f32(&CONVOLUTION_MINPHASE_CFFT_INSTANCE, x, 0, 1);
+
+    float32_t peak = 0.0f;
+    for (int k = 0; k < points; k++)
+    {
+        const float32_t power = x[2 * k] * x[2 * k] + x[2 * k + 1] * x[2 * k + 1];
+        x[2 * k] = power;
+        if (power > peak)
+        {
+            peak = power;
+        }
+    }
+    if (peak <= 0.0f)
+    {
+        return;         // no taps at all: nothing to convert, and no logarithm to take
+    }
+    const float32_t lowest = peak * CONVOLUTION_MINPHASE_FLOOR * CONVOLUTION_MINPHASE_FLOOR;
+    for (int k = 0; k < points; k++)
+    {
+        x[2 * k] = 0.5f * logf(x[2 * k] < lowest ? lowest : x[2 * k]);
+        x[2 * k + 1] = 0.0f;
+    }
+    arm_cfft_f32(&CONVOLUTION_MINPHASE_CFFT_INSTANCE, x, 1, 1);
+
+    // The worst possible moment for a worker pass, and the reason the seam is closed during a design:
+    // the half-finished cepstrum is all of x, and x is the worker's fftin, fftout and accum.  Tested
+    // from here by section 12 of support/digi/convolution_probe.c.
+    if (conv_test_preempt)
+    {
+        conv_test_preempt("cepstrum inverse transform");
+    }
+
+    // fold: twice the positive-time half, none of the negative-time half, the two ends as they are
+    for (int k = 1; k < points / 2; k++)
+    {
+        x[2 * k] *= 2.0f;
+        x[2 * k + 1] *= 2.0f;
+    }
+    for (int k = points / 2 + 1; k < points; k++)
+    {
+        x[2 * k] = 0.0f;
+        x[2 * k + 1] = 0.0f;
+    }
+    arm_cfft_f32(&CONVOLUTION_MINPHASE_CFFT_INSTANCE, x, 0, 1);
+
+    for (int k = 0; k < points; k++)
+    {
+        const float32_t magnitude = expf(x[2 * k]);
+        const float32_t phase = x[2 * k + 1];
+        x[2 * k] = magnitude * cosf(phase);
+        x[2 * k + 1] = magnitude * sinf(phase);
+    }
+    arm_cfft_f32(&CONVOLUTION_MINPHASE_CFFT_INSTANCE, x, 1, 1);
+
+    for (int k = 0; k < 2 * nc; k++)
+    {
+        cbs.impulse[k] = x[k];
+    }
+}
+#endif
+
 void AudioDriver_SetConvolutionFilter (int nc, float32_t f_low, float32_t f_high, float32_t samplerate, int wintype, float32_t gain)
 {
 	/****************************************************************
@@ -519,9 +902,25 @@ void AudioDriver_SetConvolutionFilter (int nc, float32_t f_low, float32_t f_high
   // it needs to be complex in order to allow for SSB demodulation
   // this writes the calculated coeffs into the adb.impulse array
   AudioDriver_CalcConvolutionFilterCoeffs (nc, f_low, f_high, samplerate, wintype, 1, gain);
+#ifdef CONVOLUTION_MEASURE
+  const uint32_t meas_t_minphase = conv_meas_clock();
+#endif
+#ifndef CONVOLUTION_LINEAR_PHASE
+  convolution_minimum_phase(nc);
+#endif
+#ifdef CONVOLUTION_MEASURE
+  conv_meas_max(&conv_meas_minphase_cyc_max, conv_meas_clock() - meas_t_minphase);
+  const uint32_t meas_t_masks = conv_meas_clock();
+#endif
   cbs.buffidx = 0;
   for (i = 0; i < cbs.nfor; i++)
   {
+    // The other window a worker pass would have to land in: this partition's mask is not written yet,
+    // and the worker multiplies against every partition.
+    if (conv_test_preempt)
+    {
+        conv_test_preempt("mask partition");
+    }
     // I right-justified the impulse response => take output from left side of output buff, discard right side
     // Be careful about flipping an asymmetrical impulse response.
     // DD4WH: unsure how to interpret that, maybe like this:
@@ -548,12 +947,135 @@ void AudioDriver_SetConvolutionFilter (int nc, float32_t f_low, float32_t f_high
     //fftw_execute (a->maskplan[i]);
   }
   // after the loop is finished,  fmask[nfor][FFT_size * 2] is filled with the FFT outputs of the partitioned filter response
+#ifdef CONVOLUTION_MEASURE
+  conv_meas_max(&conv_meas_mask_cyc_max, conv_meas_clock() - meas_t_masks);
+#endif
 
+}
+
+// Size the partitions and design the masks for one filter path of the radio.  This is the whole of
+// the setup, and it lives here rather than in AudioDriver_SetProcessingChain() so that the host
+// probe measures the arguments the radio uses: when the probe typed its own copy of this, the copy
+// had different band edges and a different gain, and neither difference could show.
+//
+//   width_hz, offset_hz   FilterInfo[].width and FilterPathDescriptor.offset of the path.  The offset
+//                         is the centre of the path's audio band, 0 meaning half the width, and the
+//                         path's own IIR - which still runs after this filter - is centred there.
+//   lsb                   the band below zero instead of above it
+//   samplerate            the rate the blocks are handed over at
+void AudioDriver_ConvolutionSetFilterPath(float32_t width_hz, float32_t offset_hz, bool lsb, float32_t samplerate)
+{
+    // the band the masks in cob.fmask were last made for
+    static bool designed = false;
+    static float32_t designed_low, designed_high, designed_rate;
+
+    // First, and before anything else: the design borrows the worker's buffers as its working store, so
+    // the seam that feeds them is closed for the whole of it.
+    //
+    // This is the condition that makes the aliasing legal, and until now it was held by nobody here.
+    // Emptying the queues is not what holds it, because the audio interrupt fills them again on the next
+    // slice; what held it was AudioDriver_SetProcessingChain() running with ads.af_disabled set, which
+    // keeps the interrupt out of the whole RX processor - true today, invisible from this file, and one
+    // call site away from untrue.  A worker pass in the middle of a design is not a glitch either: on
+    // this build one pass between the cepstrum's inverse transform and the mask loop leaves all 4096
+    // mask floats NaN, and the cache below then holds them until the operator changes filter width - a
+    // radio that is deaf until you tune, with block counters that never noticed.
+    //
+    // Setting the flag is sufficient on its own, and that is the point of doing it here rather than
+    // relying on the caller: a design runs in the main loop, and thread mode cannot preempt a worker
+    // pass that has already begun, so by the time this function runs none is in flight and none can
+    // start until the flag is cleared.  af_disabled still matters for the post-demod stages; it is no
+    // longer the only thing standing between a filter change and a NaN filter.
+    conv_design_busy = true;
+#ifdef CONVOLUTION_MEASURE
+    // The window opens here, before the queues are emptied, and is closed by the audio interrupt when
+    // the first block filtered by the new masks comes back.  It has to span both: the flush costs
+    // about one block of buffering even when the design is instant, and the earlier version timed
+    // only the design - a hole whose end the operator heard but the field never reported.
+    //
+    // PRIMASK is held while a stale window is closed and the new one opened, so the interrupt cannot
+    // half-replace either.  The seam is already held by the line above, so nothing can close the new
+    // window early: Output() hands back no samples until the design is finished.
+    conv_meas_clock_start();
+    const unsigned int meas_irq = conv_irq_save();
+    conv_meas_gap_close(conv_meas_clock());     // a window left open, e.g. a change made in TX
+    conv_meas_gap_start = conv_meas_clock();
+    conv_meas_gap_open = true;
+    conv_irq_restore(meas_irq);
+
+    const uint32_t meas_busyin_t0 = conv_stat_busyin;
+    conv_meas_setup_count++;
+    conv_meas_lowest(&conv_meas_msp_min_design, conv_meas_sp());
+#endif
+    AudioDriver_ConvolutionReset();
+
+    cbs.size = FFT_CONVOLUTION_SIZE / 2;
+    // The partitions must fit the arrays: nfor = nc / size, and fmask[]/fftout[] have
+    // CONVOLUTION_MAX_NO_OF_BLOCKS of them, so the longest response the block size allows is
+    // MAX_NO_OF_BLOCKS * size taps.  Clamped rather than asserted, because this runs on whatever
+    // filter path the user last used and a rejected build would only hide it.
+    cbs.nc = CONVOLUTION_MAX_NO_OF_COEFFS;
+    if (cbs.nc / cbs.size > CONVOLUTION_MAX_NO_OF_BLOCKS)
+    {
+        cbs.nc = cbs.size * CONVOLUTION_MAX_NO_OF_BLOCKS;
+    }
+    cbs.nfor = cbs.nc / cbs.size;
+    cbs.buffidx = 0;
+
+    const float32_t centre = offset_hz > 0.0f ? offset_hz : width_hz / 2.0f;
+    float32_t lo = centre - width_hz / 2.0f;
+    const float32_t hi = centre + width_hz / 2.0f;
+    if (lo < CONVOLUTION_LOW_CUT_HZ)
+    {
+        lo = CONVOLUTION_LOW_CUT_HZ;
+    }
+
+    // low edge first on either side of zero: handed over the other way round the designer's
+    // bandwidth is negative and every tap changes sign
+    const float32_t f_low = lsb ? -hi : lo;
+    const float32_t f_high = lsb ? -lo : hi;
+
+    // The processing chain is set up again for many reasons that leave the band alone - every step
+    // of a DSP setting in the menu is one - and a design is a few thousand logarithms and sines, so
+    // the masks are kept when they are already the ones asked for.
+    if (!designed || f_low != designed_low || f_high != designed_high || samplerate != designed_rate)
+    {
+        AudioDriver_SetConvolutionFilter(cbs.nc, f_low, f_high, samplerate, 0, CONVOLUTION_PASSBAND_GAIN);
+        designed = true;
+        designed_low = f_low;
+        designed_high = f_high;
+        designed_rate = samplerate;
+#ifdef CONVOLUTION_MEASURE
+        conv_meas_design_count++;
+#endif
+    }
+
+    // the worker's history: it held the audio of the filter before, or the design's working
+    memset(cob.fftin, 0, sizeof(cob.fftin));
+    memset(cob.fftout, 0, sizeof(cob.fftout));
+
+    // Open the seam again last: the history is cleared before the filter can be handed a sample, so the
+    // first block out of a new filter is filtered by the new masks and by nothing that came before them.
+    conv_design_busy = false;
+#ifdef CONVOLUTION_MEASURE
+    // The frames the design itself refused, in the units the interrupt counts them: each is one 667 us
+    // slice that went out as silence because the seam was held.  The refill after the design is not in
+    // this number - nothing is refused once the seam is open - it is in the hole, which the interrupt
+    // closes when the new filter first hands a sample back.
+    const uint32_t meas_refused = conv_stat_busyin - meas_busyin_t0;
+    conv_meas_busyin_last = meas_refused;
+    conv_meas_max(&conv_meas_busyin_max, meas_refused);
+    conv_meas_lowest(&conv_meas_msp_min_design, conv_meas_sp());
+#endif
 }
 #endif
 
 #ifdef USE_CONVOLUTION
+#ifdef CONVOLUTION_MEASURE
+static void conv_handle_body(void)
+#else
 void convolution_handle()
+#endif
 {
 	// This runs in the PendSV handler, out of the audio interrupt, which is the whole reason the
 	// design is interesting: a 256-point complex FFT is not something to want inside the sample ISR.
@@ -561,10 +1083,21 @@ void convolution_handle()
 	// interrupt finished writing is waiting in the in queue.  Nothing here may wait for one.
 	Sample_Buffer* block;
 
+	// A design in progress means the buffers this function works in belong to the design.  Nothing is
+	// queued while that is true - AudioDriver_ConvolutionInput() refuses it - but the test is what makes
+	// that safe rather than merely true at the moment.
+	if (conv_design_busy)
+	{
+		return;
+	}
+
 	if (Sample_in_buffer_remove(&block) == 0)
 	{
 		return;
 	}
+#ifdef CONVOLUTION_MEASURE
+	conv_meas_did_work = true;
+#endif
 
 	// put everything that should happen, when 128 samples are ready, into this function
 	/****************************************************************
@@ -748,7 +1281,40 @@ void convolution_handle()
 	if (Sample_out_buffer_add(block) == 0)
 	{
 		conv_block_give(block);        // the interrupt is not reading: this block is late, not lost
+		// The interrupt increments the same counter when it cannot stage a block, and this runs below
+		// it: without the lock an increment here can be preempted halfway and lost, and this is the
+		// counter the test procedure requires to stay at zero.
+		const unsigned int irq = conv_irq_save();
+		conv_stat_dropped++;           // and it is gone: the audio it carried never reaches the speaker
+		conv_irq_restore(irq);
 	}
 }
+
+#ifdef CONVOLUTION_MEASURE
+void convolution_handle()
+{
+	const uint32_t meas_t0 = conv_meas_clock();
+	conv_meas_did_work = false;
+	conv_handle_body();
+	const uint32_t meas_cyc = conv_meas_clock() - meas_t0;
+	// The worst-case figure counts every call, empty ones included, because an empty call is what a
+	// radio that is not being pended costs; the average is taken over the passes that filtered a block,
+	// which is the number to compare against 667 us of interrupt interval.
+	conv_meas_max(&conv_meas_block_cyc_max, meas_cyc);
+	if (conv_meas_did_work)
+	{
+		conv_meas_block_cyc_total += meas_cyc;
+		conv_meas_block_count++;
+		// Halved together at the bound, so the ratio survives and the sum cannot wrap.  See
+		// CONV_MEAS_BLOCK_AVG_PASSES.
+		if (conv_meas_block_count >= CONV_MEAS_BLOCK_AVG_PASSES)
+		{
+			conv_meas_block_cyc_total /= 2;
+			conv_meas_block_count /= 2;
+		}
+	}
+	conv_meas_lowest(&conv_meas_msp_min_worker, conv_meas_sp());
+}
+#endif
 
 #endif
