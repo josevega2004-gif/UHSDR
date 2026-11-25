@@ -1850,7 +1850,9 @@ same grid for both filters. `ripple` is peak to peak over the band's interior, t
 width left out at each edge because a windowed sinc is 6 dB down at its nominal edges by design;
 `skirt` is -6 to -60 dB above the top edge; `image` is the worst level in the mirror of that same
 interior. A `-` in a skirt column means the filter measured is already 60 dB down at the band edge, so
-there is no skirt to measure.
+there is no skirt to measure; `n/c` in a stock column means the 199-tap table's cutoff falls inside the
+path's band, so the number would be that cutoff rather than the path's. The two 3.6 kHz rows are the only
+ones.
 
 Three things the two-path comparison could not show.
 
@@ -1868,13 +1870,14 @@ every 12 kHz path, and 145 Hz at 48 kHz, where the same taps are four times shor
 pair that is 3.5x steeper on the narrow paths (127 Hz) and 7.9x on the wide ones (1143 Hz).
 
 **Image rejection is where the two differ most, and the pair is worst just where its band is widest.**
--72 to -85 dB on the 199-tap rows, but -22 to -56 dB from 3.8 kHz up: an 89-tap Hilbert pair at 48 kHz is
-poor quadrature at the top of a 10 kHz band. The convolution filter is -110 dB on all 62, because its
-floor comes from the design, not from the rate. The stock ripple figures on the wide rows (up to 11 dB)
-are the same story and the same caveat: they measure the IQ filter's own corner, which the real IIR after
-demodulation finishes, not what the operator hears - and the 3.6 kHz rows have no skirt at all because
-their IQ filter closes at 3.5 kHz. No post-demod filter can reject an image, so the image column does
-stand for both sides.
+-72 to -85 dB on the comparable 199-tap rows, but -22 to -56 dB from 3.8 kHz up: an 89-tap Hilbert pair
+at 48 kHz is poor quadrature at the top of a 10 kHz band. The convolution filter is -110 dB on all 62,
+because its floor comes from the design, not from the rate. The stock ripple figures on the wide rows (up
+to 11 dB) are the same story and the same caveat: they measure the IQ filter's own corner, which the real
+IIR after demodulation finishes, not what the operator hears - and the two 3.6 kHz rows are marked n/c
+because their IQ filter closes at 3.5 kHz, so the stock shape there is that cutoff rather than the path.
+For every comparable path, no post-demod filter can reject an image, so the image column does stand for
+both sides.
 
 The op counts here are steady state, the same convention as the first table above: 356 for the convolution
 filter at this geometry and 796 for the pair, times 1.5 cycles at 168 MHz - the same model as above.
@@ -1923,8 +1926,8 @@ filter at this geometry and 796 for the pair, times 1.5 cycles at 168 MHz - the 
 | 43 | BPF | 3200 | 1675 | 12 kHz | 0.00 | 127.0 | -76.3 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
 | 44 | LPF | 3400 | 1700 | 12 kHz | 0.00 | 127.0 | -76.3 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
 | 45 | BPF | 3400 | 1775 | 12 kHz | 0.00 | 127.0 | -77.5 | 8.53 % | 0.00 | 36.5 | -110.3 | 3.81 % |
-| 46 | LPF | 3600 | 1800 | 12 kHz | 0.00 | 49.0 | -76.6 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
-| 47 | BPF | 3600 | 1875 | 12 kHz | 0.00 | - | -77.5 | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 46 | LPF | 3600 | 1800 | 12 kHz | n/c | n/c | n/c | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
+| 47 | BPF | 3600 | 1875 | 12 kHz | n/c | n/c | n/c | 8.53 % | 0.00 | 36.5 | -110.2 | 3.81 % |
 | 48 | LPF | 3800 | 1900 | 48 kHz | 1.76 | 1143.0 | -24.1 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
 | 49 | BPF | 3800 | 1975 | 48 kHz | 1.52 | 1143.0 | -26.0 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
 | 50 | LPF | 4000 | 2000 | 48 kHz | 1.60 | 1143.0 | -25.3 | 15.26 % | 0.00 | 145.0 | -110.4 | 15.26 % |
@@ -1943,6 +1946,12 @@ filter at this geometry and 796 for the pair, times 1.5 cycles at 168 MHz - the 
 | 63 | LPF | 9000 | 4500 | 48 kHz | 0.03 | 1270.0 | -51.9 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
 | 64 | LPF | 9500 | 4750 | 48 kHz | 0.01 | 1270.0 | -56.3 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
 | 65 | LPF | 10000 | 5000 | 48 kHz | 0.04 | 1270.0 | -56.3 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
+
+`n/c`: rows 46 and 47, the two 3.6 kHz paths.  The 199-tap 12 kHz table they use closes at 3.5 kHz, so the
+stock column would score that table's cutoff instead of the path; the post-demod IIR cannot restore what
+lies above 3.5 kHz, and the convolution filter is designed to the path's own 3.6 kHz edge.  The two sides
+would not be measuring the same band, so the three stock shape columns are withheld.  Their stock CPU
+figure is the real cost of the pair and stays.
 
 #### Minimum phase: why the delay column is not 53 ms
 

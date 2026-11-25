@@ -8,6 +8,10 @@
 // use_decimatedIQ in audio_driver.c), while the convolution filter is one geometry, 128-sample blocks
 // of a 1024-tap response, at whatever rate the path hands blocks over.
 //
+// The two 3.6 kHz paths are the exception on the stock shape: their band reaches past the 199-tap
+// table's 3.5 kHz lowpass, so the top edge of the stock response is that cutoff, not the path.  Their
+// stock shape columns are printed as n/c; their cost is still the real cost and is printed.
+//
 // Build with build-sweep.sh.  Three metrics per path and side:
 //
 //   ripple  peak-to-peak level over the band's interior, clamped at 50 Hz where the band reaches zero
@@ -132,9 +136,9 @@ static void metrics(resp_fn fn, const FilterPathDescriptor* p, double rate, doub
     *image = db(worst / ref);
 
     // out through the top edge: the first -6 and -60 dB crossings above the band.  When the filter is
-    // already 60 dB down at the nominal edge there is no skirt to measure - the pair's 3.6 kHz paths
-    // are like that, because their IQ lowpass closes at 3.5 kHz and the post-demod IIR finishes the
-    // shape - and the column says so rather than reporting the zero a search from that edge returns.
+    // already 60 dB down at the nominal edge there is no skirt to measure; the caller prints n/c for
+    // the pair's 3.6 kHz paths, where the 199-tap IQ lowpass closes at 3.5 kHz and the post-demod IIR
+    // cannot restore what it removed, rather than scoring that cutoff as the path's skirt.
     double f6 = -1.0, f60 = -1.0;
     const int start = (int) ceil(hi / step);
     if (start < n && lv[start] > ref * 0.001)
@@ -218,9 +222,32 @@ int main(void)
 
         setup(p, 1, (float32_t) rate);
 
-        double s_rip, s_skirt, s_img, c_rip, c_skirt, c_img;
-        metrics(stock_resp, p, rate, lo, hi, 1, &s_rip, &s_skirt, &s_img);
+        // The 3.6 kHz paths are the only 12 kHz paths whose band reaches above the 199-tap table's
+        // 3.5 kHz lowpass.  What the stock response measures at their top edge is that lowpass, not
+        // the path, and the post-demod IIR cannot restore it; the README marks those stock shape
+        // columns n/c rather than scoring the cutoff.  Their cost stays comparable.
+        const int stock_shape_valid = !(p->FIR_I_coeff_file == i_rx_new_coeffs && hi >= 3500.0);
+
+        double s_rip = 0.0, s_skirt = 0.0, s_img = 0.0, c_rip, c_skirt, c_img;
+        if (stock_shape_valid)
+        {
+            metrics(stock_resp, p, rate, lo, hi, 1, &s_rip, &s_skirt, &s_img);
+        }
         metrics(resp_conv_wrap, p, rate, lo, hi, 1, &c_rip, &c_skirt, &c_img);
+
+        char s_rip_s[16], s_skirt_s[16], s_img_s[16];
+        if (stock_shape_valid)
+        {
+            snprintf(s_rip_s, sizeof s_rip_s, "%.2f", s_rip);
+            snprintf(s_skirt_s, sizeof s_skirt_s, "%.1f", s_skirt);
+            snprintf(s_img_s, sizeof s_img_s, "%.1f", s_img);
+        }
+        else
+        {
+            snprintf(s_rip_s, sizeof s_rip_s, "n/c");
+            snprintf(s_skirt_s, sizeof s_skirt_s, "n/c");
+            snprintf(s_img_s, sizeof s_img_s, "n/c");
+        }
 
         const double s_ops = 4.0 * p->FIR_numTaps;      // 4 per tap: two multiplies and two adds, both channels
         const double c_ops = rate <= 12000.0 ? conv_ops[0] : (rate <= 24000.0 ? conv_ops[1] : conv_ops[2]);
@@ -229,10 +256,10 @@ int main(void)
         const double s_pct = s_ops_s * 1.5 / 168e6 * 100.0, c_pct = c_ops_s * 1.5 / 168e6 * 100.0;
 
         printf("%d,%s,%.0f,%.0f,%.0f,%d,%.0f,%.0f,%.2f,%.0f,%.0f,%.2f,"
-               "%.2f,%.1f,%.1f,%.2f,%.1f,%.1f\n",
+               "%s,%s,%s,%.2f,%.1f,%.1f\n",
                id, p->name, width, centre, rate, p->FIR_numTaps,
                s_ops, s_ops_s, s_pct, c_ops, c_ops_s, c_pct,
-               s_rip, s_skirt, s_img, c_rip, c_skirt, c_img);
+               s_rip_s, s_skirt_s, s_img_s, c_rip, c_skirt, c_img);
     }
     return 0;
 }

@@ -18,7 +18,9 @@ sh build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep.csv            # every pa
 sweeps all 62 SSB and CW filter paths - the shape of each against the shape of the pair it would replace,
 and the arithmetic bill of each - and prints one CSV row per path. Those rows are the table in "Every
 path, not just the two" in `../README.md`; run it again before quoting that table, because the numbers
-there are the filter's and the path table's, not a drawing's.
+there are the filter's and the path table's, not a drawing's.  The two 3.6 kHz rows print `n/c` for the
+stock shape: their band reaches past the 199-tap table's 3.5 kHz cutoff, so the stock side would measure
+the cutoff rather than the path.  Their cost is still printed and comparable.
 
 `build.sh` compiles `compare.c` against the same shipped sources the probe uses - `audio_convolution.c`
 as text, the host FFT in `../convolution_fft.c`, and `FilterPathInfo[]` cut out of `audio_filter.c` - so
