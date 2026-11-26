@@ -1967,7 +1967,8 @@ paths only run an anti-alias IIR after the output interpolation. The WDSP AGC is
 sweep runs the real `audio_agc.c` at its factory settings (`AGC_WDSP_*_DEFAULT`), cold-started for each
 path, on an equal-amplitude passband reference and top-edge two-tone, after the path's pre-AGC IIR and
 then the post-AGC anti-alias IIR. The two-tone amplitude before the path filter is `A=0.05` (the bench
-level used below) and `A=0.005`, a station 20 dB weaker. The common decimation and
+level used below) and `A=0.005`, a station 20 dB weaker; the level sweep below runs from `A=0.5` to
+`A=0.0005`. The common decimation and
 interpolation FIRs are omitted: they multiply both sides equally. "Pre-IIR" and "anti-alias IIR" are
 stage counts; 0 means the path has none. All levels are dB relative to the passband reference;
 "stock deficit" is conv minus stock after the AGC, so a positive value means the stock top is lower.
@@ -2000,12 +2001,34 @@ the stock table's -6 dB point inside the path, not a post-demod edge that is com
 6.0, 7.5 and 10.0 kHz rows stay comparable: their stock chain tops are -5.64, -5.48 and -4.81 dB, all
 above the conv side.
 
-The second level is in the CSV as `stock_agc_top_weak` and `conv_agc_top_weak`. At 20 dB weaker the
-after-AGC tops reproduce the nominal columns on all twelve rows above to 0.01 dB; the largest movement
-over all 62 rows is 0.01 dB, and every stock deficit in the table is unchanged. That is what a single
-slow gain on the whole audio block should do: it changes the absolute level, not the ratio between two
-simultaneous tones. The n/c list is a property of the stock table, not the chain, so it does not move
-either. The weak run is a check on level dependence, not a second n/c criterion.
+The second level is in the CSV as `stock_agc_top_weak` and `conv_agc_top_weak`. A 31 point sweep
+(`--chain-levels`) replaces that single check with station levels from 20 dB above the bench level to
+40 dB below it in 2 dB steps, `A=0.5` down to `A=0.0005`: one row per path and level, carrying both
+after-AGC tops, the deficit and the reference tone's absolute level after the AGC. The top of that
+range is where the AGC compresses: at `A=0.5` the two-tone peak before the path filter reaches the
+AGC's own `max_input` of 4096 counts, and the reference tone comes out only 4.7-5.4 dB above its
+nominal level for 20 dB more input. The bottom is past the AGC's knee: `min_volts` is
+`out_target/(var_gain*max_gain)` = 180 counts at the factory settings, about 7 dB below the bench
+level, so below `A` about 0.022 the AGC is a fixed 20 dB gain and its output falls 1:1 with the input.
+A sweep that only went down would have measured that fixed gain everywhere below `A=0.02` and said
+nothing about compression.
+
+Measured over the whole 60 dB, neither top moves by more than 0.002 dB at the table's resolution, and
+the deficit by more than 0.001 dB. The stock top's 0.002 dB is row 47, on a -85 dB response, at
+-22 dB; the conv top's is the 700 Hz path at -4 dB. Neither grows as the level falls. Rows 53 and
+55, the two closest to a crossing, read 1.221 and 0.074 dB at every one of the 31 levels. The set of
+rows whose stock top is below the conv top is exactly the eight n/c rows at every level, and no row
+changes sign, so no station level makes another row non-comparable. The n/c list itself is the stock
+table's linear edge, which no AGC setting can move.
+
+That is what a single gain on the whole audio block should do: it changes the absolute level, not the
+ratio between two simultaneous tones, and it does so even while compressing 15 dB across the top half
+of the sweep. The weak column stays in the CSV as the -20 dB point of the same grid.
+
+`make -C support/digi chain-levels-check` reruns the sweep and fails on any top or deficit movement
+past 0.01 dB, on a sweep that no longer carries all 62 documented paths (ids 4-65), or on any level
+whose positive-deficit set is not the eight n/c rows, so the paragraph above is a checked result
+rather than a remembered one.
 
 The image ratio is unchanged. The IIRs and the AGC are real; at a given audio frequency they multiply
 the wanted and image components by the same real factor, so the ratio cannot improve. The stock rows
@@ -2018,7 +2041,9 @@ overall level but cannot restore the missing top: after it, the stock n/c rows a
 the conv side at the top. The 5.0 kHz row is almost level-equal at the edge (0.07 dB), but its stock
 skirt is 1256 Hz and its image -21.8 dB against 145 Hz and -110.3 dB, which is why it is n/c. The 5.0,
 5.5, 6.5 and 7.0 rows have no IIR and are unchanged apart from at most 0.2 dB of AGC movement; the
-4.6 and 4.8 rows are 1.2 and 5.7 dB down after the AGC. The chain CSV is regenerated with
+4.6 and 4.8 rows are 1.2 and 5.7 dB down after the AGC. That ordering holds across the level sweep:
+from 20 dB above to 40 dB below the bench level no top or deficit moves by more than 0.002 dB. The
+chain CSV is regenerated with
 `sh support/digi/convolution_graphs/build-sweep.sh "$PWD" /tmp/pathsweep-chain.csv --chain`.
 
 #### Minimum phase: why the delay column is not 53 ms

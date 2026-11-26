@@ -19,6 +19,13 @@
 // two-tone AGC columns run the real state recursion at the bench level and at a station 20 dB weaker,
 // because the AGC is level-dependent.
 //
+// `--chain-levels` repeats that two-tone pass over station level instead of printing shape columns:
+// 20 dB above the bench level down to 40 dB below it in 2 dB steps (A = 0.5 to 0.0005), one row per
+// path and level.  It is a separate table so the chain CSV keeps exactly the columns it has, and it is
+// where the 20 dB column is checked against the whole range rather than one other point.  The upward
+// half is not decoration: the factory AGC's knee sits a few dB below the bench level, so a sweep that
+// only went down would measure a fixed gain and say nothing about compression.
+//
 //   ripple  peak-to-peak level over the band's interior, clamped at 50 Hz where the band reaches zero
 //           (the convolution filter's own low cut, and about where the Hilbert pair is 4 dB down), and
 //           with the outer tenth of the width at each edge left out: a windowed sinc is 6 dB down at
@@ -336,8 +343,10 @@ static const double AGC_TONE_LEVEL_WEAK = 0.005;
 // The AGC is the real firmware AGC; the anti-alias IIR after it is applied to each measured tone.
 // The result is the top-edge level relative to the reference, i.e. the relative shape the operator
 // hears after the AGC has settled.  `level` is the two-tone amplitude before the path filter.
+// `ref_db`, when asked for, is the reference tone's absolute level after the AGC, so a sweep can show
+// that the AGC really did hold its output rather than run out of gain at the weak end.
 static double agc_top_rel(const FilterPathDescriptor* p, double base_rate, double fref, double ftop,
-                          int is_conv, double level)
+                          int is_conv, double level, double* ref_db)
 {
     const double arate = 48000.0 / p->sample_rate_dec;
     const int n = (int) (arate * 2.5);
@@ -387,6 +396,7 @@ static double agc_top_rel(const FilterPathDescriptor* p, double base_rate, doubl
     const double ar = 2.0 * hypot(sr, si) / meas;
     const double at = 2.0 * hypot(st, ti) / meas;
     free(buf);
+    if (ref_db != NULL) *ref_db = db(ar);
 
     return db((at * iir_mag(p->iir_instance, ftop, 48000.0))
               / (ar * iir_mag(p->iir_instance, fref, 48000.0)));
@@ -422,6 +432,49 @@ static double conv_ops_per_sample(double rate)
     const double fft = (double) (conv_probe_fft_ops - before);
     (void) out;
     return (fft + partition * blocks) / N;
+}
+
+// The level sweep behind --chain-levels.  Two dB steps put 0.05, 0.005 and 0.0005 exactly on the grid
+// (0, -20 and -40 dB), so the existing weak column is one of the rows rather than a nearby point, and
+// +20 dB is a two-tone whose peak reaches the AGC's max_input (4096 counts).
+static const double AGC_LEVEL_STEP_DB = 2.0;
+static const double AGC_LEVEL_ABOVE_DB = 20.0;
+static const double AGC_LEVEL_BELOW_DB = 40.0;
+
+static int chain_levels_main(void)
+{
+    agc_setup();
+    printf("id,name,level_db,level,stock_agc_top,conv_agc_top,stock_deficit,stock_agc_ref\n");
+
+    for (int id = 1; id < AUDIO_FILTER_PATH_NUM; id++)
+    {
+        const FilterPathDescriptor* p = &FilterPathInfo[id];
+        if ((p->mode & ((1 << FILTER_MODE_SSB) | (1 << FILTER_MODE_CW))) == 0
+            || p->FIR_I_coeff_file == NULL || p->FIR_Q_coeff_file == NULL)
+        {
+            continue;
+        }
+
+        const double rate = p->FIR_I_coeff_file == i_rx_new_coeffs ? 48000.0 / p->sample_rate_dec : 48000.0;
+        const double width = FilterInfo[p->id].width;
+        const double centre = p->offset ? p->offset : width / 2.0;
+        double lo = centre - width / 2.0, hi = centre + width / 2.0;
+        if (lo < 50.0) lo = 50.0;
+
+        setup(p, 1, (float32_t) rate);
+        const double fref = floor((lo + hi) / 2.0);
+
+        for (double rel = AGC_LEVEL_ABOVE_DB; rel >= -AGC_LEVEL_BELOW_DB; rel -= AGC_LEVEL_STEP_DB)
+        {
+            const double level = AGC_TONE_LEVEL_NOMINAL * pow(10.0, rel / 20.0);
+            double ref;
+            const double s = agc_top_rel(p, rate, fref, hi, 0, level, &ref);
+            const double c = agc_top_rel(p, rate, fref, hi, 1, level, NULL);
+            printf("%d,%s,%.0f,%.6g,%.3f,%.3f,%.3f,%.2f\n",
+                   id, p->name, rel, level, s, c, c - s, ref);
+        }
+    }
+    return 0;
 }
 
 static int chain_main(void)
@@ -468,10 +521,10 @@ static int chain_main(void)
         const double fref = floor((lo + hi) / 2.0);
         const double s_top = chain_top_rel(p, rate, fref, hi, 0);
         const double c_top = chain_top_rel(p, rate, fref, hi, 1);
-        const double s_agc = agc_top_rel(p, rate, fref, hi, 0, AGC_TONE_LEVEL_NOMINAL);
-        const double c_agc = agc_top_rel(p, rate, fref, hi, 1, AGC_TONE_LEVEL_NOMINAL);
-        const double s_agc_weak = agc_top_rel(p, rate, fref, hi, 0, AGC_TONE_LEVEL_WEAK);
-        const double c_agc_weak = agc_top_rel(p, rate, fref, hi, 1, AGC_TONE_LEVEL_WEAK);
+        const double s_agc = agc_top_rel(p, rate, fref, hi, 0, AGC_TONE_LEVEL_NOMINAL, NULL);
+        const double c_agc = agc_top_rel(p, rate, fref, hi, 1, AGC_TONE_LEVEL_NOMINAL, NULL);
+        const double s_agc_weak = agc_top_rel(p, rate, fref, hi, 0, AGC_TONE_LEVEL_WEAK, NULL);
+        const double c_agc_weak = agc_top_rel(p, rate, fref, hi, 1, AGC_TONE_LEVEL_WEAK, NULL);
 
         printf("%d,%s,%.0f,%.0f,%.0f,%d,%d,%.2f,%s,%.2f,%.2f,%s,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
                id, p->name, width, rate, audio_rate,
@@ -486,6 +539,7 @@ static int chain_main(void)
 
 int main(int argc, char** argv)
 {
+    if (argc > 1 && strcmp(argv[1], "--chain-levels") == 0) return chain_levels_main();
     if (argc > 1 && strcmp(argv[1], "--chain") == 0) return chain_main();
 
     // one geometry, so one bill per rate rather than per path

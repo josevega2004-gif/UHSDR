@@ -264,6 +264,14 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi convolution-check
 
+      # The IIR/AGC section claims that from 20 dB above to 40 dB below the bench level no after-AGC
+      # top or deficit moves by more than 0.01 dB and the positive-deficit set stays the eight n/c
+      # rows. This reruns --chain-levels and fails if either stops holding, so the claim is guarded
+      # rather than being a table nobody re-measures.
+      - name: Check the AGC level invariance the README claims
+        working-directory: mchf-eclipse
+        run: make -C support/digi chain-levels-check
+
       # The radio has never been able to write a file: the only code that reads a thumb drive is in the
       # bootloader, and it does not stay resident.  drivers/fs/fat32.c is the writer, and it is graded
       # by implementations that are not its own - mkfs.vfat makes the volume, fsck.vfat inspects what

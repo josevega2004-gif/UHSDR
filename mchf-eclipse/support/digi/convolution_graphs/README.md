@@ -13,6 +13,8 @@ python3 plot8.py /tmp                                                 # graph 8,
 python3 alternative_designs.py /tmp                                   # graph 7, candidate designs
 sh build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep.csv            # every path, CSV
 sh build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep-chain.csv --chain  # + IIR/AGC
+sh build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep-levels.csv --chain-levels  # AGC level sweep
+sh check-chain-levels.sh /path/to/mchf-eclipse                        # the same sweep, asserted
 ```
 
 `path_sweep.c` is the exception to "these are the scripts behind the pictures": it draws nothing. It
@@ -30,6 +32,18 @@ post-AGC anti-alias IIR, and prints a second CSV with `stock_chain_*`, `conv_cha
 nominal one; it is a check on the AGC's level dependence, and the stock deficits and `n/c` set do not
 change.  The AGC is the real `drivers/audio/audio_agc.c`; the excitation is a passband reference plus
 the path's top edge.  The stock shape columns are `n/c` on the same eight rows.
+
+`--chain-levels` prints that two-tone pass as a table of its own instead: one row per path and level,
+`id,name,level_db,level,stock_agc_top,conv_agc_top,stock_deficit,stock_agc_ref`, sweeping 20 dB above
+the bench level to 40 dB below it (`A=0.5` to `A=0.0005`) in 2 dB steps.  The 20 dB column is then one
+point on a measured grid rather than the only check, and the top of the range reaches the AGC's own
+`max_input` so the compression half is covered.  Stock deficits, the set of rows with a positive
+deficit and the `n/c` set do not change anywhere in that range; the largest movement of either top is
+0.002 dB.  `stock_agc_ref` is the reference tone's absolute level after the AGC, which shows the AGC
+compressing over the top 20 dB and running out of gain below its knee.  `check-chain-levels.sh`,
+also `make -C ../digi chain-levels-check`, runs that sweep and fails if any top or the deficit moves
+more than 0.01 dB from nominal, if a level loses a row, if the sweep stops covering the 62
+documented paths (ids 4-65), or if the positive-deficit set stops being the eight n/c rows.
 
 `build.sh` compiles `compare.c` against the same shipped sources the probe uses - `audio_convolution.c`
 as text, the host FFT in `../convolution_fft.c`, and `FilterPathInfo[]` cut out of `audio_filter.c` - so

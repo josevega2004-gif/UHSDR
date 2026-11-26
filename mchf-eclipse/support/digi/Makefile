@@ -19,6 +19,9 @@
 #   make convolution-check  measure the RX filter USE_CONVOLUTION offers against the SSB stage the
 #                radio runs today, from the shipped module: selectivity, sideband separation, cost
 #                per sample and delay.  Needs no radio and no ARM toolchain.
+#   make chain-levels-check  rerun the --chain-levels sweep and fail if any after-AGC top or deficit
+#                moves more than 0.01 dB from nominal, or the positive-deficit set stops being the
+#                eight n/c rows.  Needs no radio and no ARM toolchain.
 #
 # drivers/audio/rtty.c and drivers/audio/audio_agc.c are compiled from the real sources: the
 # modem and the AGC the radio puts in front of it. The shim/ directory replaces only the headers
@@ -348,6 +351,11 @@ convolution_fft.o: convolution_fft.c $(SHIM)/arm_const_structs.h
 # A nonzero exit on its own proves nothing, so the probe says which of its checks it failed on: the
 # partitioned pipeline has to reproduce a plain complex FIR over the same taps, and the sideband
 # separation it measures has to be at least the one the 199-tap Hilbert pair gives today.
+# The README's AGC level-invariance claim, measured rather than remembered.  This runs the sweep
+# itself and grades the table it prints, so a change that loses a row or a column fails here too.
+chain-levels-check:
+	@sh convolution_graphs/check-chain-levels.sh "$(abspath ../..)"
+
 convolution-check: convolution_probe
 	@./convolution_probe
 
