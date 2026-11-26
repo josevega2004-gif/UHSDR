@@ -20,8 +20,8 @@
 #                radio runs today, from the shipped module: selectivity, sideband separation, cost
 #                per sample and delay.  Needs no radio and no ARM toolchain.
 #   make chain-levels-check  rerun the --chain-levels sweep and fail if any after-AGC top or deficit
-#                moves more than 0.01 dB from nominal, or the positive-deficit set stops being the
-#                eight n/c rows.  Needs no radio and no ARM toolchain.
+#                moves more than 0.01 dB from nominal, the sweep loses one of the 62 paths, or the
+#                positive-deficit set stops being the eight n/c rows.  Needs no radio or ARM toolchain.
 #
 # drivers/audio/rtty.c and drivers/audio/audio_agc.c are compiled from the real sources: the
 # modem and the AGC the radio puts in front of it. The shim/ directory replaces only the headers

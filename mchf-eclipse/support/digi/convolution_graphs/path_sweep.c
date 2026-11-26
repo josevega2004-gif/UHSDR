@@ -57,6 +57,29 @@ static void setup(const FilterPathDescriptor* p, int usb, float32_t rate)
                                          (float32_t) p->offset, usb == 0, rate);
 }
 
+// The paths both tables cover: SSB or CW, with both coefficient tables present.
+static int is_ssb_cw_path(const FilterPathDescriptor* p)
+{
+    return (p->mode & ((1 << FILTER_MODE_SSB) | (1 << FILTER_MODE_CW))) != 0
+        && p->FIR_I_coeff_file != NULL && p->FIR_Q_coeff_file != NULL;
+}
+
+// What every table takes from a path: the rate its blocks carry, the band it asks for, and the
+// 50 Hz clamp where the band reaches zero.
+typedef struct { double rate, width, centre, lo, hi; } path_band_t;
+
+static path_band_t path_band(const FilterPathDescriptor* p)
+{
+    path_band_t b;
+    b.width = FilterInfo[p->id].width;
+    b.centre = p->offset ? p->offset : b.width / 2.0;
+    b.rate = p->FIR_I_coeff_file == i_rx_new_coeffs ? 48000.0 / p->sample_rate_dec : 48000.0;
+    b.lo = b.centre - b.width / 2.0;
+    b.hi = b.centre + b.width / 2.0;
+    if (b.lo < 50.0) b.lo = 50.0;
+    return b;
+}
+
 static double db(double x) { return 20.0 * log10(x + 1e-12); }
 
 typedef struct { double re, im; } cd_t;
@@ -352,6 +375,7 @@ static double agc_top_rel(const FilterPathDescriptor* p, double base_rate, doubl
     const int n = (int) (arate * 2.5);
     const int start = (int) (arate * 1.0);
     const int meas = (int) arate;
+    if (ref_db != NULL) *ref_db = 0.0;
     float32_t* buf = calloc((size_t) n, sizeof(float32_t));
     if (buf == NULL) return 0.0;
 
@@ -449,27 +473,18 @@ static int chain_levels_main(void)
     for (int id = 1; id < AUDIO_FILTER_PATH_NUM; id++)
     {
         const FilterPathDescriptor* p = &FilterPathInfo[id];
-        if ((p->mode & ((1 << FILTER_MODE_SSB) | (1 << FILTER_MODE_CW))) == 0
-            || p->FIR_I_coeff_file == NULL || p->FIR_Q_coeff_file == NULL)
-        {
-            continue;
-        }
+        if (!is_ssb_cw_path(p)) continue;
 
-        const double rate = p->FIR_I_coeff_file == i_rx_new_coeffs ? 48000.0 / p->sample_rate_dec : 48000.0;
-        const double width = FilterInfo[p->id].width;
-        const double centre = p->offset ? p->offset : width / 2.0;
-        double lo = centre - width / 2.0, hi = centre + width / 2.0;
-        if (lo < 50.0) lo = 50.0;
-
-        setup(p, 1, (float32_t) rate);
-        const double fref = floor((lo + hi) / 2.0);
+        const path_band_t b = path_band(p);
+        setup(p, 1, (float32_t) b.rate);
+        const double fref = floor((b.lo + b.hi) / 2.0);
 
         for (double rel = AGC_LEVEL_ABOVE_DB; rel >= -AGC_LEVEL_BELOW_DB; rel -= AGC_LEVEL_STEP_DB)
         {
             const double level = AGC_TONE_LEVEL_NOMINAL * pow(10.0, rel / 20.0);
             double ref;
-            const double s = agc_top_rel(p, rate, fref, hi, 0, level, &ref);
-            const double c = agc_top_rel(p, rate, fref, hi, 1, level, NULL);
+            const double s = agc_top_rel(p, b.rate, fref, b.hi, 0, level, &ref);
+            const double c = agc_top_rel(p, b.rate, fref, b.hi, 1, level, NULL);
             printf("%d,%s,%.0f,%.6g,%.3f,%.3f,%.3f,%.2f\n",
                    id, p->name, rel, level, s, c, c - s, ref);
         }
@@ -489,45 +504,36 @@ static int chain_main(void)
     for (int id = 1; id < AUDIO_FILTER_PATH_NUM; id++)
     {
         const FilterPathDescriptor* p = &FilterPathInfo[id];
-        if ((p->mode & ((1 << FILTER_MODE_SSB) | (1 << FILTER_MODE_CW))) == 0
-            || p->FIR_I_coeff_file == NULL || p->FIR_Q_coeff_file == NULL)
-        {
-            continue;
-        }
+        if (!is_ssb_cw_path(p)) continue;
 
-        const double rate = p->FIR_I_coeff_file == i_rx_new_coeffs ? 48000.0 / p->sample_rate_dec : 48000.0;
         const double audio_rate = 48000.0 / p->sample_rate_dec;
-        const double width = FilterInfo[p->id].width;
-        const double centre = p->offset ? p->offset : width / 2.0;
-        double lo = centre - width / 2.0, hi = centre + width / 2.0;
-        if (lo < 50.0) lo = 50.0;
-
-        setup(p, 1, (float32_t) rate);
+        const path_band_t b = path_band(p);
+        setup(p, 1, (float32_t) b.rate);
 
         double s_edge, s_rip, s_skirt, s_img;
         double c_edge, c_rip, c_skirt, c_img;
-        chain_metrics(p, rate, lo, hi, 0, &s_rip, &s_skirt, &s_img, &s_edge);
-        chain_metrics(p, rate, lo, hi, 1, &c_rip, &c_skirt, &c_img, &c_edge);
+        chain_metrics(p, b.rate, b.lo, b.hi, 0, &s_rip, &s_skirt, &s_img, &s_edge);
+        chain_metrics(p, b.rate, b.lo, b.hi, 1, &c_rip, &c_skirt, &c_img, &c_edge);
 
         // The chain cannot make the stock table's cutoff comparable: withhold the same three shape
         // columns the main table withholds.  The edge and the AGC top level stay, because they are
         // the diagnostic that says how far down the operator's top edge is.
-        const int stock_shape_valid = edge_db(stock_resp, p, rate, lo, hi) > -6.0;
+        const int stock_shape_valid = edge_db(stock_resp, p, b.rate, b.lo, b.hi) > -6.0;
         char s_shape[48], c_skirt_s[16];
         stock_shape(s_shape, sizeof s_shape, stock_shape_valid, s_rip, s_skirt, s_img);
         if (c_skirt < 0.0) snprintf(c_skirt_s, sizeof c_skirt_s, "-");
         else snprintf(c_skirt_s, sizeof c_skirt_s, "%.1f", c_skirt);
 
-        const double fref = floor((lo + hi) / 2.0);
-        const double s_top = chain_top_rel(p, rate, fref, hi, 0);
-        const double c_top = chain_top_rel(p, rate, fref, hi, 1);
-        const double s_agc = agc_top_rel(p, rate, fref, hi, 0, AGC_TONE_LEVEL_NOMINAL, NULL);
-        const double c_agc = agc_top_rel(p, rate, fref, hi, 1, AGC_TONE_LEVEL_NOMINAL, NULL);
-        const double s_agc_weak = agc_top_rel(p, rate, fref, hi, 0, AGC_TONE_LEVEL_WEAK, NULL);
-        const double c_agc_weak = agc_top_rel(p, rate, fref, hi, 1, AGC_TONE_LEVEL_WEAK, NULL);
+        const double fref = floor((b.lo + b.hi) / 2.0);
+        const double s_top = chain_top_rel(p, b.rate, fref, b.hi, 0);
+        const double c_top = chain_top_rel(p, b.rate, fref, b.hi, 1);
+        const double s_agc = agc_top_rel(p, b.rate, fref, b.hi, 0, AGC_TONE_LEVEL_NOMINAL, NULL);
+        const double c_agc = agc_top_rel(p, b.rate, fref, b.hi, 1, AGC_TONE_LEVEL_NOMINAL, NULL);
+        const double s_agc_weak = agc_top_rel(p, b.rate, fref, b.hi, 0, AGC_TONE_LEVEL_WEAK, NULL);
+        const double c_agc_weak = agc_top_rel(p, b.rate, fref, b.hi, 1, AGC_TONE_LEVEL_WEAK, NULL);
 
         printf("%d,%s,%.0f,%.0f,%.0f,%d,%d,%.2f,%s,%.2f,%.2f,%s,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
-               id, p->name, width, rate, audio_rate,
+               id, p->name, b.width, b.rate, audio_rate,
                p->pre_instance ? p->pre_instance->numStages : 0,
                p->iir_instance ? p->iir_instance->numStages : 0,
                s_edge, s_shape,
@@ -562,23 +568,14 @@ int main(int argc, char** argv)
     for (int id = 1; id < AUDIO_FILTER_PATH_NUM; id++)
     {
         const FilterPathDescriptor* p = &FilterPathInfo[id];
-        if ((p->mode & ((1 << FILTER_MODE_SSB) | (1 << FILTER_MODE_CW))) == 0
-            || p->FIR_I_coeff_file == NULL || p->FIR_Q_coeff_file == NULL)
-        {
-            continue;
-        }
+        if (!is_ssb_cw_path(p)) continue;
 
         // the rate the blocks carry: the pair runs at 48 kHz unless this path is one of the decimated
         // ones, which is the radio's own test in AudioDriver_RxProcessor() and in the setup above it
-        const double rate = p->FIR_I_coeff_file == i_rx_new_coeffs ? 48000.0 / p->sample_rate_dec : 48000.0;
-        const double width = FilterInfo[p->id].width;
-        const double centre = p->offset ? p->offset : width / 2.0;
-        double lo = centre - width / 2.0, hi = centre + width / 2.0;
-        if (lo < 50.0) lo = 50.0;
+        const path_band_t b = path_band(p);
+        const double stock_edge = edge_db(stock_resp, p, b.rate, b.lo, b.hi);
 
-        const double stock_edge = edge_db(stock_resp, p, rate, lo, hi);
-
-        setup(p, 1, (float32_t) rate);
+        setup(p, 1, (float32_t) b.rate);
 
         // A stock table whose -6 dB point is inside the path's band is measuring its own cutoff at
         // the top edge, not the path; the post-demod IIR cannot restore what the table removed.  Mark
@@ -588,22 +585,22 @@ int main(int argc, char** argv)
         double s_rip = 0.0, s_skirt = 0.0, s_img = 0.0, c_rip, c_skirt, c_img;
         if (stock_shape_valid)
         {
-            metrics(stock_resp, p, rate, lo, hi, 1, &s_rip, &s_skirt, &s_img);
+            metrics(stock_resp, p, b.rate, b.lo, b.hi, 1, &s_rip, &s_skirt, &s_img);
         }
-        metrics(resp_conv_wrap, p, rate, lo, hi, 1, &c_rip, &c_skirt, &c_img);
+        metrics(resp_conv_wrap, p, b.rate, b.lo, b.hi, 1, &c_rip, &c_skirt, &c_img);
 
         char s_shape[48];
         stock_shape(s_shape, sizeof s_shape, stock_shape_valid, s_rip, s_skirt, s_img);
 
         const double s_ops = 4.0 * p->FIR_numTaps;      // 4 per tap: two multiplies and two adds, both channels
-        const double c_ops = rate <= 12000.0 ? conv_ops[0] : (rate <= 24000.0 ? conv_ops[1] : conv_ops[2]);
-        const double s_ops_s = s_ops * rate, c_ops_s = c_ops * rate;
+        const double c_ops = b.rate <= 12000.0 ? conv_ops[0] : (b.rate <= 24000.0 ? conv_ops[1] : conv_ops[2]);
+        const double s_ops_s = s_ops * b.rate, c_ops_s = c_ops * b.rate;
         // 1.5 cycles per counted operation at 168 MHz, the model the README's CPU column uses
         const double s_pct = s_ops_s * 1.5 / 168e6 * 100.0, c_pct = c_ops_s * 1.5 / 168e6 * 100.0;
 
         printf("%d,%s,%.0f,%.0f,%.0f,%d,%.0f,%.0f,%.2f,%.0f,%.0f,%.2f,"
                "%s,%.2f,%.2f,%.1f,%.1f\n",
-               id, p->name, width, centre, rate, p->FIR_numTaps,
+               id, p->name, b.width, b.centre, b.rate, p->FIR_numTaps,
                s_ops, s_ops_s, s_pct, c_ops, c_ops_s, c_pct,
                s_shape, stock_edge, c_rip, c_skirt, c_img);
     }

@@ -38,6 +38,7 @@ FNR == NR {
     id = $1; L = $3 + 0
     if (!(L in rows)) nlev++
     rows[L]++
+    seen[L, id]++
     p = ($7 + 0 > 0)
     pos[L, id] = p
     if (p) poscount[L]++
@@ -106,6 +107,14 @@ END {
         if (rows[L] != n_want) {
             printf "FAIL  level %d dB has %d rows, expected %d\n", L, rows[L], n_want
             fail++
+        }
+        # rows catches a duplicate; this catches a path missing at one level even when a duplicate
+        # row of another path keeps the count at n_want
+        for (id = first; id <= last; id++) {
+            if ((id in name) && !seen[L, id]) {
+                printf "FAIL  level %d dB: row %d is missing\n", L, id
+                fail++
+            }
         }
         if (poscount[L] != n_nc) {
             printf "FAIL  level %d dB: %d rows have a positive deficit, the n/c list has %d\n", \

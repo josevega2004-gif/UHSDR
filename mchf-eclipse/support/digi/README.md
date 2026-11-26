@@ -2001,10 +2001,10 @@ the stock table's -6 dB point inside the path, not a post-demod edge that is com
 6.0, 7.5 and 10.0 kHz rows stay comparable: their stock chain tops are -5.64, -5.48 and -4.81 dB, all
 above the conv side.
 
-The second level is in the CSV as `stock_agc_top_weak` and `conv_agc_top_weak`. A 31 point sweep
-(`--chain-levels`) replaces that single check with station levels from 20 dB above the bench level to
-40 dB below it in 2 dB steps, `A=0.5` down to `A=0.0005`: one row per path and level, carrying both
-after-AGC tops, the deficit and the reference tone's absolute level after the AGC. The top of that
+The second level is in the CSV as `stock_agc_top_weak` and `conv_agc_top_weak`. `--chain-levels`
+turns that single check into a 31 point sweep from 20 dB above the bench level to 40 dB below it in
+2 dB steps, `A=0.5` down to `A=0.0005`: one row per path and level, carrying both after-AGC tops, the
+deficit and the reference tone's absolute level after the AGC. The top of that
 range is where the AGC compresses: at `A=0.5` the two-tone peak before the path filter reaches the
 AGC's own `max_input` of 4096 counts, and the reference tone comes out only 4.7-5.4 dB above its
 nominal level for 20 dB more input. The bottom is past the AGC's knee: `min_volts` is

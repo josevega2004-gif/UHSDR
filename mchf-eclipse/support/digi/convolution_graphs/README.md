@@ -28,14 +28,12 @@ and six of the wide rows.  Their cost is still printed and comparable.
 
 The same sweep with `--chain` runs each path through its pre-AGC IIR, the firmware WDSP AGC and the
 post-AGC anti-alias IIR, and prints a second CSV with `stock_chain_*`, `conv_chain_*`, `*_top_rel` and
-`*_agc_top` columns.  `*_agc_top_weak` repeats the AGC pass at a two-tone level 20 dB below the
-nominal one; it is a check on the AGC's level dependence, and the stock deficits and `n/c` set do not
-change.  The AGC is the real `drivers/audio/audio_agc.c`; the excitation is a passband reference plus
-the path's top edge.  The stock shape columns are `n/c` on the same eight rows.
+`*_agc_top` columns.  `*_agc_top_weak` is the -20 dB point of the level sweep below, kept in this CSV.  The AGC is the
+real `drivers/audio/audio_agc.c`; the excitation is a passband reference plus the path's top edge.  The stock shape columns are `n/c` on the same eight rows.
 
 `--chain-levels` prints that two-tone pass as a table of its own instead: one row per path and level,
 `id,name,level_db,level,stock_agc_top,conv_agc_top,stock_deficit,stock_agc_ref`, sweeping 20 dB above
-the bench level to 40 dB below it (`A=0.5` to `A=0.0005`) in 2 dB steps.  The 20 dB column is then one
+the bench level to 40 dB below it (`A=0.5` to `A=0.0005`) in 2 dB steps.  The weak column is then one
 point on a measured grid rather than the only check, and the top of the range reaches the AGC's own
 `max_input` so the compression half is covered.  Stock deficits, the set of rows with a positive
 deficit and the `n/c` set do not change anywhere in that range; the largest movement of either top is
