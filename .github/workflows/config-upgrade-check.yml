@@ -266,8 +266,8 @@ jobs:
 
       # The IIR/AGC section measures every after-AGC top and stock deficit within 0.002 dB of
       # nominal across 31 station levels, with the positive-deficit set on the same eight n/c rows.
-      # This reruns --chain-levels and fails past 0.01 dB, on a sweep missing one of the 62 paths, or
-      # on a changed set, so the claim is guarded rather than being a table nobody re-measures.
+      # This checks the 0 dB row against --chain and the 5 dB reference rise, and fails past 0.01 dB,
+      # on a missing path or on a changed set, so the claim is guarded rather than left to memory.
       - name: Check the AGC level invariance the README claims
         working-directory: mchf-eclipse
         run: make -C support/digi chain-levels-check

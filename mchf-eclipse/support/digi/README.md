@@ -2006,7 +2006,7 @@ turns that single check into a 31 point sweep from 20 dB above the bench level t
 2 dB steps, `A=0.5` down to `A=0.0005`: one row per path and level, carrying both after-AGC tops, the
 deficit and the reference tone's absolute level after the AGC. The top of that
 range is where the AGC compresses: at `A=0.5` the two-tone peak before the path filter reaches the
-AGC's own `max_input` of 4096 counts, and the reference tone comes out only 4.7-5.4 dB above its
+AGC's own `max_input` of 4096 counts, and the reference tone comes out only 4.5-5.5 dB above its
 nominal level for 20 dB more input. The bottom is past the AGC's knee: `min_volts` is
 `out_target/(var_gain*max_gain)` = 180 counts at the factory settings, about 7 dB below the bench
 level, so below `A` about 0.022 the AGC is a fixed 20 dB gain and its output falls 1:1 with the input.
@@ -2025,10 +2025,11 @@ That is what a single gain on the whole audio block should do: it changes the ab
 ratio between two simultaneous tones, and it does so even while compressing 15 dB across the top half
 of the sweep. The weak column stays in the CSV as the -20 dB point of the same grid.
 
-`make -C support/digi chain-levels-check` reruns the sweep and fails on any top or deficit movement
-past 0.01 dB, on a sweep that no longer carries all 62 documented paths (ids 4-65), or on any level
-whose positive-deficit set is not the eight n/c rows, so the paragraph above is a checked result
-rather than a remembered one.
+`make -C support/digi chain-levels-check` reruns the sweep, checks its 0 dB row against `--chain`'s
+after-AGC tops, and fails on any top or deficit movement past 0.01 dB, on a reference tone that does
+not rise 4-6 dB from 0 to +20 dB (a dead AGC cannot pass), on a sweep that no longer carries all 62
+documented paths (ids 4-65), or on any level whose positive-deficit set is not the eight n/c rows,
+so the paragraph above is a checked result rather than a remembered one.
 
 The image ratio is unchanged. The IIRs and the AGC are real; at a given audio frequency they multiply
 the wanted and image components by the same real factor, so the ratio cannot improve. The stock rows

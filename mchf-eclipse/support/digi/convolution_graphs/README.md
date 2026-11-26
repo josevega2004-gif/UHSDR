@@ -39,9 +39,10 @@ point on a measured grid rather than the only check, and the top of the range re
 deficit and the `n/c` set do not change anywhere in that range; the largest movement of either top is
 0.002 dB.  `stock_agc_ref` is the reference tone's absolute level after the AGC, which shows the AGC
 compressing over the top 20 dB and running out of gain below its knee.  `check-chain-levels.sh`,
-also `make -C ../digi chain-levels-check`, runs that sweep and fails if any top or the deficit moves
-more than 0.01 dB from nominal, if a level loses a row, if the sweep stops covering the 62
-documented paths (ids 4-65), or if the positive-deficit set stops being the eight n/c rows.
+also `make -C ../digi chain-levels-check`, checks the sweep's 0 dB row against `--chain`, requires
+`stock_agc_ref` to rise 4-6 dB from 0 to +20 dB, and fails if any top or the deficit moves more than
+0.01 dB from nominal, if a level loses a row, if the sweep stops covering the 62 documented paths
+(ids 4-65), or if the positive-deficit set stops being the eight n/c rows.
 
 `build.sh` compiles `compare.c` against the same shipped sources the probe uses - `audio_convolution.c`
 as text, the host FFT in `../convolution_fft.c`, and `FilterPathInfo[]` cut out of `audio_filter.c` - so
