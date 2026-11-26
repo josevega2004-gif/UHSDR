@@ -8,11 +8,16 @@
 // use_decimatedIQ in audio_driver.c), while the convolution filter is one geometry, 128-sample blocks
 // of a 1024-tap response, at whatever rate the path hands blocks over.
 //
-// The two 3.6 kHz paths are the exception on the stock shape: their band reaches past the 199-tap
-// table's 3.5 kHz lowpass, so the top edge of the stock response is that cutoff, not the path.  Their
-// stock shape columns are printed as n/c; their cost is still the real cost and is printed.
+// A row is printed n/c on the stock shape when the stock table's -6 dB point is inside the path's
+// band: the top edge is then the table's cutoff, not the path, and the post-demod IIR cannot restore
+// it.  At this geometry that is the two 3.6 kHz paths and six of the wide paths.  Cost is still printed.
 //
 // Build with build-sweep.sh.  Three metrics per path and side:
+//
+// `--chain` prints a second table: the same paths through the path's pre-AGC IIR, the firmware WDSP
+// AGC (audio_agc.c) and the post-AGC anti-alias IIR.  The linear columns use the IIR magnitudes; the
+// two-tone AGC columns run the real state recursion at the bench level and at a station 20 dB weaker,
+// because the AGC is level-dependent.
 //
 //   ripple  peak-to-peak level over the band's interior, clamped at 50 Hz where the band reaches zero
 //           (the convolution filter's own low cut, and about where the Hilbert pair is 4 dB down), and
@@ -27,11 +32,13 @@
 // unreversed, so pCoeffs[0] meets the oldest sample, which is the convention the published -76 dB
 // image figure was measured with.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
 #include "filters.h"
 #include "audio_filter.h"
+#include "audio_agc.h"
 #include "audio_convolution.c"
 
 // counted by the host transform (convolution_fft.c), the same counter the probe uses
@@ -45,9 +52,24 @@ static void setup(const FilterPathDescriptor* p, int usb, float32_t rate)
 
 static double db(double x) { return 20.0 * log10(x + 1e-12); }
 
+typedef struct { double re, im; } cd_t;
+
+static cd_t cmul(cd_t a, cd_t b)
+{
+    return (cd_t) { a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re };
+}
+
+static cd_t cdiv(cd_t a, cd_t b)
+{
+    const double d = b.re * b.re + b.im * b.im;
+    return (cd_t) { (a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d };
+}
+
+static double cabs_cd(cd_t a) { return hypot(a.re, a.im); }
+
 // H(f) of the taps the firmware just designed, one complex multiply per tap rather than a cos and a
 // sin: the response is the DFT of the impulse response, h[k] * e^{-j w k}.
-static double conv_resp(double f, double rate)
+static cd_t conv_cresp(double f, double rate)
 {
     const double w = 2.0 * M_PI * f / rate;
     const double cr = cos(w), sr = -sin(w);         // e^{-j w} per tap
@@ -60,11 +82,16 @@ static double conv_resp(double f, double rate)
         const double nzr = zr * cr - zi * sr, nzi = zr * sr + zi * cr;
         zr = nzr; zi = nzi;
     }
-    return hypot(re, im);
+    return (cd_t) { re, im };
+}
+
+static double conv_resp(double f, double rate)
+{
+    return cabs_cd(conv_cresp(f, rate));
 }
 
 // the same for the pair: |sum u[k] e^{+j w k}| with u = I' + j s Q', s = +1 for the i+q sum
-static double stock_resp(const FilterPathDescriptor* p, double f, double rate, int usb)
+static cd_t stock_cresp(const FilterPathDescriptor* p, double f, double rate, int usb)
 {
     const int T = p->FIR_numTaps;
     const double s = usb ? 1.0 : -1.0;
@@ -80,7 +107,26 @@ static double stock_resp(const FilterPathDescriptor* p, double f, double rate, i
         const double nzr = zr * cr - zi * sr, nzi = zr * sr + zi * cr;
         zr = nzr; zi = nzi;
     }
-    return hypot(re, im);
+    return (cd_t) { re, im };
+}
+
+static double stock_resp(const FilterPathDescriptor* p, double f, double rate, int usb)
+{
+    return cabs_cd(stock_cresp(p, f, rate, usb));
+}
+
+// Stock response at the band's nominal top edge, relative to the loudest point inside the band.
+// A value at or below -6 dB means the table's own cutoff is inside the band the path asks for.
+static double stock_edge_db(const FilterPathDescriptor* p, double rate, double lo, double hi)
+{
+    const double step = rate >= 30000.0 ? 1.0 : 0.5;
+    double ref = 0.0;
+    for (double f = lo; f <= hi; f += step)
+    {
+        const double v = stock_resp(p, f, rate, 1);
+        if (v > ref) ref = v;
+    }
+    return db(stock_resp(p, hi, rate, 1) / ref);
 }
 
 enum { MAXPTS = 32768 };
@@ -136,9 +182,9 @@ static void metrics(resp_fn fn, const FilterPathDescriptor* p, double rate, doub
     *image = db(worst / ref);
 
     // out through the top edge: the first -6 and -60 dB crossings above the band.  When the filter is
-    // already 60 dB down at the nominal edge there is no skirt to measure; the caller prints n/c for
-    // the pair's 3.6 kHz paths, where the 199-tap IQ lowpass closes at 3.5 kHz and the post-demod IIR
-    // cannot restore what it removed, rather than scoring that cutoff as the path's skirt.
+    // already 60 dB down at the nominal edge there is no skirt to measure; the caller prints n/c when
+    // the stock table's -6 dB point is inside the path, rather than scoring that cutoff as the path's
+    // skirt.
     double f6 = -1.0, f60 = -1.0;
     const int start = (int) ceil(hi / step);
     if (start < n && lv[start] > ref * 0.001)
@@ -150,6 +196,214 @@ static void metrics(resp_fn fn, const FilterPathDescriptor* p, double rate, doub
         }
     }
     *skirt = (f6 >= 0.0 && f60 >= 0.0) ? f60 - f6 : -1.0;
+}
+
+// |H(f)| of an ARM CMSIS lattice IIR from its reflection (pk) and ladder (pv) coefficients.  The
+// coefficients are time-reversed ({kN..k1}, {vN..v0}); walking the lattice from stage 1 up avoids
+// running a settling transient once per frequency.  Only the magnitude is returned: this direct
+// walk has the right magnitude but not the CMSIS lattice's phase, so anything that needs phase (the
+// AGC two-tone below) runs the state recursion on the samples instead.
+static double iir_mag(const arm_iir_lattice_instance_f32* S, double f, double rate)
+{
+    if (S == NULL || S->numStages == 0) return 1.0;
+    const int N = S->numStages;
+    const double w = 2.0 * M_PI * f / rate;
+    const cd_t q = { cos(w), -sin(w) };          // z^-1 at z = e^{jw}
+    cd_t F = { 1.0, 0.0 }, G = { 1.0, 0.0 };     // G0 = F0
+    cd_t Y = { S->pvCoeffs[N], 0.0 };            // v0 * g0
+
+    for (int m = 1; m <= N; m++)
+    {
+        const double k = S->pkCoeffs[N - m];     // k1, k2, ... kN
+        const cd_t qG = cmul(q, G);
+        const cd_t Fn = { F.re + k * qG.re, F.im + k * qG.im };
+        const cd_t Gn = { k * F.re + qG.re, k * F.im + qG.im };
+        F = Fn;
+        G = Gn;
+        const double v = S->pvCoeffs[N - m];     // v1, v2, ... vN
+        Y.re += v * G.re;
+        Y.im += v * G.im;
+    }
+    return cabs_cd(cdiv(Y, F));
+}
+
+// The real CMSIS lattice recursion, sample by sample.  The AGC two-tone uses this so the prefilter's
+// phase and state are the radio's, not the magnitude-only approximation above.
+static void iir_run(const arm_iir_lattice_instance_f32* S, float32_t* x, int n)
+{
+    if (S == NULL || S->numStages == 0) return;
+    const int N = S->numStages;
+    double g[32] = { 0.0 };
+    for (int i = 0; i < n; i++)
+    {
+        double f = x[i];
+        double acc = 0.0;
+        double gnew[32];
+        for (int m = 0; m < N; m++)
+        {
+            const double gp = g[m];
+            const double k = S->pkCoeffs[m];
+            const double fn = f - k * gp;
+            const double gn = gp + k * fn;
+            gnew[m] = gn;
+            acc += gn * S->pvCoeffs[m];
+            f = fn;
+        }
+        acc += f * S->pvCoeffs[N];
+        for (int m = 0; m < N - 1; m++) g[m] = gnew[m + 1];
+        g[N - 1] = f;
+        x[i] = (float32_t) acc;
+    }
+}
+
+// The path-specific post-demod chain magnitude: the stock or convolution response, then the pre-AGC
+// IIR (if the path has one), then the interpolation anti-alias IIR (if the path has one).  The common
+// decimation and interpolation FIRs are left out; they multiply both sides equally.
+static double chain_resp(const FilterPathDescriptor* p, double f, double base_rate, int usb,
+                         int is_conv, int include_aa)
+{
+    double h = is_conv ? conv_resp(f, base_rate) : stock_resp(p, f, base_rate, usb);
+    if (p->pre_instance != NULL && p->pre_instance->numStages > 0)
+    {
+        const double audio_rate = 48000.0 / p->sample_rate_dec;
+        h *= iir_mag(p->pre_instance, f, audio_rate);
+    }
+    if (include_aa && p->iir_instance != NULL && p->iir_instance->numStages > 0)
+    {
+        h *= iir_mag(p->iir_instance, f, 48000.0);
+    }
+    return h;
+}
+
+static const FilterPathDescriptor* chain_p;
+static int chain_conv, chain_aa;
+
+static double chain_wrap(const FilterPathDescriptor* p, double f, double rate, int usb)
+{
+    (void) p;
+    return chain_resp(chain_p, f, rate, usb, chain_conv, chain_aa);
+}
+
+static double chain_edge_db(const FilterPathDescriptor* p, double rate, double lo, double hi,
+                            int is_conv)
+{
+    const double step = rate >= 30000.0 ? 1.0 : 0.5;
+    double ref = 0.0;
+    for (double f = lo; f <= hi; f += step)
+    {
+        const double v = chain_resp(p, f, rate, 1, is_conv, 1);
+        if (v > ref) ref = v;
+    }
+    return db(chain_resp(p, hi, rate, 1, is_conv, 1) / ref);
+}
+
+static void chain_metrics(const FilterPathDescriptor* p, double rate, double lo, double hi,
+                          int is_conv, double* ripple, double* skirt, double* image, double* edge)
+{
+    chain_p = p;
+    chain_conv = is_conv;
+    chain_aa = 1;
+    metrics(chain_wrap, p, rate, lo, hi, 1, ripple, skirt, image);
+    *edge = chain_edge_db(p, rate, lo, hi, is_conv);
+}
+
+static double chain_top_rel(const FilterPathDescriptor* p, double rate, double fref, double ftop,
+                            int is_conv)
+{
+    const double ref = chain_resp(p, fref, rate, 1, is_conv, 1);
+    const double top = chain_resp(p, ftop, rate, 1, is_conv, 1);
+    return db(top / ref);
+}
+
+// Factory AGC defaults, as the digi bench states them before AudioAgc_AgcWdsp_Init() reads the
+// configuration the radio normally loads from EEPROM.
+static void agc_setup(void)
+{
+    agc_wdsp_conf.mode = AGC_WDSP_MODE_DEFAULT;
+    agc_wdsp_conf.slope = AGC_WDSP_SLOPE_DEFAULT;
+    agc_wdsp_conf.hang_enable = AGC_WDSP_HANG_ENABLE_DEFAULT;
+    agc_wdsp_conf.thresh = AGC_WDSP_THRESH_DEFAULT;
+    agc_wdsp_conf.hang_thresh = AGC_WDSP_HANG_THRESH_DEFAULT;
+    agc_wdsp_conf.hang_time = AGC_WDSP_HANG_TIME_DEFAULT;
+    agc_wdsp_conf.tau_hang_decay = AGC_WDSP_TAU_HANG_DECAY_DEFAULT;
+    agc_wdsp_conf.tau_decay[0] = AGC_WDSP_TAU_DECAY_0_DEFAULT;
+    agc_wdsp_conf.tau_decay[1] = AGC_WDSP_TAU_DECAY_1_DEFAULT;
+    agc_wdsp_conf.tau_decay[2] = AGC_WDSP_TAU_DECAY_2_DEFAULT;
+    agc_wdsp_conf.tau_decay[3] = AGC_WDSP_TAU_DECAY_3_DEFAULT;
+    agc_wdsp_conf.tau_decay[4] = AGC_WDSP_TAU_DECAY_4_DEFAULT;
+    agc_wdsp_conf.tau_decay[5] = AGC_WDSP_TAU_DECAY_5_DEFAULT;
+    AudioAgc_AgcWdsp_Init();
+}
+
+// The bench level used by the first chain table and a station 20 dB weaker.  The AGC is level
+// dependent, so the weaker pass is a check that its gain does not change the relative shape.
+static const double AGC_TONE_LEVEL_NOMINAL = 0.05;
+static const double AGC_TONE_LEVEL_WEAK = 0.005;
+
+// Two tones at the path's audio rate: an equal-amplitude reference in the passband and one at the
+// top edge, each carrying the stock/convolution filter's own image as well as its wanted response.
+// The AGC is the real firmware AGC; the anti-alias IIR after it is applied to each measured tone.
+// The result is the top-edge level relative to the reference, i.e. the relative shape the operator
+// hears after the AGC has settled.  `level` is the two-tone amplitude before the path filter.
+static double agc_top_rel(const FilterPathDescriptor* p, double base_rate, double fref, double ftop,
+                          int is_conv, double level)
+{
+    const double arate = 48000.0 / p->sample_rate_dec;
+    const int n = (int) (arate * 2.5);
+    const int start = (int) (arate * 1.0);
+    const int meas = (int) arate;
+    float32_t* buf = calloc((size_t) n, sizeof(float32_t));
+    if (buf == NULL) return 0.0;
+
+    const cd_t hr = is_conv ? conv_cresp(fref, base_rate) : stock_cresp(p, fref, base_rate, 1);
+    const cd_t hri = is_conv ? conv_cresp(-fref, base_rate) : stock_cresp(p, -fref, base_rate, 1);
+    const cd_t ht = is_conv ? conv_cresp(ftop, base_rate) : stock_cresp(p, ftop, base_rate, 1);
+    const cd_t hti = is_conv ? conv_cresp(-ftop, base_rate) : stock_cresp(p, -ftop, base_rate, 1);
+    const double A = level;     // before the filter; the AGC's own target is 4096 ADC counts
+
+    for (int i = 0; i < n; i++)
+    {
+        const double wr = 2.0 * M_PI * fref * i / arate;
+        const double wt = 2.0 * M_PI * ftop * i / arate;
+        const double x = 0.5 * A *
+            (hr.re * cos(wr) - hr.im * sin(wr) + hri.re * cos(wr) + hri.im * sin(wr) +
+             ht.re * cos(wt) - ht.im * sin(wt) + hti.re * cos(wt) + hti.im * sin(wt));
+        buf[i] = (float32_t) x;
+    }
+    if (p->pre_instance != NULL) iir_run(p->pre_instance, buf, n);
+
+    AudioAgc_ResetAgcWdsp();
+    AudioAgc_SetupAgcWdsp((float32_t) arate, false);
+    for (int i = 0; i < n; i += AUDIO_BLOCK_SIZE)
+    {
+        const int blk = (n - i) < AUDIO_BLOCK_SIZE ? (n - i) : AUDIO_BLOCK_SIZE;
+        for (int k = 0; k < blk; k++) buf[i + k] *= 4096.0f;
+        AudioAgc_RunAgcWdsp((int16_t) blk,
+            (float32_t (*)[AUDIO_BLOCK_SIZE]) (void*) (buf + i), false);
+        for (int k = 0; k < blk; k++) buf[i + k] /= 4096.0f;
+    }
+
+    double sr = 0.0, si = 0.0, st = 0.0, ti = 0.0;
+    for (int i = start; i < start + meas; i++)
+    {
+        const double wr = 2.0 * M_PI * fref * i / arate;
+        const double wt = 2.0 * M_PI * ftop * i / arate;
+        sr += buf[i] * cos(wr);
+        si -= buf[i] * sin(wr);
+        st += buf[i] * cos(wt);
+        ti -= buf[i] * sin(wt);
+    }
+    const double ar = 2.0 * hypot(sr, si) / meas;
+    const double at = 2.0 * hypot(st, ti) / meas;
+    free(buf);
+
+    double aa_ref = 1.0, aa_top = 1.0;
+    if (p->iir_instance != NULL && p->iir_instance->numStages > 0)
+    {
+        aa_ref = iir_mag(p->iir_instance, fref, 48000.0);
+        aa_top = iir_mag(p->iir_instance, ftop, 48000.0);
+    }
+    return db((at * aa_top) / (ar * aa_ref));
 }
 
 // what the convolution filter bills per sample, counted as the probe counts it: the transform's own
@@ -184,8 +438,81 @@ static double conv_ops_per_sample(double rate)
     return (fft + partition * blocks) / N;
 }
 
-int main(void)
+static int chain_main(void)
 {
+    agc_setup();
+    printf("id,name,width,rate,audio_rate,pre_stages,aa_stages,"
+           "stock_chain_edge,stock_chain_ripple,stock_chain_skirt,stock_chain_img,"
+           "conv_chain_edge,conv_chain_ripple,conv_chain_skirt,conv_chain_img,"
+           "stock_top_rel,conv_top_rel,stock_agc_top,conv_agc_top,"
+           "stock_agc_top_weak,conv_agc_top_weak\n");
+
+    for (int id = 1; id < AUDIO_FILTER_PATH_NUM; id++)
+    {
+        const FilterPathDescriptor* p = &FilterPathInfo[id];
+        if ((p->mode & ((1 << FILTER_MODE_SSB) | (1 << FILTER_MODE_CW))) == 0
+            || p->FIR_I_coeff_file == NULL || p->FIR_Q_coeff_file == NULL)
+        {
+            continue;
+        }
+
+        const double rate = p->FIR_I_coeff_file == i_rx_new_coeffs ? 48000.0 / p->sample_rate_dec : 48000.0;
+        const double audio_rate = 48000.0 / p->sample_rate_dec;
+        const double width = FilterInfo[p->id].width;
+        const double centre = p->offset ? p->offset : width / 2.0;
+        double lo = centre - width / 2.0, hi = centre + width / 2.0;
+        if (lo < 50.0) lo = 50.0;
+
+        setup(p, 1, (float32_t) rate);
+
+        double s_edge, s_rip, s_skirt, s_img;
+        double c_edge, c_rip, c_skirt, c_img;
+        chain_metrics(p, rate, lo, hi, 0, &s_rip, &s_skirt, &s_img, &s_edge);
+        chain_metrics(p, rate, lo, hi, 1, &c_rip, &c_skirt, &c_img, &c_edge);
+
+        // The chain cannot make the stock table's cutoff comparable: withhold the same three shape
+        // columns the main table withholds.  The edge and the AGC top level stay, because they are
+        // the diagnostic that says how far down the operator's top edge is.
+        const int stock_shape_valid = stock_edge_db(p, rate, lo, hi) > -6.0;
+        char s_rip_s[16], s_skirt_s[16], s_img_s[16], c_skirt_s[16];
+        if (stock_shape_valid)
+        {
+            snprintf(s_rip_s, sizeof s_rip_s, "%.2f", s_rip);
+            snprintf(s_skirt_s, sizeof s_skirt_s, "%.1f", s_skirt);
+            snprintf(s_img_s, sizeof s_img_s, "%.1f", s_img);
+        }
+        else
+        {
+            snprintf(s_rip_s, sizeof s_rip_s, "n/c");
+            snprintf(s_skirt_s, sizeof s_skirt_s, "n/c");
+            snprintf(s_img_s, sizeof s_img_s, "n/c");
+        }
+        if (c_skirt < 0.0) snprintf(c_skirt_s, sizeof c_skirt_s, "-");
+        else snprintf(c_skirt_s, sizeof c_skirt_s, "%.1f", c_skirt);
+
+        const double fref = floor((lo + hi) / 2.0);
+        const double s_top = chain_top_rel(p, rate, fref, hi, 0);
+        const double c_top = chain_top_rel(p, rate, fref, hi, 1);
+        const double s_agc = agc_top_rel(p, rate, fref, hi, 0, AGC_TONE_LEVEL_NOMINAL);
+        const double c_agc = agc_top_rel(p, rate, fref, hi, 1, AGC_TONE_LEVEL_NOMINAL);
+        const double s_agc_weak = agc_top_rel(p, rate, fref, hi, 0, AGC_TONE_LEVEL_WEAK);
+        const double c_agc_weak = agc_top_rel(p, rate, fref, hi, 1, AGC_TONE_LEVEL_WEAK);
+
+        printf("%d,%s,%.0f,%.0f,%.0f,%d,%d,%.2f,%s,%s,%s,%.2f,%.2f,%s,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+               id, p->name, width, rate, audio_rate,
+               p->pre_instance ? p->pre_instance->numStages : 0,
+               p->iir_instance ? p->iir_instance->numStages : 0,
+               s_edge, s_rip_s, s_skirt_s, s_img_s,
+               c_edge, c_rip, c_skirt_s, c_img,
+               s_top, c_top, s_agc, c_agc, s_agc_weak, c_agc_weak);
+    }
+    return 0;
+}
+
+int main(int argc, char** argv)
+{
+    if (argc > 1 && strcmp(argv[1], "--chain") == 0) return chain_main();
+
     // one geometry, so one bill per rate rather than per path
     const double rates[] = { 12000.0, 24000.0, 48000.0 };
     double conv_ops[3];
@@ -201,7 +528,7 @@ int main(void)
 
     printf("id,name,width,centre,rate,taps,stock_ops,stock_ops_s,stock_pct,"
            "conv_ops,conv_ops_s,conv_pct,"
-           "stock_ripple,stock_skirt,stock_img,conv_ripple,conv_skirt,conv_img\n");
+           "stock_ripple,stock_skirt,stock_img,stock_edge_db,conv_ripple,conv_skirt,conv_img\n");
 
     for (int id = 1; id < AUDIO_FILTER_PATH_NUM; id++)
     {
@@ -220,13 +547,14 @@ int main(void)
         double lo = centre - width / 2.0, hi = centre + width / 2.0;
         if (lo < 50.0) lo = 50.0;
 
+        const double stock_edge = stock_edge_db(p, rate, lo, hi);
+
         setup(p, 1, (float32_t) rate);
 
-        // The 3.6 kHz paths are the only 12 kHz paths whose band reaches above the 199-tap table's
-        // 3.5 kHz lowpass.  What the stock response measures at their top edge is that lowpass, not
-        // the path, and the post-demod IIR cannot restore it; the README marks those stock shape
-        // columns n/c rather than scoring the cutoff.  Their cost stays comparable.
-        const int stock_shape_valid = !(p->FIR_I_coeff_file == i_rx_new_coeffs && hi >= 3500.0);
+        // A stock table whose -6 dB point is inside the path's band is measuring its own cutoff at
+        // the top edge, not the path; the post-demod IIR cannot restore what the table removed.  Mark
+        // those shape columns n/c rather than scoring the cutoff.  Their cost stays comparable.
+        const int stock_shape_valid = stock_edge > -6.0;
 
         double s_rip = 0.0, s_skirt = 0.0, s_img = 0.0, c_rip, c_skirt, c_img;
         if (stock_shape_valid)
@@ -256,10 +584,10 @@ int main(void)
         const double s_pct = s_ops_s * 1.5 / 168e6 * 100.0, c_pct = c_ops_s * 1.5 / 168e6 * 100.0;
 
         printf("%d,%s,%.0f,%.0f,%.0f,%d,%.0f,%.0f,%.2f,%.0f,%.0f,%.2f,"
-               "%s,%s,%s,%.2f,%.1f,%.1f\n",
+               "%s,%s,%s,%.2f,%.2f,%.1f,%.1f\n",
                id, p->name, width, centre, rate, p->FIR_numTaps,
                s_ops, s_ops_s, s_pct, c_ops, c_ops_s, c_pct,
-               s_rip_s, s_skirt_s, s_img_s, c_rip, c_skirt, c_img);
+               s_rip_s, s_skirt_s, s_img_s, stock_edge, c_rip, c_skirt, c_img);
     }
     return 0;
 }

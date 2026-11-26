@@ -1850,9 +1850,9 @@ same grid for both filters. `ripple` is peak to peak over the band's interior, t
 width left out at each edge because a windowed sinc is 6 dB down at its nominal edges by design;
 `skirt` is -6 to -60 dB above the top edge; `image` is the worst level in the mirror of that same
 interior. A `-` in a skirt column means the filter measured is already 60 dB down at the band edge, so
-there is no skirt to measure; `n/c` in a stock column means the 199-tap table's cutoff falls inside the
-path's band, so the number would be that cutoff rather than the path's. The two 3.6 kHz rows are the only
-ones.
+there is no skirt to measure; `n/c` in a stock column means the stock table's -6 dB point falls inside
+the path's band, so the number would be that cutoff rather than the path's. The sweep prints the measured
+edge level in the CSV's `stock_edge_db` column.
 
 Three things the two-path comparison could not show.
 
@@ -1863,21 +1863,23 @@ Three things the two-path comparison could not show.
 the table. Measured, the pair costs 8.5 % of the core on the row that has been quoted all along, and
 15.3 % on every path from 3.8 kHz up; the convolution filter costs 3.8 % or 15.3 %. On the wide paths it
 is not cheaper in operations at all - 89 taps x 4 operations is 356 per sample, the same number the
-measured convolution bills - it is only much better shaped.
+measured convolution bills - it is only much better shaped.  Six of those wide rows use a table whose
+-6 dB point is already inside the path, so their stock shape columns are n/c below.
 
 **The skirt follows the rate, not the path.** It is one geometry, 1024 taps: 36.5 Hz from -6 to -60 dB on
 every 12 kHz path, and 145 Hz at 48 kHz, where the same taps are four times shorter in time. Against the
-pair that is 3.5x steeper on the narrow paths (127 Hz) and 7.9x on the wide ones (1143 Hz).
+pair that is 3.5x steeper on the narrow paths (127 Hz) and 7.9x on the comparable wide rows (1143 Hz at
+3.8-4.4 kHz).
 
 **Image rejection is where the two differ most, and the pair is worst just where its band is widest.**
--72 to -85 dB on the comparable 199-tap rows, but -22 to -56 dB from 3.8 kHz up: an 89-tap Hilbert pair
-at 48 kHz is poor quadrature at the top of a 10 kHz band. The convolution filter is -110 dB on all 62,
-because its floor comes from the design, not from the rate. The stock ripple figures on the wide rows (up
-to 11 dB) are the same story and the same caveat: they measure the IQ filter's own corner, which the real
-IIR after demodulation finishes, not what the operator hears - and the two 3.6 kHz rows are marked n/c
-because their IQ filter closes at 3.5 kHz, so the stock shape there is that cutoff rather than the path.
-For every comparable path, no post-demod filter can reject an image, so the image column does stand for
-both sides.
+-72 to -85 dB on the comparable 199-tap rows, but -24 to -56 dB on the comparable 89-tap rows from
+3.8 kHz up: an 89-tap Hilbert pair at 48 kHz is poor quadrature at the top of a 10 kHz band. The
+convolution filter is -110 dB on all 62, because its floor comes from the design, not from the rate. The
+stock ripple figures on the wide rows that remain comparable reach 1.8 dB; the largest, up to 11.1 dB,
+measure the IQ filter's own corner and are on rows marked n/c because their table is already rolling off
+inside the band. The post-demod IIR finishes the shape after that corner, but it cannot restore what the
+table removed; the rows whose table closes inside the path are marked n/c for that reason. For every
+comparable path, no post-demod filter can reject an image, so the image column does stand for both sides.
 
 The op counts here are steady state, the same convention as the first table above: 356 for the convolution
 filter at this geometry and 796 for the pair, times 1.5 cycles at 168 MHz - the same model as above.
@@ -1933,13 +1935,13 @@ filter at this geometry and 796 for the pair, times 1.5 cycles at 168 MHz - the 
 | 50 | LPF | 4000 | 2000 | 48 kHz | 1.60 | 1143.0 | -25.3 | 15.26 % | 0.00 | 145.0 | -110.4 | 15.26 % |
 | 51 | LPF | 4200 | 2100 | 48 kHz | 1.45 | 1143.0 | -26.6 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
 | 52 | LPF | 4400 | 2200 | 48 kHz | 1.31 | 1143.0 | -27.5 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
-| 53 | LPF | 4600 | 2300 | 48 kHz | 2.21 | 1028.0 | -25.9 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
-| 54 | LPF | 4800 | 2400 | 48 kHz | 3.89 | 828.0 | -25.7 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
-| 55 | LPF | 5000 | 2500 | 48 kHz | 1.39 | 1256.0 | -21.8 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
-| 56 | LPF | 5500 | 2750 | 48 kHz | 5.46 | 756.0 | -24.1 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
+| 53 | LPF | 4600 | 2300 | 48 kHz | n/c | n/c | n/c | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
+| 54 | LPF | 4800 | 2400 | 48 kHz | n/c | n/c | n/c | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 55 | LPF | 5000 | 2500 | 48 kHz | n/c | n/c | n/c | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 56 | LPF | 5500 | 2750 | 48 kHz | n/c | n/c | n/c | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
 | 57 | LPF | 6000 | 3000 | 48 kHz | 0.82 | 1264.0 | -26.6 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
-| 58 | LPF | 6500 | 3250 | 48 kHz | 3.86 | 790.0 | -29.5 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
-| 59 | LPF | 7000 | 3500 | 48 kHz | 11.13 | 290.0 | -32.7 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 58 | LPF | 6500 | 3250 | 48 kHz | n/c | n/c | n/c | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
+| 59 | LPF | 7000 | 3500 | 48 kHz | n/c | n/c | n/c | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
 | 60 | LPF | 7500 | 3750 | 48 kHz | 0.38 | 1250.0 | -36.3 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
 | 61 | LPF | 8000 | 4000 | 48 kHz | 0.11 | 1270.0 | -40.5 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
 | 62 | LPF | 8500 | 4250 | 48 kHz | 0.06 | 1270.0 | -45.6 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
@@ -1947,11 +1949,77 @@ filter at this geometry and 796 for the pair, times 1.5 cycles at 168 MHz - the 
 | 64 | LPF | 9500 | 4750 | 48 kHz | 0.01 | 1270.0 | -56.3 | 15.26 % | 0.00 | 145.0 | -110.3 | 15.26 % |
 | 65 | LPF | 10000 | 5000 | 48 kHz | 0.04 | 1270.0 | -56.3 | 15.26 % | 0.00 | 145.0 | -110.2 | 15.26 % |
 
-`n/c`: rows 46 and 47, the two 3.6 kHz paths.  The 199-tap 12 kHz table they use closes at 3.5 kHz, so the
-stock column would score that table's cutoff instead of the path; the post-demod IIR cannot restore what
-lies above 3.5 kHz, and the convolution filter is designed to the path's own 3.6 kHz edge.  The two sides
-would not be measuring the same band, so the three stock shape columns are withheld.  Their stock CPU
-figure is the real cost of the pair and stays.
+`n/c`: rows 46, 47, 53, 54, 55, 56, 58 and 59.  The sweep measures the stock response at each path's
+top edge relative to its passband, and withholds the three shape columns when that edge is at or below
+-6 dB - the table's own cutoff is inside the path, so the number would score the cutoff instead of the
+path.  The measured edges are -26.0, -75.4, -7.9, -12.3, -6.1, -17.1, -16.2 and -37.4 dB in that order.
+The tables are the 199-tap 12 kHz table on the 3.6 kHz rows, the 4.5 kHz table on 4.6/4.8, the 5 kHz
+table on 5.0/5.5 and the 6 kHz table on 6.5/7.0.  The nearest unmarked rows are 4.4 kHz at -4.8 dB,
+6.0 kHz at -5.6, 7.5 kHz at -5.5 and 10.0 kHz at -4.3; their -6 dB point is above the top edge, so they
+stay comparable.  The stock CPU figure is the real cost of the pair and stays on every row.  The chain
+sweep below measures the post-demod IIR and AGC; it does not change this list.
+
+#### What the operator hears: through the post-demod IIR and AGC
+
+The table above ends at the demodulated audio. The next stages are not common to every path: the
+3.6-4.8 kHz paths run a pre-AGC IIR at 12 kHz, the 5.0-7.5 kHz paths have none, and the 8.0-10 kHz
+paths only run an anti-alias IIR after the output interpolation. The WDSP AGC is common. The `--chain`
+sweep runs the real `audio_agc.c` at its factory settings (`AGC_WDSP_*_DEFAULT`), cold-started for each
+path, on an equal-amplitude passband reference and top-edge two-tone, after the path's pre-AGC IIR and
+then the post-AGC anti-alias IIR. The two-tone amplitude before the path filter is `A=0.05` (the bench
+level used below) and `A=0.005`, a station 20 dB weaker. The common decimation and
+interpolation FIRs are omitted: they multiply both sides equally. "Pre-IIR" and "anti-alias IIR" are
+stage counts; 0 means the path has none. All levels are dB relative to the passband reference;
+"stock deficit" is conv minus stock after the AGC, so a positive value means the stock top is lower.
+
+| path | pre-IIR | anti-alias IIR | stock top after IIR | conv top after IIR | stock top after AGC (nominal) | conv top after AGC (nominal) | stock deficit (nominal) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 46 3.6k LPF | 10 | 6 | -26.90 | -6.90 | -26.90 | -6.90 | 20.00 |
+| 47 3.6k BPF | 10 | 6 | -84.99 | -15.61 | -84.97 | -15.61 | 69.36 |
+| 53 4.6k LPF | 10 | 6 | -9.34 | -7.46 | -8.68 | -7.46 | 1.22 |
+| 54 4.8k LPF | 10 | 6 | -12.88 | -6.64 | -12.36 | -6.64 | 5.72 |
+| 55 5.0k LPF | 0 | 0 | -6.09 | -6.02 | -6.09 | -6.02 | 0.07 |
+| 56 5.5k LPF | 0 | 0 | -17.13 | -6.02 | -17.11 | -6.02 | 11.09 |
+| 58 6.5k LPF | 0 | 0 | -16.16 | -6.02 | -16.15 | -6.02 | 10.13 |
+| 59 7.0k LPF | 0 | 0 | -37.37 | -6.02 | -37.50 | -6.02 | 31.48 |
+| 52 4.4k LPF | 10 | 6 | -6.14 | -7.39 | -5.48 | -7.39 | -1.91 |
+| 57 6.0k LPF | 0 | 0 | -5.64 | -6.02 | -5.64 | -6.02 | -0.38 |
+| 60 7.5k LPF | 0 | 0 | -5.48 | -6.02 | -5.47 | -6.02 | -0.55 |
+| 65 10.0k LPF | 0 | 6 | -4.81 | -6.52 | -4.81 | -6.52 | -1.71 |
+
+The n/c list does not change. On 5.0, 5.5, 6.5 and 7.0 both IIR columns are zero: this is the same
+measurement as the main table, and the AGC moves the top by at most 0.2 dB. On 4.6 and 4.8 the IIRs
+apply to both sides, so the stock top falls with the conv top: -9.34/-12.88 dB against -7.46/-6.64 dB,
+and after the AGC the stock is still 1.2/5.7 dB below. The AGC's 0.5-0.7 dB of compression is the only
+movement and does not close the gap. On 3.6 the stock top is 20/69 dB down; the IIR cannot restore the
+3.5 kHz table cutoff.
+
+No new row becomes n/c. The 4.4 kHz chain top is -6.14 dB, below -6, but the stock table's own edge is
+-4.81 dB, the conv chain top is -7.39 dB, and the stock side is still above the conv. The n/c rule is
+the stock table's -6 dB point inside the path, not a post-demod edge that is common to both sides. The
+6.0, 7.5 and 10.0 kHz rows stay comparable: their stock chain tops are -5.64, -5.48 and -4.81 dB, all
+above the conv side.
+
+The second level is in the CSV as `stock_agc_top_weak` and `conv_agc_top_weak`. At 20 dB weaker the
+after-AGC tops reproduce the nominal columns on all twelve rows above to 0.01 dB; the largest movement
+over all 62 rows is 0.01 dB, and every stock deficit in the table is unchanged. That is what a single
+slow gain on the whole audio block should do: it changes the absolute level, not the ratio between two
+simultaneous tones. The n/c list is a property of the stock table, not the chain, so it does not move
+either. The weak run is a check on level dependence, not a second n/c criterion.
+
+The image ratio is unchanged. The IIRs and the AGC are real; at a given audio frequency they multiply
+the wanted and image components by the same real factor, so the ratio cannot improve. The stock rows
+that were n/c for shape stay n/c for image; on rows 53-59 the base stock image is still -22 to -33 dB
+against -110 dB for the convolution filter. The chain's stock image columns are n/c on the same n/c rows
+for the same reason the main table withholds them.
+
+What the operator hears is the same verdict with the level made comfortable. The AGC normalizes the
+overall level but cannot restore the missing top: after it, the stock n/c rows are 0.07 to 69 dB below
+the conv side at the top. The 5.0 kHz row is almost level-equal at the edge (0.07 dB), but its stock
+skirt is 1256 Hz and its image -21.8 dB against 145 Hz and -110.3 dB, which is why it is n/c. The 5.0,
+5.5, 6.5 and 7.0 rows have no IIR and are unchanged apart from at most 0.2 dB of AGC movement; the
+4.6 and 4.8 rows are 1.2 and 5.7 dB down after the AGC. The chain CSV is regenerated with
+`sh support/digi/convolution_graphs/build-sweep.sh "$PWD" /tmp/pathsweep-chain.csv --chain`.
 
 #### Minimum phase: why the delay column is not 53 ms
 
