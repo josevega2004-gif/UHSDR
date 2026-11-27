@@ -373,6 +373,12 @@ static Oscillator_ResultCodes_t Si5351a_PrepareNextFrequency(uint32_t freq, int 
 {
     UNUSED(temp_factor);
 
+#ifdef R928_PLUS
+	// The RS-928 Plus uses the Si5351A as its only LO.  Keep the output at
+	// 4x and select the phase-shifted CLK0/CLK1 path above the phase-90 limit.
+	si5351a_state.next.phasedOutput = freq > SI5351_MIN_FREQ_PHASE90;
+	freq *= 4;
+#else
 #ifdef TEST_QUADRATURE
 	// TODO: Replace this with a proper configurable switch point, the current limit is the minimum frequency we can do 90 degree phase
 	si5351a_state.next.phasedOutput = freq > SI5351_MIN_FREQ_PHASE90;
@@ -385,6 +391,7 @@ static Oscillator_ResultCodes_t Si5351a_PrepareNextFrequency(uint32_t freq, int 
 		// we are going to drive a johnson counter with 4x desired frequency
 		// to get two 1/4 clock aka 90 degrees phase shifted clocks with frequency freq
 	}
+#endif
 	return Si5351a_CalculateConfig(freq, &si5351a_state.next, &si5351a_state.current) == true?OSC_OK:OSC_TUNE_IMPOSSIBLE;
 }
 

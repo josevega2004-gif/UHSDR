@@ -217,6 +217,9 @@
 #define USE_OSC_SI570
 // Support for LO based on SI5351
 #define USE_OSC_SI5351A
+// RS-928 Plus variant: Si5351A-only LO.  Build with -DR928_PLUS; not enabled
+// by default because it changes the LO clocking, not the receive filter.
+//#define R928_PLUS
 // Support for DUC/DDC board
 #define USE_OSC_DUCDDC
 
