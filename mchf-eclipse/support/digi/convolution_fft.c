@@ -16,8 +16,10 @@
  *
  * CMSIS conventions, which the shipped code depends on: p1 is 2*fftLen floats as re,im pairs;
  * ifftFlag=1 is the inverse *including* the 1/fftLen normalisation; bitReverseFlag=1 asks for the
- * output in natural order.  A radix-2 iterative transform with a decimation-in-time stage order
- * matches all three.
+ * output in natural order.  0 asks for CMSIS's raw mixed-radix order on the output only; the
+ * input is natural for the inverse too.  This models that with the same p the linked
+ * armBitRevIndexTable* produces, so the raw-order option can be checked against the same FIR.  A
+ * radix-2 DIT transform supplies the natural order p starts from.
  */
 
 #include <stdint.h>
@@ -45,6 +47,27 @@ static void bit_reverse(float* d, int n)
             t = d[2 * i + 1];         d[2 * i + 1] = d[2 * j + 1]; d[2 * j + 1] = t;
         }
     }
+}
+
+// p(i) is the raw index holding natural bin i, decoded from armBitRevIndexTable{64,128,256}.
+// Only the convolution sizes use raw order; the minimum-phase design stays natural.
+static int raw_index(int i, int n)
+{
+    switch (n)
+    {
+    case 64:  return (i & 7) * 8 + (i >> 3);
+    case 128: return (i & 1) * 64 + ((i >> 1) & 7) * 8 + (i >> 4);
+    case 256: return (i & 3) * 64 + ((i >> 2) & 7) * 8 + (i >> 5);
+    default:  return i;
+    }
+}
+
+static void natural_to_raw(float* d, int n)
+{
+    float t[2 * 256];
+    if (n > 256) return;
+    for (int i = 0; i < n; i++) { t[2 * i] = d[2 * i]; t[2 * i + 1] = d[2 * i + 1]; }
+    for (int i = 0; i < n; i++) { int j = raw_index(i, n); d[2 * j] = t[2 * i]; d[2 * j + 1] = t[2 * i + 1]; }
 }
 
 static void transform(float* d, int n, int inverse)
@@ -114,6 +137,16 @@ const arm_cfft_instance_f32 arm_cfft_sR_f32_len4096 = { 4096, NULL, NULL, 0 };
 void arm_cfft_f32(const arm_cfft_instance_f32* S, float32_t* p1, uint8_t ifftFlag,
                   uint8_t bitReverseFlag)
 {
-    (void) bitReverseFlag;      // natural order is what this produces, and what the caller asks for
-    transform(p1, S->fftLen, ifftFlag != 0);
+    int n = S->fftLen;
+
+    if (bitReverseFlag)
+    {
+        transform(p1, n, ifftFlag != 0);
+        return;
+    }
+
+    // CMSIS reorders only the output; the input is natural for both directions.  The caller
+    // naturalises a raw product before the inverse.
+    transform(p1, n, ifftFlag != 0);
+    natural_to_raw(p1, n);
 }

@@ -32,9 +32,54 @@
 #error "FFT_CONVOLUTION_SIZE has to be 64, 128 or 256: those are the float32 CFFT instances this module is given, and a block is half of it.  It is not a sample rate - the IQ rate is IQ_SAMPLE_RATE, 48000, set by the codec clock."
 #endif
 
-// All transforms below ask CMSIS for natural order (bitReverseFlag = 1).  Its raw output is a
-// mixed-radix digit reversal, not the binary reversal a radix-2 DIF engine produces, so an
+// All transforms below ask CMSIS for natural order (bitReverseFlag = 1) by default.  Its raw output
+// is a mixed-radix digit reversal, not the binary reversal a radix-2 DIF engine produces, so an
 // __RBIT-indexed mask or gather is wrong here.
+//
+// CONVOLUTION_RAW_ORDER is the measured alternative: the mask and the worker's forward transform
+// stay in the raw order CMSIS produces, and the pointwise multiply below indexes both raw arrays
+// with p to accumulate directly in natural order.  The inverse therefore gets the natural-order
+// input it requires, and only its raw time output is gathered with the same p.  p(i) is the raw
+// index holding natural bin i; it was decoded from the linked armBitRevIndexTable{64,128,256}, not
+// assumed to be a binary reversal.  A table keeps the hot multiply loop to one load per bin.
+#ifdef CONVOLUTION_RAW_ORDER
+static const uint16_t conv_raw_order[FFT_CONVOLUTION_SIZE] = {
+#if FFT_CONVOLUTION_SIZE == 64
+      0,   8,  16,  24,  32,  40,  48,  56,   1,   9,  17,  25,  33,  41,  49,  57,
+      2,  10,  18,  26,  34,  42,  50,  58,   3,  11,  19,  27,  35,  43,  51,  59,
+      4,  12,  20,  28,  36,  44,  52,  60,   5,  13,  21,  29,  37,  45,  53,  61,
+      6,  14,  22,  30,  38,  46,  54,  62,   7,  15,  23,  31,  39,  47,  55,  63,
+#elif FFT_CONVOLUTION_SIZE == 128
+      0,  64,   8,  72,  16,  80,  24,  88,  32,  96,  40, 104,  48, 112,  56, 120,
+      1,  65,   9,  73,  17,  81,  25,  89,  33,  97,  41, 105,  49, 113,  57, 121,
+      2,  66,  10,  74,  18,  82,  26,  90,  34,  98,  42, 106,  50, 114,  58, 122,
+      3,  67,  11,  75,  19,  83,  27,  91,  35,  99,  43, 107,  51, 115,  59, 123,
+      4,  68,  12,  76,  20,  84,  28,  92,  36, 100,  44, 108,  52, 116,  60, 124,
+      5,  69,  13,  77,  21,  85,  29,  93,  37, 101,  45, 109,  53, 117,  61, 125,
+      6,  70,  14,  78,  22,  86,  30,  94,  38, 102,  46, 110,  54, 118,  62, 126,
+      7,  71,  15,  79,  23,  87,  31,  95,  39, 103,  47, 111,  55, 119,  63, 127,
+#elif FFT_CONVOLUTION_SIZE == 256
+      0,  64, 128, 192,   8,  72, 136, 200,  16,  80, 144, 208,  24,  88, 152, 216,
+     32,  96, 160, 224,  40, 104, 168, 232,  48, 112, 176, 240,  56, 120, 184, 248,
+      1,  65, 129, 193,   9,  73, 137, 201,  17,  81, 145, 209,  25,  89, 153, 217,
+     33,  97, 161, 225,  41, 105, 169, 233,  49, 113, 177, 241,  57, 121, 185, 249,
+      2,  66, 130, 194,  10,  74, 138, 202,  18,  82, 146, 210,  26,  90, 154, 218,
+     34,  98, 162, 226,  42, 106, 170, 234,  50, 114, 178, 242,  58, 122, 186, 250,
+      3,  67, 131, 195,  11,  75, 139, 203,  19,  83, 147, 211,  27,  91, 155, 219,
+     35,  99, 163, 227,  43, 107, 171, 235,  51, 115, 179, 243,  59, 123, 187, 251,
+      4,  68, 132, 196,  12,  76, 140, 204,  20,  84, 148, 212,  28,  92, 156, 220,
+     36, 100, 164, 228,  44, 108, 172, 236,  52, 116, 180, 244,  60, 124, 188, 252,
+      5,  69, 133, 197,  13,  77, 141, 205,  21,  85, 149, 213,  29,  93, 157, 221,
+     37, 101, 165, 229,  45, 109, 173, 237,  53, 117, 181, 245,  61, 125, 189, 253,
+      6,  70, 134, 198,  14,  78, 142, 206,  22,  86, 150, 214,  30,  94, 158, 222,
+     38, 102, 166, 230,  46, 110, 174, 238,  54, 118, 182, 246,  62, 126, 190, 254,
+      7,  71, 135, 199,  15,  79, 143, 207,  23,  87, 151, 215,  31,  95, 159, 223,
+     39, 103, 167, 231,  47, 111, 175, 239,  55, 119, 183, 247,  63, 127, 191, 255,
+#else
+#error "CONVOLUTION_RAW_ORDER needs the permutation for FFT_CONVOLUTION_SIZE 64, 128 or 256."
+#endif
+};
+#endif
 
 // The transform the minimum phase design works in.  It needs to be several times longer than the
 // response, and four times is what the design scratch in ConvolutionBuffers holds for any geometry:
@@ -941,7 +986,12 @@ void AudioDriver_SetConvolutionFilter (int nc, float32_t f_low, float32_t f_high
     //memcpy (&(a->maskgen[2 * a->size]), &(impulse[2 * a->size * i]), a->size * sizeof(complex));
 
     // do FFT
+#ifdef CONVOLUTION_RAW_ORDER
+    // the design's spectrum stays in the same raw order the worker will multiply
+    arm_cfft_f32(&CONVOLUTION_CFFT_INSTANCE, cbs.maskgen, 0, 0);
+#else
     arm_cfft_f32(&CONVOLUTION_CFFT_INSTANCE, cbs.maskgen, 0, 1);
+#endif
     // take input from maskgen and put output into fmask
     for(int idx = 0; idx < cbs.size * 4; idx++)
     {
@@ -1176,7 +1226,11 @@ void convolution_handle()
 	                // fftin --> one input buffer
 	                // fftout[nfor] --> changing output buffers !
 	                // FFT performed on fftin inplace
+#ifdef CONVOLUTION_RAW_ORDER
+	                arm_cfft_f32(&CONVOLUTION_CFFT_INSTANCE, cob.fftin, 0, 0);
+#else
 	                arm_cfft_f32(&CONVOLUTION_CFFT_INSTANCE, cob.fftin, 0, 1);
+#endif
 	                // copy output from fftin into current fftout buffer
 	                for (int idx = 0; idx < fft_conv_size * 2; idx++)
 	                {
@@ -1196,34 +1250,30 @@ void convolution_handle()
 	                }
 	                //fftw_execute (a->pcfor[a->buffidx]);
 
-	                k = cbs.buffidx;
-	                // fill the array accum with zeros
-	                for (int idx = 0; idx < fft_conv_size * 2; idx++)
+	                for (i = 0; i < fft_conv_size; i++)
 	                {
-	                	cob.accum[idx] = 0;
-	                }
-	                //memset (a->accum, 0, 2 * a->size * sizeof (complex));
-
-
-	                for (j = 0; j < cbs.nfor; j++)
-	                {
-	                  for (i = 0; i < fft_conv_size; i++)
-	                  {
-	                    // this sums up the complex multiply results for real and imaginary components
-	                    // stored in accum
-	                    cob.accum[2 * i + 0] += cob.fftout[k][2 * i + 0] * cob.fmask[j][2 * i + 0]
-				                              - cob.fftout[k][2 * i + 1] * cob.fmask[j][2 * i + 1];
-	                    cob.accum[2 * i + 1] += cob.fftout[k][2 * i + 0] * cob.fmask[j][2 * i + 1]
-											  + cob.fftout[k][2 * i + 1] * cob.fmask[j][2 * i + 0];
-	                  }
-	                  // k points to the next relevant fftout result
-	                  // it must flip over when 0 is reached
-	                  k = k -1;
-	                  if(k < 0)
-	                  {
-	                	  k = cbs.nfor - 1;
-	                  }
-	                  //k = (k + a->idxmask) & a->idxmask;
+#ifdef CONVOLUTION_RAW_ORDER
+	                    const int raw = conv_raw_order[i];
+#else
+	                    const int raw = i;
+#endif
+	                    float32_t acc_re = 0;
+	                    float32_t acc_im = 0;
+	                    k = cbs.buffidx;
+	                    for (j = 0; j < cbs.nfor; j++)
+	                    {
+	                        acc_re += cob.fftout[k][2 * raw + 0] * cob.fmask[j][2 * raw + 0]
+	                                - cob.fftout[k][2 * raw + 1] * cob.fmask[j][2 * raw + 1];
+	                        acc_im += cob.fftout[k][2 * raw + 0] * cob.fmask[j][2 * raw + 1]
+	                                + cob.fftout[k][2 * raw + 1] * cob.fmask[j][2 * raw + 0];
+	                        k = k - 1;
+	                        if (k < 0)
+	                        {
+	                            k = cbs.nfor - 1;
+	                        }
+	                    }
+	                    cob.accum[2 * i + 0] = acc_re;
+	                    cob.accum[2 * i + 1] = acc_im;
 	                }
 	                cbs.buffidx +=1;
 	                if(cbs.buffidx >= cbs.nfor)
@@ -1234,7 +1284,12 @@ void convolution_handle()
 	                // inverse FFT
 	                // input: accum
 	                // audio is in right half of the output buffer accum
+#ifdef CONVOLUTION_RAW_ORDER
+	                // the multiply loop above accumulated in natural order, so the inverse can take it
+	                arm_cfft_f32(&CONVOLUTION_CFFT_INSTANCE, cob.accum, 1, 0);
+#else
 	                arm_cfft_f32(&CONVOLUTION_CFFT_INSTANCE, cob.accum, 1, 1);
+#endif
 	                // fftw_execute (a->crev);
 	                // the input history was already restored from the block above, before the
 	                // inverse transform; taking it from fftin here would take the spectrum instead
@@ -1255,11 +1310,20 @@ void convolution_handle()
 	                //
 	                // which is also the difference between a 12 dB sideband score and the 88 dB the
 	                // 199-tap Hilbert pair already gives the receiver today.
+#ifdef CONVOLUTION_RAW_ORDER
+	                for(int idx = 0; idx < cbs.size; idx++)
+	                {
+	                    const int raw = conv_raw_order[idx];
+	                    block->samples[idx].real = cob.accum[2 * raw + 0];
+	                    block->samples[idx].imag = cob.accum[2 * raw + 1];
+	                }
+#else
 	                for(int idx = 0; idx < cbs.size; idx++)
 	                {
 	                	block->samples[idx].real = cob.accum[2 * idx + 0];
 	                	block->samples[idx].imag = cob.accum[2 * idx + 1];
 	                }
+#endif
 	                // these buffers now contain the bandpass filtered audio
 	                // which already has suppressed opposite sideband (if cutoff-frequencies have been set correctly for the BP filter)
 	                // so no further "demodulation" is necessary for SSB / CW
