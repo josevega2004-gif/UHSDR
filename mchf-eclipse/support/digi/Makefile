@@ -23,6 +23,9 @@
 #                if any after-AGC top or deficit moves more than 0.01 dB, the reference rise is not
 #                4-6 dB, the sweep loses one of the 62 paths, or the positive-deficit set changes.
 #                Needs no radio and no ARM toolchain.
+#   make chain-blocker-check  rerun --chain-blocker and pin the 62 paths x 31 levels, each path's
+#                mirror frequency, the 12 kHz loss ceiling and the wide-path blocker loss.
+#                Needs no radio and no ARM toolchain.
 #
 # drivers/audio/rtty.c and drivers/audio/audio_agc.c are compiled from the real sources: the
 # modem and the AGC the radio puts in front of it. The shim/ directory replaces only the headers
@@ -357,6 +360,11 @@ convolution_fft.o: convolution_fft.c $(SHIM)/arm_const_structs.h
 chain-levels-check:
 	@sh convolution_graphs/check-chain-levels.sh "$(abspath ../..)"
 
+# The README's blocker-through-AGC claim: the same check that pins the mirror frequency per path and
+# the loss ceilings.  It runs the blocker sweep itself, so a formatting change fails here too.
+chain-blocker-check:
+	@sh convolution_graphs/check-chain-blocker.sh "$(abspath ../..)"
+
 convolution-check: convolution_probe
 	@./convolution_probe
 
@@ -365,5 +373,6 @@ convolution-check: convolution_probe
 # probe's, and sitor_rx.o's) stay, because they also say which files are compiled as text and which
 # switches have to be re-run.
 ALL_DEPS = $(BENCH_OBJS:.o=.d) $(FW_OBJS:.o=.d) digi_bench.break-rx.d \
-           convolution_probe.d convolution_fft.d filter_paths.d $(FILTER_TABLE_OBJS:.o=.d)
+           convolution_probe.d convolution_fft.d filter_paths.d \
+           $(FILTER_TABLE_OBJS:.o=.d)
 -include $(ALL_DEPS)

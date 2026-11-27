@@ -272,6 +272,12 @@ jobs:
         working-directory: mchf-eclipse
         run: make -C support/digi chain-levels-check
 
+      # The blocker measurement pins the 62 x 31 grid, each path's mirror frequency, the 12 kHz loss
+      # ceiling and the wide-path blocker loss, so the README's blocker claim is checked too.
+      - name: Check the blocker-through-AGC measurement
+        working-directory: mchf-eclipse
+        run: make -C support/digi chain-blocker-check
+
       # The radio has never been able to write a file: the only code that reads a thumb drive is in the
       # bootloader, and it does not stay resident.  drivers/fs/fat32.c is the writer, and it is graded
       # by implementations that are not its own - mkfs.vfat makes the volume, fsck.vfat inspects what

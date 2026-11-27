@@ -32,6 +32,10 @@
 #error "FFT_CONVOLUTION_SIZE has to be 64, 128 or 256: those are the float32 CFFT instances this module is given, and a block is half of it.  It is not a sample rate - the IQ rate is IQ_SAMPLE_RATE, 48000, set by the codec clock."
 #endif
 
+// All transforms below ask CMSIS for natural order (bitReverseFlag = 1).  Its raw output is a
+// mixed-radix digit reversal, not the binary reversal a radix-2 DIF engine produces, so an
+// __RBIT-indexed mask or gather is wrong here.
+
 // The transform the minimum phase design works in.  It needs to be several times longer than the
 // response, and four times is what the design scratch in ConvolutionBuffers holds for any geometry:
 // the response is at most MAX_NO_OF_BLOCKS * SIZE / 2 taps and the scratch is a little over
@@ -568,10 +572,10 @@ uint16_t AudioDriver_ConvolutionInput(const float32_t* i, const float32_t* q, ui
         {
             // NaN is a possible answer from a broken filter, and this is the line whose whole job is to
             // be readable when something is wrong: casting a NaN to uint32_t is undefined and typically
-            // prints as a small plausible number.  Anything that is not a positive number reads as a
-            // saturating 999999, which says "that was not a sample".
+            // prints as a small plausible number.  A NaN reads as a saturating 999999, which says
+            // "that was not a sample"; a real zero level is a valid reading and stays zero.
             const float32_t ml = m * 1000.0f;
-            const uint32_t pk = !(ml > 0.0f) ? 999999u : (ml > 999999.0f ? 999999u : (uint32_t) ml);
+            const uint32_t pk = (ml >= 0.0f) ? (ml > 999999.0f ? 999999u : (uint32_t) ml) : 999999u;
             if (pk > conv_stat_peak_in) conv_stat_peak_in = pk;
         }
 #endif
@@ -663,10 +667,10 @@ uint16_t AudioDriver_ConvolutionOutput(float32_t* i, float32_t* q, uint16_t coun
         }
 #ifdef CONVOLUTION_LEVEL_STATS
         {
-            // as on the input side: a NaN must not be able to read as a zero.  See the note in
-            // AudioDriver_ConvolutionInput().
+            // as on the input side: a NaN must read as 999999, not as zero, while a real zero
+            // level stays zero.  See the note in AudioDriver_ConvolutionInput().
             const float32_t ml = m * 1000.0f;
-            const uint32_t pk = !(ml > 0.0f) ? 999999u : (ml > 999999.0f ? 999999u : (uint32_t) ml);
+            const uint32_t pk = (ml >= 0.0f) ? (ml > 999999.0f ? 999999u : (uint32_t) ml) : 999999u;
             if (pk > conv_stat_peak_out) conv_stat_peak_out = pk;
         }
 #endif
@@ -1058,10 +1062,10 @@ void AudioDriver_ConvolutionSetFilterPath(float32_t width_hz, float32_t offset_h
     // first block out of a new filter is filtered by the new masks and by nothing that came before them.
     conv_design_busy = false;
 #ifdef CONVOLUTION_MEASURE
-    // The frames the design itself refused, in the units the interrupt counts them: each is one 667 us
-    // slice that went out as silence because the seam was held.  The refill after the design is not in
-    // this number - nothing is refused once the seam is open - it is in the hole, which the interrupt
-    // closes when the new filter first hands a sample back.
+    // Frames refused by the seam.  With the current call site this is zero: the design runs inside
+    // AudioDriver_SetProcessingChain()'s af_disabled window, so the RX interrupt never offers a slice
+    // while conv_design_busy is set.  It counts only if a design is ever run with the RX path unmuted,
+    // which conv_design_busy now makes safe.  The refill after the design is in the hole, not here.
     const uint32_t meas_refused = conv_stat_busyin - meas_busyin_t0;
     conv_meas_busyin_last = meas_refused;
     conv_meas_max(&conv_meas_busyin_max, meas_refused);

@@ -48,6 +48,9 @@ FILENAME == chainfile {
 }
 levpass == 1 {
     id = $1
+    # Paths added after the documented 62 (currently the VARA 2750 path, id 87) are outside
+    # the pinned range this check uses, so they do not change its claim.
+    if (id < first || id > last) next
     if (!(id in name)) { name[id] = $2; npaths++ }
     if ($3 + 0 == 0) {
         s0[id] = $5 + 0; c0[id] = $6 + 0; d0[id] = $7 + 0
@@ -58,6 +61,7 @@ levpass == 1 {
 }
 {
     id = $1; L = $3 + 0
+    if (id < first || id > last) next
     if (!(L in rows)) nlev++
     rows[L]++
     seen[L, id]++
@@ -90,8 +94,8 @@ END {
         fail++
     }
 
-    # Walking the pinned range covers the missing-path case.  If the count is n_want and every id in
-    # the range is present, an id outside it cannot exist, so that needs no loop of its own.
+    # Walking the pinned range covers the missing-path case.  Ids outside it are skipped on input,
+    # so a later dedicated path cannot inflate npaths or nlev without changing this check.
     for (id = first; id <= last; id++) {
         if (!(id in name)) {
             printf "FAIL  row %d is missing from the sweep, the README documents %d paths\n", id, n_want

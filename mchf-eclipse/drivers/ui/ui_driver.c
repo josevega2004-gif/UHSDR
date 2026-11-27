@@ -8048,8 +8048,8 @@ void UiDriver_TaskHandler_MainTasks()
 					// the convolution pipeline, one line under the encoders: blocks that went into the
 					// worker and came out of it since this line was last drawn, blocks dropped for want of
 					// a free one, slices refused because the chain was never sized, and slices refused
-					// while a filter was being designed (b1 or more right after a filter change is normal,
-					// b growing while you are not touching the menu is not).  A radio with no audio and
+					// while a filter was being designed (0 with the design inside the chain mute; the host
+					// probe exercises the seam directly).  A radio with no audio and
 					// in==out==0 and nosetup growing is a setup that never ran; in climbing while out
 					// stays at 0 is a worker that is not running; out climbing while the operator hears
 					// nothing is downstream of all of this.
@@ -8084,9 +8084,9 @@ void UiDriver_TaskHandler_MainTasks()
 					//                    Its floor is one block of buffering (10.7 ms at 12 kHz, 2.7 ms at
 					//                    48 kHz), which a change pays even when the band is cached and nothing
 					//                    is designed, so read it against that floor rather than against zero.
-					//                    f is the frames of audio the design itself refused, at 667 us each:
-					//                    one frame is the most a design can take before it is a click rather
-					//                    than a pause, and the refill after it is in G, not in f.  The
+					//                    f is the frames of audio the design refused, at 667 us each (0 with
+					//                    the design inside the chain mute): one frame is the most a design can take
+					//                    before it is a click rather than a pause, and the refill after it is in G, not in f.  The
 					//                    microseconds fields cap at 99999, and a capped field here means "over
 					//                    99 ms", which is a fail on its own.
 					//   "W999 I999 O999" cost per block of the pipeline itself: W is the average PendSV worker

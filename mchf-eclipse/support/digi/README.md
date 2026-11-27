@@ -1760,6 +1760,12 @@ tail flush by the stream length (+16 per sample) and the pair run includes the f
 the window is still filling (-10 per sample). Steady state is what the radio pays on every sample it
 actually filters, so it is what every table here bills.
 
+A deferred-bit-reversal variant was tried and then reverted. `arm_cfft_f32()` in this firmware is
+CMSIS's mixed-radix radix-8 engine, and the raw order `bitReverseFlag=0` leaves is a mixed-radix
+digit reversal, not the binary reversal a radix-2 DIF engine produces. An `__RBIT`-indexed mask or
+output gather therefore scrambles the bins on the radio. The module uses natural order
+(`bitReverseFlag=1`) throughout, which is the path the host transform models.
+
 So the answer to "might it be better" is yes on both selectivity and cost per sample, at the price of
 about 3 ms of delay on SSB and 7 ms on CW at this geometry, 54 KiB of RAM and 44 KB of flash. The delay
 is a geometry choice: at `-DFFT_CONVOLUTION_SIZE=64` this filter is *earlier* than the Hilbert pair, see
@@ -1835,11 +1841,21 @@ The Hilbert row's corner at 3.5 kHz is not sloppiness on the radio's part - its 
 wider than the audio band and the post-demod filters finish the shape afterwards, so the two rows are not
 cut from the same cloth, and the harness prints the comparison instead of scoring it.
 
+A dedicated SSB path named "VARA" exists for VARA HF Tactical / 2750 Hz. It reuses the existing
+`AUDIO_2P9KHZ` bandwidth id (0-2900 Hz, centre 1450 Hz), so no stored filter number changes, and pairs it
+with the 3.2 kHz IIR instead of the 2.9 kHz one. That combination is flat to within 0.7 dB over the
+modem's 59 OFDM carriers from 140.6 to 2859.4 Hz. The 2.7 kHz path puts four of those carriers below
+-16 dB after the chain; this one puts all of them within 0.7 dB on both the normal and convolution sides.
+Convolution is designed from the path width, so selecting this path makes the filter wider; no separate
+build flag is involved. It is appended to `FilterPathInfo[]` as id 87, outside the 62 paths pinned by
+`check-chain-levels.sh` and `check-chain-blocker.sh`.
+
 #### Every path, not just the two
 
 The figures above are the 2.7 kHz SSB path; the geometry table's skirt and ripple are the 500 Hz CW
-one. `path_sweep.c` sweeps all 62 SSB and CW paths of `FilterPathInfo[]`, a shape and a bill for each, so
-that neither "it is the better filter" nor its cost rests on two examples:
+one. `path_sweep.c` sweeps all 63 SSB and CW paths of `FilterPathInfo[]` - the 62 documented ones plus
+the appended VARA path - a shape and a bill for each, so that neither "it is the better filter" nor its
+cost rests on two examples:
 
 ```sh
 sh support/digi/convolution_graphs/build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep.csv
@@ -2031,6 +2047,21 @@ not rise 4-6 dB from 0 to +20 dB (a dead AGC cannot pass), on a sweep that no lo
 documented paths (ids 4-65), or on any level whose positive-deficit set is not the eight n/c rows,
 so the paragraph above is a checked result rather than a remembered one.
 
+The equal two-tone sweep has both tones in the wanted band, so the AGC scales them together and no
+selectivity difference can appear. The operator case is a strong signal on the other sideband:
+`--chain-blocker` puts a fixed `A=1.0` tone (full scale, 26 dB above the bench level) at the stock
+filter's worst mirror frequency and sweeps the wanted station from `A=0.5` to `A=0.0005`. On the 12 kHz
+paths the stock mirror attenuates the blocker by 66-79 dB, and the wanted top moves by at most 0.05 dB.
+On the wide paths it attenuates the blocker by only 16-30 dB, against about 104 dB for the convolution
+filter, so the stock AGC is held down: the wanted top loses up to 9.1 dB (row 55 at -6 dB station,
+against 0.07 dB with no blocker). The convolution side's blocker loss is 0.00 dB throughout. Row 47's
+stock top is already 85 dB down, so its blocker loss is not meaningful; the other n/c rows lose up to
+9.1 dB on top of their own top-edge deficit. Run it with
+`sh support/digi/convolution_graphs/build-sweep.sh "$PWD" /tmp/pathsweep-blocker.csv --chain-blocker`.
+`make -C support/digi chain-blocker-check` reruns that table and fails if the 62 x 31 grid loses a row,
+a per-path mirror moves, the 12 kHz loss passes 0.05 dB, a wide row falls below 2 dB of blocker loss,
+row 55's peak leaves 9.0-9.2 dB, or the convolution loss moves off zero.
+
 The image ratio is unchanged. The IIRs and the AGC are real; at a given audio frequency they multiply
 the wanted and image components by the same real factor, so the ratio cannot improve. The stock rows
 that were n/c for shape stay n/c for image; on rows 53-59 the base stock image is still -22 to -33 dB
@@ -2168,7 +2199,7 @@ What those two commands produce, and what they cost in the image itself:
 
 | build | text | `.bss` | stack headroom at link time |
 |---|---|---|---|
-| measurement, geometry 256 | 422,753 | 149,524 | 40,748 |
+| measurement, geometry 256 | 422,873 | 149,524 | 40,748 |
 | same with `CONVOLUTION_OFF_FOR_TEST` | 378,265 | 141,212 | 49,056 |
 | same with `-DFFT_CONVOLUTION_SIZE=128` | 381,937 | 125,972 | 64,300 |
 | same with `-DCONVOLUTION_LINEAR_PHASE` | 381,401 | 149,524 | 40,748 |
@@ -2211,9 +2242,9 @@ address, or `.dfu` with DfuSeDemo and none.
 
 | line | what it is | the number that matters |
 |---|---|---|
-| `C999/999 d99 n99 b9` | blocks in/out since the last refresh, drops, unsized slices, slices refused in a design | `d` must stay 0 while you listen |
+| `C999/999 d99 n99 b9` | blocks in/out since the last refresh, drops, unsized slices, slices refused in a design (0 with the design inside the chain mute) | `d` must stay 0 while you listen |
 | `P i812 o799` | loudest sample in and out, x1000 | `o0` with `i` alive is the silent-filter case |
-| `G10700/10700 us f2` | the hole one change makes, queue flush to the first sample back: last / worst since reset, and frames the design itself refused | see the thresholds below |
+| `G10700/10700 us f2` | the hole one change makes, queue flush to the first sample back: last / worst since reset, and frames the design refused (0 on the radio, where the design runs inside the chain mute) | see the thresholds below |
 | `W123 I12 O13` | worker pass average, worst-case audio-interrupt slice in and out | `W` against 667 us |
 | `M999 K99 3/5` | where a design's time went (cepstrum / partitions), designs run over setups called | `3/5` says the cache works |
 | `U1234 F5678` | main stack bytes used at its deepest, bytes clear of `.bss` (`F!n`: n bytes below it) | `F` is the margin the linker cannot give |
@@ -2345,7 +2376,11 @@ above; and the sideband separation has to be at least what the Hilbert pair give
 the failing number. It compiles `audio_convolution.c` as text
 because the mask and history arrays are file static, and it needs no radio and no ARM toolchain.
 The FFT the host build gives it is `convolution_fft.c`, which is not trusted: the FIR comparison in
-check 2 uses no transform at all, so if that transform were wrong the two would disagree.
+check 2 uses no transform at all, so if that transform were wrong the two would disagree. It produces
+natural order, which is what the module asks `arm_cfft_f32()` for (`bitReverseFlag=1`). It does not
+model the raw order CMSIS leaves when the flag is 0 - that order is a mixed-radix digit reversal,
+while this engine is radix-2 - so a deferred-reversal change cannot be validated here. The FIR
+comparison is what proves the natural-order path the radio actually uses.
 
 CI: the `digi-bench` job in `.github/workflows/config-upgrade-check.yml` runs twenty steps - the
 filter design check (`support/digi/design_rtty_filters.py`), `make digi-bench` (the self checks),

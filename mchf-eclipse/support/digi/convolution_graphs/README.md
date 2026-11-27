@@ -14,14 +14,17 @@ python3 alternative_designs.py /tmp                                   # graph 7,
 sh build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep.csv            # every path, CSV
 sh build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep-chain.csv --chain  # + IIR/AGC
 sh build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep-levels.csv --chain-levels  # AGC level sweep
-sh check-chain-levels.sh /path/to/mchf-eclipse                        # the same sweep, asserted
+sh build-sweep.sh /path/to/mchf-eclipse /tmp/pathsweep-blocker.csv --chain-blocker  # mirror blocker + AGC
+sh check-chain-levels.sh /path/to/mchf-eclipse                        # the level sweep, asserted
+sh check-chain-blocker.sh /path/to/mchf-eclipse                       # the blocker sweep, asserted
 ```
 
 `path_sweep.c` is the exception to "these are the scripts behind the pictures": it draws nothing. It
-sweeps all 62 SSB and CW filter paths - the shape of each against the shape of the pair it would replace,
-and the arithmetic bill of each - and prints one CSV row per path. Those rows are the table in "Every
-path, not just the two" in `../README.md`; run it again before quoting that table, because the numbers
-there are the filter's and the path table's, not a drawing's.  Rows where the stock table's -6 dB point
+sweeps all 63 SSB and CW filter paths - the shape of each against the shape of the pair it would replace,
+and the arithmetic bill of each - and prints one CSV row per path. The 63rd is the appended VARA 2750
+path (id 87, 0-2900 Hz); the checks below still pin the 62 documented paths, ids 4-65. Those rows are the
+table in "Every path, not just the two" in `../README.md`; run it again before quoting that table, because
+the numbers there are the filter's and the path table's, not a drawing's.  Rows where the stock table's -6 dB point
 is inside the path print `n/c` for the stock shape: the stock side would measure that cutoff rather than
 the path.  The CSV's `stock_edge_db` column carries the measured edge level; these are the two 3.6 kHz rows
 and six of the wide rows.  Their cost is still printed and comparable.
@@ -43,6 +46,25 @@ also `make -C ../digi chain-levels-check`, checks the sweep's 0 dB row against `
 `stock_agc_ref` to rise 4-6 dB from 0 to +20 dB, and fails if any top or the deficit moves more than
 0.01 dB from nominal, if a level loses a row, if the sweep stops covering the 62 documented paths
 (ids 4-65), or if the positive-deficit set stops being the eight n/c rows.
+
+`--chain-blocker` is the operator case the equal two-tone passes cannot show: a strong tone at the
+stock filter's worst mirror frequency (the negative frequency whose image response is worst inside the
+wanted band) while the wanted reference and top edge sweep station level.  The blocker is fixed at
+`A=1.0` (full scale, 26 dB above the bench level); the wanted two-tone runs from `A=0.5` to `A=0.0005`
+on the same 31 point grid.  `blocker_hz` is the complex mirror (negative, so the audio image lands at
+its absolute value), `blocker_level` is `1.0`, `stock_blocker_db`/`conv_blocker_db` are its levels
+after the path filter and the pre-AGC IIR, `stock_agc_top_abs`/`conv_agc_top_abs` are the wanted top's
+absolute levels after the AGC, `stock_deficit` is conv minus stock (positive means the stock top is
+lower), and `stock_blocker_loss`/`conv_blocker_loss` subtract the same pass with no blocker.  On the
+12 kHz paths the stock mirror attenuates the blocker by 66-79 dB, so the wanted top moves by at most
+0.05 dB; the wide paths attenuate it by only 16-30 dB, against about 104 dB for the convolution filter,
+and the wanted top loses up to 9.1 dB (row 55 at -6 dB station).  The convolution loss stays 0.00 dB.
+The +20 dB wanted row is already at the AGC's input ceiling, as in the existing sweep, so the blocking
+result lives on the rows below it; the full grid stays in the table for comparison.  Row 47's stock top
+is already 85 dB down, so its blocker loss is not meaningful; it is the one row whose tiny residual
+moves the other way.  `check-chain-blocker.sh`, also `make -C ../digi chain-blocker-check`, reruns the
+table and pins the 62 x 31 grid, each path's mirror frequency, a 0.05 dB ceiling on the 12 kHz loss, at
+least 2 dB of loss on every wide row, and row 55's 9.1 dB peak (9.0-9.2 dB).
 
 `build.sh` compiles `compare.c` against the same shipped sources the probe uses - `audio_convolution.c`
 as text, the host FFT in `../convolution_fft.c`, and `FilterPathInfo[]` cut out of `audio_filter.c` - so

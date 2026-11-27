@@ -848,8 +848,16 @@ const FilterPathDescriptor FilterPathInfo[AUDIO_FILTER_PATH_NUM] =
         &FirRxInterpolate_4_10k, &IIR_aa_10k
     },
 
-
 */
+
+// VARA HF 2750: 140-2860 Hz audio inside a 0-2900 Hz LPF.  This is a dedicated path entry
+// reusing the existing 2.9 kHz bandwidth id, so no stored filter number changes.  The 3.2 kHz
+// IIR is flat over the whole OFDM carrier set, so convolution and the post filter agree.
+{
+    AUDIO_2P9KHZ, "VARA", FILTER_MASK_SSB, 1, IQ_RX_NUM_TAPS_HI, i_rx_new_coeffs, q_rx_new_coeffs, FIR_RX_DECIMATE_PTR,
+    RX_DECIMATION_RATE_12KHZ, &IIR_3k2_LPF,
+    &FirRxInterpolate, NULL, 1450
+},
 
 
 

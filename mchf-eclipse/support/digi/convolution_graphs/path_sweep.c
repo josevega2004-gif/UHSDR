@@ -26,6 +26,15 @@
 // half is not decoration: the factory AGC's knee sits a few dB below the bench level, so a sweep that
 // only went down would measure a fixed gain and say nothing about compression.
 //
+// `--chain-blocker` adds the operator case the equal two-tone cannot show: a fixed strong tone at the
+// stock filter's worst mirror frequency (the opposite sideband), through the same chain and AGC,
+// while the wanted station level sweeps.  The stock image rejection is only about 16-30 dB on the wide
+// paths, so that blocker reaches the AGC and holds the wanted top down; the convolution filter's image
+// rejection is about 104 dB, so its AGC sees essentially only the wanted station.  The 12 kHz paths
+// reject their mirror by about 66-79 dB, which is why the blocker has no visible effect there.  Each row
+// carries the blocker's level after each pre-AGC chain and the wanted top's absolute level after the
+// AGC.
+//
 //   ripple  peak-to-peak level over the band's interior, clamped at 50 Hz where the band reaches zero
 //           (the convolution filter's own low cut, and about where the Hilbert pair is 4 dB down), and
 //           with the outer tenth of the width at each edge left out: a windowed sinc is 6 dB down at
@@ -336,6 +345,22 @@ static double chain_top_rel(const FilterPathDescriptor* p, double rate, double f
     return db(top / ref);
 }
 
+// Run the real AGC over one already-filtered buffer, in the ADC-count units its interface expects.
+// Shared by the equal two-tone and blocker measurements so both see the same AGC state machine.
+static void agc_run_buffer(float32_t* buf, int n, double arate)
+{
+    AudioAgc_ResetAgcWdsp();
+    AudioAgc_SetupAgcWdsp((float32_t) arate, false);
+    for (int i = 0; i < n; i += AUDIO_BLOCK_SIZE)
+    {
+        const int blk = (n - i) < AUDIO_BLOCK_SIZE ? (n - i) : AUDIO_BLOCK_SIZE;
+        for (int k = 0; k < blk; k++) buf[i + k] *= 4096.0f;
+        AudioAgc_RunAgcWdsp((int16_t) blk,
+            (float32_t (*)[AUDIO_BLOCK_SIZE]) (void*) (buf + i), false);
+        for (int k = 0; k < blk; k++) buf[i + k] /= 4096.0f;
+    }
+}
+
 // Factory AGC defaults, as the digi bench states them before AudioAgc_AgcWdsp_Init() reads the
 // configuration the radio normally loads from EEPROM.
 static void agc_setup(void)
@@ -367,9 +392,11 @@ static const double AGC_TONE_LEVEL_WEAK = 0.005;
 // The result is the top-edge level relative to the reference, i.e. the relative shape the operator
 // hears after the AGC has settled.  `level` is the two-tone amplitude before the path filter.
 // `ref_db`, when asked for, is the reference tone's absolute level after the AGC, so a sweep can show
-// that the AGC really did hold its output rather than run out of gain at the weak end.
+// that the AGC really did hold its output rather than run out of gain at the weak end.  `top_db`, when
+// asked for, is the top's absolute level after the AGC and anti-alias IIR, which is what the blocker
+// table compares against its no-blocker pass.
 static double agc_top_rel(const FilterPathDescriptor* p, double base_rate, double fref, double ftop,
-                          int is_conv, double level, double* ref_db)
+                          int is_conv, double level, double* ref_db, double* top_db)
 {
     const double arate = 48000.0 / p->sample_rate_dec;
     const int n = (int) (arate * 2.5);
@@ -377,7 +404,11 @@ static double agc_top_rel(const FilterPathDescriptor* p, double base_rate, doubl
     const int meas = (int) arate;
     if (ref_db != NULL) *ref_db = 0.0;
     float32_t* buf = calloc((size_t) n, sizeof(float32_t));
-    if (buf == NULL) return 0.0;
+    if (buf == NULL)
+    {
+        fprintf(stderr, "path_sweep: out of memory\n");
+        exit(EXIT_FAILURE);
+    }
 
     const cd_t hr = side_cresp(p, fref, base_rate, is_conv);
     const cd_t hri = side_cresp(p, -fref, base_rate, is_conv);
@@ -395,17 +426,7 @@ static double agc_top_rel(const FilterPathDescriptor* p, double base_rate, doubl
         buf[i] = (float32_t) x;
     }
     iir_run(p->pre_instance, buf, n);
-
-    AudioAgc_ResetAgcWdsp();
-    AudioAgc_SetupAgcWdsp((float32_t) arate, false);
-    for (int i = 0; i < n; i += AUDIO_BLOCK_SIZE)
-    {
-        const int blk = (n - i) < AUDIO_BLOCK_SIZE ? (n - i) : AUDIO_BLOCK_SIZE;
-        for (int k = 0; k < blk; k++) buf[i + k] *= 4096.0f;
-        AudioAgc_RunAgcWdsp((int16_t) blk,
-            (float32_t (*)[AUDIO_BLOCK_SIZE]) (void*) (buf + i), false);
-        for (int k = 0; k < blk; k++) buf[i + k] /= 4096.0f;
-    }
+    agc_run_buffer(buf, n, arate);
 
     double sr = 0.0, si = 0.0, st = 0.0, ti = 0.0;
     for (int i = start; i < start + meas; i++)
@@ -421,9 +442,85 @@ static double agc_top_rel(const FilterPathDescriptor* p, double base_rate, doubl
     const double at = 2.0 * hypot(st, ti) / meas;
     free(buf);
     if (ref_db != NULL) *ref_db = db(ar);
+    if (top_db != NULL) *top_db = db(at * iir_mag(p->iir_instance, ftop, 48000.0));
 
     return db((at * iir_mag(p->iir_instance, ftop, 48000.0))
               / (ar * iir_mag(p->iir_instance, fref, 48000.0)));
+}
+
+// The blocker variant of agc_top_rel: the same wanted reference and top edge, plus one strong tone at
+// the complex mirror of fimg (an opposite-sideband input whose audio image lands at fimg).  `blk_db`
+// receives the blocker's level after the path filter and the pre-AGC IIR, relative to the blocker's
+// input, so a row shows directly how much of it each side lets through to the AGC.  The return value
+// is the wanted top's absolute level after the AGC: unlike the relative top, it falls when the
+// blocker captures the AGC's gain.  The blocker is generated from H(-fimg) alone; the wanted tones
+// keep the existing real-tone model with their own image terms.
+static double agc_blocker_top(const FilterPathDescriptor* p, double base_rate, double fref,
+                              double ftop, double fimg, int is_conv, double level,
+                              double blk_level, double* blk_db)
+{
+    const double arate = 48000.0 / p->sample_rate_dec;
+    const int n = (int) (arate * 2.5);
+    const int start = (int) (arate * 1.0);
+    const int meas = (int) arate;
+    float32_t* buf = calloc((size_t) n, sizeof(float32_t));
+    if (buf == NULL)
+    {
+        fprintf(stderr, "path_sweep: out of memory\n");
+        exit(EXIT_FAILURE);
+    }
+
+    const cd_t hr = side_cresp(p, fref, base_rate, is_conv);
+    const cd_t hri = side_cresp(p, -fref, base_rate, is_conv);
+    const cd_t ht = side_cresp(p, ftop, base_rate, is_conv);
+    const cd_t hti = side_cresp(p, -ftop, base_rate, is_conv);
+    const cd_t hb = side_cresp(p, -fimg, base_rate, is_conv);
+    if (blk_db != NULL)
+        *blk_db = db(cabs_cd(hb) * iir_mag(p->pre_instance, fimg, arate));
+
+    for (int i = 0; i < n; i++)
+    {
+        const double wr = 2.0 * M_PI * fref * i / arate;
+        const double wt = 2.0 * M_PI * ftop * i / arate;
+        const double wi = 2.0 * M_PI * fimg * i / arate;
+        const double wanted = 0.5 * level *
+            (hr.re * cos(wr) - hr.im * sin(wr) + hri.re * cos(wr) + hri.im * sin(wr) +
+             ht.re * cos(wt) - ht.im * sin(wt) + hti.re * cos(wt) + hti.im * sin(wt));
+        // H(-fimg) e^{-j w i}, made real: the mirror tone an opposite-sideband blocker leaves behind
+        const double blocker = blk_level * (hb.re * cos(wi) + hb.im * sin(wi));
+        buf[i] = (float32_t) (wanted + blocker);
+    }
+    iir_run(p->pre_instance, buf, n);
+    agc_run_buffer(buf, n, arate);
+
+    double st = 0.0, ti = 0.0;
+    for (int i = start; i < start + meas; i++)
+    {
+        const double wt = 2.0 * M_PI * ftop * i / arate;
+        st += buf[i] * cos(wt);
+        ti -= buf[i] * sin(wt);
+    }
+    const double at = 2.0 * hypot(st, ti) / meas;
+    free(buf);
+
+    return db(at * iir_mag(p->iir_instance, ftop, 48000.0));
+}
+
+// The positive frequency whose mirror -f is the stock filter's worst image response inside the
+// wanted band (the same guarded interior the image column scores).  A blocker there is the one the
+// stock filter leaks most strongly, so it is the mirror frequency worth injecting.
+static double stock_mirror_peak(const FilterPathDescriptor* p, double rate, double lo, double hi)
+{
+    const double step = rate >= 30000.0 ? 1.0 : 0.5;
+    const double guard = 0.1 * (hi - lo);
+    const double ilo = lo + guard, ihi = hi - guard;
+    double best = 0.0, bestf = ilo;
+    for (double f = ilo; f <= ihi; f += step)
+    {
+        const double v = stock_resp(p, -f, rate, 1);
+        if (v > best) { best = v; bestf = f; }
+    }
+    return bestf;
 }
 
 // what the convolution filter bills per sample, counted as the probe counts it: the transform's own
@@ -483,10 +580,50 @@ static int chain_levels_main(void)
         {
             const double level = AGC_TONE_LEVEL_NOMINAL * pow(10.0, rel / 20.0);
             double ref;
-            const double s = agc_top_rel(p, b.rate, fref, b.hi, 0, level, &ref);
-            const double c = agc_top_rel(p, b.rate, fref, b.hi, 1, level, NULL);
+            const double s = agc_top_rel(p, b.rate, fref, b.hi, 0, level, &ref, NULL);
+            const double c = agc_top_rel(p, b.rate, fref, b.hi, 1, level, NULL, NULL);
             printf("%d,%s,%.0f,%.6g,%.3f,%.3f,%.3f,%.2f\n",
                    id, p->name, rel, level, s, c, c - s, ref);
+        }
+    }
+    return 0;
+}
+
+// A strong blocker fixed at full scale (A=1.0, 26 dB above the bench level), so the wanted station can
+// fall below it without the blocker itself fading away or exceeding the converter's range.  The mirror
+// tone is a complex opposite-sideband signal whose audio image lands inside the wanted band.
+static const double AGC_BLOCKER_LEVEL = 1.0;
+
+static int chain_blocker_main(void)
+{
+    agc_setup();
+    printf("id,name,level_db,level,blocker_hz,blocker_level,"
+           "stock_blocker_db,conv_blocker_db,stock_agc_top_abs,conv_agc_top_abs,"
+           "stock_deficit,stock_blocker_loss,conv_blocker_loss\n");
+
+    for (int id = 1; id < AUDIO_FILTER_PATH_NUM; id++)
+    {
+        const FilterPathDescriptor* p = &FilterPathInfo[id];
+        if (!is_ssb_cw_path(p)) continue;
+
+        const path_band_t b = path_band(p);
+        setup(p, 1, (float32_t) b.rate);
+        const double fref = floor((b.lo + b.hi) / 2.0);
+        const double fimg = stock_mirror_peak(p, b.rate, b.lo, b.hi);
+
+        for (double rel = AGC_LEVEL_ABOVE_DB; rel >= -AGC_LEVEL_BELOW_DB; rel -= AGC_LEVEL_STEP_DB)
+        {
+            const double level = AGC_TONE_LEVEL_NOMINAL * pow(10.0, rel / 20.0);
+            double sb, cb, s_noblk, c_noblk;
+            const double s = agc_blocker_top(p, b.rate, fref, b.hi, fimg, 0, level, AGC_BLOCKER_LEVEL, &sb);
+            const double c = agc_blocker_top(p, b.rate, fref, b.hi, fimg, 1, level, AGC_BLOCKER_LEVEL, &cb);
+            // the same pass without the blocker, so the table can separate the blocker's cost from
+            // the path's own top-edge deficit
+            agc_top_rel(p, b.rate, fref, b.hi, 0, level, NULL, &s_noblk);
+            agc_top_rel(p, b.rate, fref, b.hi, 1, level, NULL, &c_noblk);
+            printf("%d,%s,%.0f,%.6g,%.0f,%.6g,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                   id, p->name, rel, level, -fimg, AGC_BLOCKER_LEVEL, sb, cb, s, c, c - s,
+                   s_noblk - s, c_noblk - c);
         }
     }
     return 0;
@@ -527,10 +664,10 @@ static int chain_main(void)
         const double fref = floor((b.lo + b.hi) / 2.0);
         const double s_top = chain_top_rel(p, b.rate, fref, b.hi, 0);
         const double c_top = chain_top_rel(p, b.rate, fref, b.hi, 1);
-        const double s_agc = agc_top_rel(p, b.rate, fref, b.hi, 0, AGC_TONE_LEVEL_NOMINAL, NULL);
-        const double c_agc = agc_top_rel(p, b.rate, fref, b.hi, 1, AGC_TONE_LEVEL_NOMINAL, NULL);
-        const double s_agc_weak = agc_top_rel(p, b.rate, fref, b.hi, 0, AGC_TONE_LEVEL_WEAK, NULL);
-        const double c_agc_weak = agc_top_rel(p, b.rate, fref, b.hi, 1, AGC_TONE_LEVEL_WEAK, NULL);
+        const double s_agc = agc_top_rel(p, b.rate, fref, b.hi, 0, AGC_TONE_LEVEL_NOMINAL, NULL, NULL);
+        const double c_agc = agc_top_rel(p, b.rate, fref, b.hi, 1, AGC_TONE_LEVEL_NOMINAL, NULL, NULL);
+        const double s_agc_weak = agc_top_rel(p, b.rate, fref, b.hi, 0, AGC_TONE_LEVEL_WEAK, NULL, NULL);
+        const double c_agc_weak = agc_top_rel(p, b.rate, fref, b.hi, 1, AGC_TONE_LEVEL_WEAK, NULL, NULL);
 
         printf("%d,%s,%.0f,%.0f,%.0f,%d,%d,%.2f,%s,%.2f,%.2f,%s,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
                id, p->name, b.width, b.rate, audio_rate,
@@ -545,6 +682,7 @@ static int chain_main(void)
 
 int main(int argc, char** argv)
 {
+    if (argc > 1 && strcmp(argv[1], "--chain-blocker") == 0) return chain_blocker_main();
     if (argc > 1 && strcmp(argv[1], "--chain-levels") == 0) return chain_levels_main();
     if (argc > 1 && strcmp(argv[1], "--chain") == 0) return chain_main();
 
