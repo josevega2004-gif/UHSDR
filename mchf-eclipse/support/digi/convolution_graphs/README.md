@@ -1,9 +1,29 @@
 # The convolution filter graphs
 
-These are the scripts that produced the eight PNGs the convolution section of
-`../README.md` was drawn from.  The images are not committed: they are 1.2 MB of output that
-regenerates from the tree in about a minute, and a graph that cannot be re-run against the code it
-describes is decoration.
+These are the scripts behind the convolution figures.  The four current stock-vs-convolution
+PNGs in `generated/` are committed; they regenerate from the tree in about a minute.  A graph that
+cannot be re-run against the code it describes is decoration.
+
+## Current stock-vs-convolution figures
+
+`plot_current.py` takes three CSVs: the committed 256/8 geometry, and the same-1024-tap 128/16 and
+64/32 geometries.  It draws the stock Hilbert/FIR pair as the baseline in every panel.
+
+```sh
+sh build.sh /path/to/mchf-eclipse /tmp/conv256.csv
+sh build.sh /path/to/mchf-eclipse /tmp/conv128x16.csv \
+  -DFFT_CONVOLUTION_SIZE=128 -DCONVOLUTION_MAX_NO_OF_BLOCKS=16
+sh build.sh /path/to/mchf-eclipse /tmp/conv64x32.csv \
+  -DFFT_CONVOLUTION_SIZE=64 -DCONVOLUTION_MAX_NO_OF_BLOCKS=32
+python3 plot_current.py generated /tmp/conv256.csv /tmp/conv128x16.csv /tmp/conv64x32.csv
+```
+
+Run these from this directory.  The 128/16 and 64/32 rows are geometry comparisons against the same
+1024-tap filter; they are not the release configurations.  Those are 256/8 and 128/8.
+
+## Older graph scripts
+
+The commands below describe the earlier experiments; the current reproducible set is above.
 
 ```sh
 sh build.sh /path/to/mchf-eclipse /tmp/compare.csv                     # sections 1-6
